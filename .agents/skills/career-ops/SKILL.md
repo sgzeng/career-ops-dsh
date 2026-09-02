@@ -8,7 +8,7 @@ description: >-
 arguments: mode
 user_invocable: true
 user-invocable: true
-argument-hint: "[scan | discover | deep | pdf | latex | latex-tex | cover | email | add | expand | eu-swe | oferta | ofertas | apply | batch | tracker | agent-inbox | pipeline | contacto | training | project | interview-prep | interview | interview/plan | interview/practice | interview/debrief | interview-redflag | patterns | offer-prep | titles | upskill | followup | reply-watch | outcome | update]"
+argument-hint: "[scan | discover | li-posts | deep | pdf | latex | latex-tex | cover | email | add | expand | eu-swe | oferta | ofertas | apply | batch | tracker | agent-inbox | pipeline | contacto | training | project | interview-prep | interview | interview/plan | interview/practice | interview/debrief | interview-redflag | patterns | offer-prep | titles | upskill | followup | reply-watch | outcome | update]"
 license: MIT
 ---
 
@@ -72,6 +72,7 @@ Determine the mode from `$mode`:
 | `apply` | `apply` |
 | `scan` | `scan` |
 | `discover` | `discover` |
+| `li-posts` | `li-posts` |
 | `batch` | `batch` |
 | `patterns` | `patterns` |
 | `offer-prep` | `offer-prep` |
@@ -153,6 +154,7 @@ Available commands:
   /career-ops apply     → Live application assistant (reads form + generates answers)
   /career-ops scan      → Scan portals and discover new offers
   /career-ops discover  → Resolve a company list to scannable ATS boards + append to portals.yml (zero-token)
+  /career-ops li-posts  → LinkedIn hiring-manager posts via your logged-in Chrome (manual; Mac only) — see ../linkedin_post.md
   /career-ops batch     → Batch processing with parallel workers
   /career-ops patterns  → Analyze rejection patterns and improve targeting
   /career-ops offer-prep → Read a received offer/contract with the candidate: clause walk + lawyer questions (not legal advice)
@@ -184,7 +186,7 @@ Applies to: `auto-pipeline`, `oferta`, `ofertas`, `pdf`, `contacto`, `apply`, `p
 
 Read `modes/_profile.md` (if exists) + `modes/_custom.md` (if exists) + `modes/{mode}.md`
 
-Applies to: `tracker`, `agent-inbox`, `deep`, `interview-prep`, `interview`, `regional/eu-swe`, `interview/plan`, `interview/practice`, `interview/debrief`, `latex`, `latex-tex`, `training`, `project`, `patterns`, `titles`, `upskill`, `followup`, `reply-watch`, `outcome`, `cover`, `email`, `add`, `offer-prep`, `discover`
+Applies to: `tracker`, `agent-inbox`, `deep`, `interview-prep`, `interview`, `regional/eu-swe`, `interview/plan`, `interview/practice`, `interview/debrief`, `latex`, `latex-tex`, `training`, `project`, `patterns`, `titles`, `upskill`, `followup`, `reply-watch`, `outcome`, `cover`, `email`, `add`, `offer-prep`, `discover`, `li-posts`
 
 ### Modes delegated to subagent
 
