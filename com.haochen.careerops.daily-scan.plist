@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs daily-scan.sh every day at 19:30 local time, 30 minutes before the
+  Claude scheduled task at 20:00 (8pm) picks up the results.
+
+  Install (in your own Mac terminal):
+
+    cp ~/work/job_hunting/career-ops/com.haochen.careerops.daily-scan.plist \
+       ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.haochen.careerops.daily-scan.plist 2>/dev/null
+    launchctl load  ~/Library/LaunchAgents/com.haochen.careerops.daily-scan.plist
+
+  Check it:   launchctl list | grep careerops
+  Run it now: launchctl start com.haochen.careerops.daily-scan
+  Remove it:  launchctl unload ~/Library/LaunchAgents/com.haochen.careerops.daily-scan.plist
+
+  If the Mac is asleep at 19:30, launchd runs the job at the next wake.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.haochen.careerops.daily-scan</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/haochen/work/job_hunting/career-ops/daily-scan.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/haochen/work/job_hunting/career-ops</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>19</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/haochen/work/job_hunting/career-ops/data/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/haochen/work/job_hunting/career-ops/data/logs/launchd.err</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
