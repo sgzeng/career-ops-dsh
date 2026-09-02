@@ -11,7 +11,11 @@
  * it prints the entries it WOULD add (pendingEntries) and writes nothing. Pass
  * --write to explicitly opt in to appending them to portals.yml `tracked_companies`
  * (a text splice that preserves the file's comments and formatting; deduped;
- * idempotent; atomic temp-then-rename). Companies that don't resolve —
+ * idempotent; atomic temp-then-rename). When a resolved company already has a
+ * `scan_method: websearch` entry in `tracked_companies` (the slug just hadn't
+ * been probed yet), --write comments that stale twin out as it splices the real
+ * board in — otherwise the company gets scanned twice, once free by scan.mjs and
+ * once at token cost by the WebSearch pass (#2891). Companies that don't resolve —
  * JS-rendered portals, non-standard slugs, or Workday without a hint — are
  * flagged for manual follow-up instead of being silently dropped.
  *
@@ -480,6 +484,43 @@ export function insertIntoTrackedCompanies(fileText, snippets) {
   return before + block + after;
 }
 
+/**
+ * Comment out any `tracked_companies` entry whose `- name:` matches one of
+ * `names` (case-insensitively) AND whose body carries `scan_method: websearch`.
+ * Used by --write when a resolved board supersedes a not-yet-probed websearch
+ * twin: the real entry is spliced in and the stale one is left in place as a
+ * comment (an audit trail, and a hint for anyone re-adding it) rather than
+ * deleted. Every other byte of the file is preserved.
+ *
+ * An entry runs from its `- name:` line to — but not including — the next list
+ * item (`- `), the next top-level key, or a column-0 comment. Indented `key:`
+ * lines and indented comments stay in the entry; a blank line ends it.
+ *
+ * @param {string} fileText
+ * @param {string[]} names
+ * @returns {{text: string, retired: string[]}}
+ */
+export function retireWebsearchTwins(fileText, names) {
+  const want = new Set(names.map((n) => String(n || '').trim().toLowerCase()));
+  if (!want.size) return { text: fileText, retired: [] };
+
+  const retired = [];
+  // One entry: the `- name:` line plus following lines that are neither a new
+  // list item, a new top-level key, a column-0 comment, nor blank.
+  const entryRe = /^([ \t]*)-[ \t]+name:[ \t]*(.+?)[ \t]*$(?:\n(?![ \t]*-[ \t]|[^ \t\n#]|#|[ \t]*$).*$)*/gm;
+
+  const text = fileText.replace(entryRe, (block, _indent, rawName) => {
+    const name = rawName.replace(/^["']|["']$/g, '').trim().toLowerCase();
+    if (!want.has(name)) return block;
+    if (!/^[ \t]*scan_method:[ \t]*websearch[ \t]*$/m.test(block)) return block;
+    retired.push(rawName.replace(/^["']|["']$/g, '').trim());
+    const commented = block.replace(/^(?=[ \t]*\S)/gm, '# ');
+    return `#   ↓ superseded by a resolved ATS board (discover-ats.mjs) — kept for audit\n${commented}`;
+  });
+
+  return { text, retired };
+}
+
 // ── Network functions (separated from pure logic, like vc-portfolios.mjs) ──
 
 /**
@@ -706,11 +747,18 @@ export async function runDiscovery(companies, { vendors = VENDOR_ORDER, ctx, con
 
 // ── Summary output ────────────────────────────────────────────────────
 
-function printSummary({ resolved, unresolved, duplicates }) {
+function printSummary({ resolved, unresolved, duplicates, superseded = [], retired = [], written = false }) {
   console.log(`\n${'='.repeat(78)}`);
   console.log('  ATS Discovery — career-ops');
   console.log(`  resolved: ${resolved.length} | unresolved: ${unresolved.length} | duplicates skipped: ${duplicates.length}`);
   console.log(`${'='.repeat(78)}\n`);
+
+  if (written && retired.length) {
+    console.log(`  Commented out ${retired.length} stale scan_method: websearch entr${retired.length === 1 ? 'y' : 'ies'}: ${retired.join(', ')}\n`);
+  } else if (!written && superseded.length) {
+    console.log(`  ${superseded.length} resolved compan${superseded.length === 1 ? 'y' : 'ies'} still on scan_method: websearch: ${superseded.join(', ')}`);
+    console.log('  Re-run with --write to promote them and comment the placeholders out.\n');
+  }
 
   if (resolved.length) {
     console.log('  ' + 'Company'.padEnd(24) + 'Vendor'.padEnd(12) + 'Jobs'.padEnd(7) + 'Board');
@@ -865,6 +913,18 @@ function runSelfTest() {
   const noHeader = insertIntoTrackedCompanies('title_filter:\n  positive: [a]\n', [snippet]);
   check(/tracked_companies:/.test(noHeader) && noHeader.includes('- name: New'), 'insert appends fresh block when header missing');
 
+  // retireWebsearchTwins
+  const twinDoc = 'tracked_companies:\n  - name: Real Co\n    careers_url: https://jobs.lever.co/real\n  - name: Semgrep\n    careers_url: https://semgrep.dev/careers\n    scan_method: websearch\n  - name: Keep Me\n    careers_url: https://x\n    scan_method: websearch\n\njob_boards:\n  - name: Foo\n';
+  const rt = retireWebsearchTwins(twinDoc, ['semgrep']);
+  check(rt.retired.length === 1 && rt.retired[0] === 'Semgrep', 'retireWebsearchTwins reports the retired name');
+  check(rt.text.includes('#   - name: Semgrep') && rt.text.includes('#     scan_method: websearch'), 'retireWebsearchTwins comments every line of the entry');
+  check(rt.text.includes('  - name: Keep Me\n    careers_url: https://x\n    scan_method: websearch'), 'retireWebsearchTwins leaves other websearch entries untouched');
+  check(rt.text.includes('  - name: Real Co\n    careers_url: https://jobs.lever.co/real'), 'retireWebsearchTwins leaves real entries untouched');
+  check(rt.text.includes('job_boards:\n  - name: Foo\n'), 'retireWebsearchTwins preserves the trailing block');
+  check(retireWebsearchTwins(twinDoc, ['real co']).retired.length === 0, 'retireWebsearchTwins skips a name that is not a websearch entry');
+  check(retireWebsearchTwins(twinDoc, []).text === twinDoc, 'retireWebsearchTwins is a no-op with no names');
+  check(yaml.load(rt.text).tracked_companies.some((e) => e.name === 'Keep Me') && !yaml.load(rt.text).tracked_companies.some((e) => e.name === 'Semgrep'), 'retired twin disappears from parsed tracked_companies, siblings remain');
+
   // empty block
   const emptyBlock = insertIntoTrackedCompanies('tracked_companies:\njob_boards:\n  - name: Foo\n', [snippet]);
   check(emptyBlock.indexOf('- name: New') < emptyBlock.indexOf('job_boards:'), 'insert handles empty block');
@@ -1012,20 +1072,41 @@ async function main() {
       warnings.push(`portals.yml: could not parse for dedupe — ${err.message}`);
     }
   }
-  const { fresh, duplicates } = dedupeAgainstPortals(resolved, existingEntries);
+  // A `scan_method: websearch` entry is a placeholder for a company whose slug
+  // wasn't probed yet — not a real board. Dedupe against the REAL entries only,
+  // so a company that finally resolves is promoted instead of being skipped as a
+  // "duplicate" of its own placeholder. The placeholders it supersedes are then
+  // commented out on --write (#2891).
+  const websearchNames = new Set(
+    existingEntries
+      .filter((e) => e && typeof e.name === 'string' && String(e.scan_method).toLowerCase() === 'websearch')
+      .map((e) => e.name.trim().toLowerCase()),
+  );
+  const realEntries = existingEntries.filter(
+    (e) => !(e && String(e.scan_method).toLowerCase() === 'websearch'),
+  );
+  const { fresh, duplicates } = dedupeAgainstPortals(resolved, realEntries);
   const snippets = fresh.map(renderPortalEntry);
+  const supersededNames = fresh
+    .map((m) => String(m.name || '').trim())
+    .filter((n) => websearchNames.has(n.toLowerCase()));
 
   // Data-contract rule: portals.yml is a USER-LAYER file and is NEVER written
   // unless the user explicitly opts in with --write. The default is preview —
   // we print the entries we WOULD add and touch nothing. This mirrors how the
   // rest of career-ops treats user files (see DATA_CONTRACT.md).
   let written = false;
+  let retiredTwins = [];
   if (opts.write && fresh.length && existsSync(PORTALS_PATH)) {
     const current = readFileSync(PORTALS_PATH, 'utf-8');
+    // Comment out any not-yet-probed websearch placeholder this run supersedes,
+    // THEN splice the real board in — same text so the next byte is preserved.
+    const { text: pruned, retired } = retireWebsearchTwins(current, supersededNames);
+    retiredTwins = retired;
     // Write-to-temp-then-rename: atomic on the same filesystem, so a crash
     // mid-write can't leave the user's portals.yml truncated.
     const tmpPath = `${PORTALS_PATH}.tmp-${process.pid}`;
-    writeFileSync(tmpPath, insertIntoTrackedCompanies(current, snippets), 'utf-8');
+    writeFileSync(tmpPath, insertIntoTrackedCompanies(pruned, snippets), 'utf-8');
     renameSyncWithRetry(tmpPath, PORTALS_PATH);
     written = true;
   } else if (opts.write && fresh.length && !existsSync(PORTALS_PATH)) {
@@ -1040,14 +1121,22 @@ async function main() {
     duplicatesSkipped: duplicates.length,
     fresh: fresh.length,
     freshWritten: written ? fresh.length : 0,
+    supersededWebsearchTwins: supersededNames,
+    retiredWebsearchTwins: retiredTwins,
     written,
     previewOnly: !written,
     portalsPath: PORTALS_PATH,
     warnings,
   };
 
+  if (supersededNames.length && !written) {
+    warnings.push(
+      `${supersededNames.length} resolved compan${supersededNames.length === 1 ? 'y has' : 'ies have'} a stale scan_method: websearch entry (${supersededNames.join(', ')}) — re-run with --write to promote and comment it out`,
+    );
+  }
+
   if (opts.summary) {
-    printSummary({ resolved, unresolved, duplicates });
+    printSummary({ resolved, unresolved, duplicates, superseded: supersededNames, retired: retiredTwins, written });
   } else {
     const out = { metadata, resolved, unresolved };
     // Show the would-be YAML whenever we didn't write it (preview, or --write

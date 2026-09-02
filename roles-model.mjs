@@ -1,0 +1,352 @@
+#!/usr/bin/env node
+/**
+ * roles-model.mjs — shared row model for the roles web view.
+ *
+ * Builds one array of "role rows" from every file the daily pipeline writes:
+ *   - data/applications.md   (tracker; evaluated/applied/... rows)
+ *   - reports/*.md           (Machine Summary YAML — full schema, not just pct)
+ *   - data/pipeline.md       (## Pending — scan hits with no tracker row yet)
+ *   - data/scan-history.tsv  (posted_at / portal / location join, by URL)
+ *
+ * Both render-roles-html.mjs (static, one-shot) and serve-roles.mjs (live
+ * server) call buildRoleModel() so there is exactly one parsing path.
+ *
+ * Canonical status → UI tab mapping lives here too (see STATUS_TO_TAB) so the
+ * renderer, the server and roles-actions.mjs agree on the same seven tabs.
+ */
+
+import { readFileSync, existsSync, readdirSync } from 'fs';
+import path from 'path';
+import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+import { normalizeUrlForDedup } from './scan.mjs';
+
+// ── Tab model ────────────────────────────────────────────────────────
+// UI tab id → canonical states.yml labels it shows (case-sensitive, matches
+// the Status cell written by set-status.mjs).
+export const TAB_STATUSES = {
+  new: [],                       // pipeline.md rows with no tracker entry
+  evaluated: ['Evaluated'],
+  submitted: ['Applied'],
+  pending: ['Responded', 'Interview'],
+  rejected: ['Rejected'],
+  offered: ['Offer', 'Hired'],
+  archived: ['Discarded'],
+  deleted: ['SKIP'],
+};
+// Canonical state written when a UI action moves a row into a given tab.
+// (pending has two source statuses; "move to Pending" always means Interview —
+// Responded is a state the row can only arrive at via reply-watch, not a
+// deliberate manual move.)
+export const TAB_TARGET_STATUS = {
+  evaluated: 'Evaluated',
+  submitted: 'Applied',
+  pending: 'Interview',
+  rejected: 'Rejected',
+  offered: 'Offer',
+  archived: 'Discarded',
+};
+
+export function tabForStatus(status) {
+  const s = String(status || '').trim();
+  for (const [tab, statuses] of Object.entries(TAB_STATUSES)) {
+    if (statuses.includes(s)) return tab;
+  }
+  return null;
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+
+function clampPct(n) {
+  if (n == null || !Number.isFinite(+n)) return null;
+  return Math.max(0, Math.min(100, Math.round(+n)));
+}
+
+// ── reports/*.md — full Machine Summary schema ──────────────────────
+// Every key documented in batch/batch-prompt.md's Machine Summary fence,
+// plus the header fields the renderer already used (URL, Archetype, Remote).
+function parseReport(file) {
+  let text;
+  try { text = readFileSync(file, 'utf-8'); } catch { return {}; }
+  const out = {};
+
+  const url = text.match(/^\*\*URL:\*\*\s*(\S+)/m);
+  if (url && /^https?:\/\//.test(url[1])) out.url = url[1];
+
+  const arche = text.match(/^\*\*Archetype:\*\*\s*(.+)$/m);
+  if (arche) out.archetype = arche[1].trim();
+
+  const legHeader = text.match(/^\*\*Legitimacy:\*\*\s*(.+)$/m);
+  if (legHeader) out.legitimacy_tier = legHeader[1].trim();
+
+  const workAuthHeader = text.match(/^\*\*Work Auth:\*\*\s*(.+)$/m);
+  if (workAuthHeader) out.work_auth_display = workAuthHeader[1].trim();
+
+  const remoteRow = text.match(/\|\s*\*\*Remote\*\*\s*\|\s*([^|]+?)\s*\|/);
+  if (remoteRow) {
+    out.loc = remoteRow[1].trim();
+    out.remote = /remote/i.test(remoteRow[1]);
+  }
+
+  const ms = text.match(/##\s*Machine Summary\s*\n+```(?:ya?ml)?\n([\s\S]*?)\n```/);
+  if (ms) {
+    const y = ms[1];
+    const scalar = (k) => {
+      const m = y.match(new RegExp('^' + k + ':\\s*(.+)$', 'm'));
+      return m ? m[1].trim().replace(/^["']|["']$/g, '') : null;
+    };
+    const list = (k) => {
+      const m = y.match(new RegExp('^' + k + ':\\s*\\n((?:\\s*-\\s*.*\\n?)+)', 'm'));
+      if (!m) return [];
+      return m[1].split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.startsWith('-'))
+        .map((l) => l.replace(/^-\s*/, '').replace(/^["']|["']$/g, '').trim())
+        .filter(Boolean);
+    };
+    const nullable = (v) => (v == null || v === 'null' ? null : v);
+
+    const pct = scalar('pct');
+    if (pct != null && /^\d+$/.test(pct)) out.pct = +pct;
+    out.legitimacy_tier = out.legitimacy_tier || nullable(scalar('legitimacy_tier'));
+    out.archetype = out.archetype || nullable(scalar('archetype'));
+    out.final_decision = nullable(scalar('final_decision'));
+    out.risk_level = nullable(scalar('risk_level'));
+    out.confidence = nullable(scalar('confidence'));
+    out.next_action = nullable(scalar('next_action'));
+    out.work_auth = nullable(scalar('work_auth'));
+    out.via = nullable(scalar('via'));
+    out.reports_to = nullable(scalar('reports_to'));
+    const comp = nullable(scalar('advertised_comp'));
+    if (comp) out.advertised_comp = comp;
+    out.hard_stops = list('hard_stops');
+    out.soft_gaps = list('soft_gaps');
+    out.discard_reasons = list('discard_reasons');
+    const strengths = list('top_strengths');
+    if (strengths.length) out.why = strengths[0];
+    out.risk_summary = {
+      legitimacy: nullable(scalar('legitimacy')),
+      classification: nullable(scalar('classification')),
+      culture: nullable(scalar('culture')),
+      interview_redflags: nullable(scalar('interview_redflags')),
+      ai_infra: nullable(scalar('ai_infra')),
+      ai_screening_disclosure: nullable(scalar('ai_screening_disclosure')),
+    };
+  }
+  return out;
+}
+
+function resolveReport(reportCell, reportsDir, root) {
+  const m = String(reportCell || '').match(/\(([^)]+\.md)\)/) || String(reportCell || '').match(/(\d{3})/);
+  if (m && m[1] && m[1].endsWith('.md')) {
+    const p = path.resolve(root, m[1].replace(/^\.\.\//, ''));
+    if (existsSync(p)) return p;
+    const alt = path.join(reportsDir, path.basename(m[1]));
+    if (existsSync(alt)) return alt;
+  }
+  const num = (String(reportCell || '').match(/(\d{2,3})/) || [])[1];
+  if (num && existsSync(reportsDir)) {
+    const pad = num.padStart(3, '0');
+    const hit = readdirSync(reportsDir).find((f) => f.startsWith(pad + '-') && f.endsWith('.md'));
+    if (hit) return path.join(reportsDir, hit);
+  }
+  return null;
+}
+
+// ── data/pipeline.md — ## Pending entries with no tracker row yet ──
+// Format (formatPipelineOffer, scan.mjs): `- [ ] {url} | {company} | {title}
+// [| {location} [| {compensation}]] [| posted: YYYY-MM-DD] [| trust: ...] [| note: ...]`
+function parsePendingPipeline(text) {
+  const rows = [];
+  const lines = text.split('\n');
+  let inPending = false;
+  for (const line of lines) {
+    if (/^##\s*(Pending|Pendientes)\s*$/.test(line.trim())) { inPending = true; continue; }
+    if (/^##\s*(Processed|Procesadas)\s*$/.test(line.trim())) { inPending = false; continue; }
+    if (!inPending) continue;
+    const m = line.match(/^-\s*\[\s*\]\s*(.+)$/);
+    if (!m) continue;
+    const cells = m[1].split('|').map((s) => s.trim()).filter((s) => s !== '');
+    if (!cells.length || !/^https?:\/\//.test(cells[0])) continue;
+    const url = cells[0];
+    const company = cells[1] || '';
+    const title = cells[2] || '';
+    let location = '';
+    let posted = null;
+    for (const c of cells.slice(3)) {
+      const pm = c.match(/^posted:\s*(\d{4}-\d{2}-\d{2})/i);
+      if (pm) { posted = pm[1]; continue; }
+      if (/^(trust|note):/i.test(c)) continue;
+      if (!location) location = c;
+    }
+    if (!company || !title) continue;
+    rows.push({ url, company, role: title, loc: location, posted_at: posted });
+  }
+  return rows;
+}
+
+// ── data/scan-history.tsv — join by normalized URL ──────────────────
+function loadScanHistory(text) {
+  const byUrl = new Map();
+  const lines = text.split('\n');
+  for (const line of lines.slice(1)) {
+    if (!line.trim()) continue;
+    const [url, firstSeen, portal, title, company, status, location, , postedAt] = line.split('\t');
+    if (!url) continue;
+    const key = normalizeUrlForDedup(url);
+    byUrl.set(key, { firstSeen, portal, title, company, status, location, postedAt });
+  }
+  return byUrl;
+}
+
+/**
+ * @param {object} opts
+ * @param {string} opts.root - career-ops root dir (script location).
+ * @param {string} [opts.trackerPath] - defaults to data/applications.md
+ * @param {string} [opts.reportsDir] - defaults to reports/
+ * @param {string} [opts.pipelinePath] - defaults to data/pipeline.md
+ * @param {string} [opts.scanHistoryPath] - defaults to data/scan-history.tsv
+ * @returns {{rows: object[], generatedAt: string}}
+ */
+export function buildRoleModel(opts = {}) {
+  const root = opts.root || path.dirname(new URL(import.meta.url).pathname);
+  const TRACKER = opts.trackerPath || path.join(root, 'data/applications.md');
+  const REPORTS = opts.reportsDir || path.join(root, 'reports');
+  const PIPELINE = opts.pipelinePath || path.join(root, 'data/pipeline.md');
+  const SCAN_HISTORY = opts.scanHistoryPath || path.join(root, 'data/scan-history.tsv');
+
+  const scanHistory = existsSync(SCAN_HISTORY)
+    ? loadScanHistory(readFileSync(SCAN_HISTORY, 'utf-8'))
+    : new Map();
+
+  const rows = [];
+
+  // -- Tracker rows (evaluated / submitted / pending / rejected / offered / archived / deleted)
+  if (existsSync(TRACKER)) {
+    const text = readFileSync(TRACKER, 'utf-8');
+    const lines = text.split('\n');
+    const colmap = resolveColumns(lines);
+    for (const line of lines) {
+      const r = parseTrackerRow(line, colmap);
+      if (!r) continue;
+      if (!r.company || !r.role) continue;
+
+      const tab = tabForStatus(r.status);
+      if (!tab) continue; // unrecognized status — skip rather than misclassify
+
+      const urlCellIdx = colmap.url;
+      const url = urlCellIdx != null ? (line.split('|').map((s) => s.trim())[urlCellIdx] || '') : '';
+
+      const reportPath = r.report && r.report !== '—' ? resolveReport(r.report, REPORTS, root) : null;
+      const meta = reportPath ? parseReport(reportPath) : {};
+
+      const notePct = (r.notes.match(/\bpct[:\s]+(\d{1,3})\b/i) || [])[1];
+      const score1to5 = parseFloat(r.score);
+      const pct = clampPct(
+        meta.pct ?? (notePct != null ? +notePct : null)
+          ?? (Number.isFinite(score1to5) ? Math.round(score1to5 * 20) : null),
+      );
+
+      // Fallback for rows with no report yet: our own backfill (and manual
+      // Notes entries) use the `pct N · team · why` convention — pull team/why
+      // out of Notes rather than showing blank columns.
+      let noteTeam = '';
+      let noteWhy = '';
+      const noteParts = r.notes.split(' · ');
+      if (noteParts.length >= 3 && /^pct\s+\d+$/i.test(noteParts[0].trim())) {
+        noteTeam = noteParts[1].trim();
+        noteWhy = noteParts.slice(2).join(' · ').trim();
+      }
+
+      const hist = url ? scanHistory.get(normalizeUrlForDedup(url)) : null;
+
+      rows.push({
+        id: `tracker:${r.num}`,
+        trackerNum: r.num,
+        tab,
+        status: r.status,
+        co: r.company,
+        team: meta.archetype || noteTeam,
+        role: r.role,
+        loc: meta.loc || hist?.location || '—',
+        remote: meta.remote ? 1 : 0,
+        sal: meta.advertised_comp || '—',
+        pct,
+        score: r.score,
+        url: url || meta.url || null,
+        via: meta.via || (r.via || null),
+        why: meta.why || noteWhy,
+        legitimacy_tier: meta.legitimacy_tier || null,
+        work_auth: meta.work_auth_display || meta.work_auth || null,
+        risk_level: meta.risk_level || null,
+        confidence: meta.confidence || null,
+        final_decision: meta.final_decision || null,
+        hard_stops: meta.hard_stops || [],
+        soft_gaps: meta.soft_gaps || [],
+        discard_reasons: meta.discard_reasons || [],
+        next_action: meta.next_action || null,
+        reports_to: meta.reports_to || null,
+        risk_summary: meta.risk_summary || null,
+        notes: r.notes,
+        report: r.report && r.report !== '—' ? r.report : null,
+        pdf: r.pdf || '',
+        date: r.date,
+        posted_at: hist?.postedAt || null,
+        source: hist?.portal || null,
+        isNew: r.date === today() ? 1 : 0,
+        age: r.date ? daysBetween(r.date, today()) : null,
+      });
+    }
+  }
+
+  // -- Pipeline-only rows: scan hits with no tracker entry yet.
+  if (existsSync(PIPELINE)) {
+    const pending = parsePendingPipeline(readFileSync(PIPELINE, 'utf-8'));
+    // Skip any pending URL that already has a tracker row (already evaluated,
+    // just not yet moved out of pipeline.md by the pipeline mode).
+    const trackerUrls = new Set(rows.filter((r) => r.url).map((r) => normalizeUrlForDedup(r.url)));
+    for (const p of pending) {
+      const key = normalizeUrlForDedup(p.url);
+      if (trackerUrls.has(key)) continue;
+      const hist = scanHistory.get(key);
+      rows.push({
+        id: `pipeline:${key}`,
+        trackerNum: null,
+        tab: 'new',
+        status: null,
+        co: p.company,
+        team: '',
+        role: p.role,
+        loc: p.loc || hist?.location || '—',
+        remote: /remote/i.test(p.loc || '') ? 1 : 0,
+        sal: '—',
+        pct: null,
+        score: null,
+        url: p.url,
+        via: null,
+        why: '',
+        legitimacy_tier: null,
+        work_auth: null,
+        risk_level: null,
+        confidence: null,
+        final_decision: null,
+        hard_stops: [],
+        soft_gaps: [],
+        discard_reasons: [],
+        next_action: null,
+        reports_to: null,
+        risk_summary: null,
+        notes: '',
+        report: null,
+        pdf: '',
+        date: p.posted_at || hist?.firstSeen || null,
+        posted_at: p.posted_at || hist?.postedAt || null,
+        source: hist?.portal || null,
+        isNew: (p.posted_at || hist?.firstSeen) === today() ? 1 : 0,
+        age: (p.posted_at || hist?.firstSeen) ? daysBetween(p.posted_at || hist.firstSeen, today()) : null,
+      });
+    }
+  }
+
+  return { rows, generatedAt: today() };
+}
