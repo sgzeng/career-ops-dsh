@@ -19,6 +19,9 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'fs';
 import path from 'path';
 import { normalizeUrlForDedup } from './scan.mjs';
 import { buildRoleModel, TAB_TARGET_STATUS } from './roles-model.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
+import { openTrackerTransaction, rebuildRow } from './tracker-utils.mjs';
+import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 
 const ROOT = path.dirname(new URL(import.meta.url).pathname);
 const TRACKER = path.join(ROOT, 'data/applications.md');
@@ -135,6 +138,212 @@ export function blacklistCompany(id, reason, rowsOverride) {
   return { id, action: 'blacklist-company', company: row.co };
 }
 
+// ── manual cell edits from the roles web view ────────────────────────
+// The roles page shows one flat row per opening, but its columns come from four
+// different files. A manual edit is routed to whichever file actually owns that
+// field for that row:
+//   co / role      → the tracker column        (locked tracker transaction)
+//   team / why     → the report Machine Summary, else the `pct N · team · why`
+//                    convention in the tracker Notes cell
+//   sal            → the report `advertised_comp:` scalar
+//   loc / remote   → the report `| **Remote** |` row, else scan-history.tsv
+//   (pipeline-only rows: co / role / loc live on the pipeline.md line itself)
+// Reports and pipeline.md / scan-history.tsv have no Node-side lock (same
+// best-effort rationale as the block below); the tracker edits go through the
+// same locked, atomic path as set-status.mjs.
+const EDITABLE_FIELDS = new Set(['co', 'role', 'team', 'why', 'sal', 'loc', 'remote']);
+
+export async function editField(id, field, rawValue) {
+  if (!EDITABLE_FIELDS.has(field)) {
+    throw Object.assign(new Error(`Field "${field}" is not editable`), { code: 'BAD_FIELD' });
+  }
+  const value = String(rawValue ?? '').replace(/[\r\n]+/g, ' ').replace(/\|/g, '/').trim();
+  const { rows } = buildRoleModel({ root: ROOT });
+  const row = findRow(rows, id);
+
+  if (row.trackerNum == null) return editPipelineField(row, field, value);
+
+  if (field === 'co' || field === 'role') {
+    return editTrackerColumn(row.trackerNum, field === 'co' ? 'company' : 'role', value);
+  }
+  if (field === 'loc' || field === 'remote') return editLocation(row, field, value);
+
+  // team / why / sal
+  const reportPath = row.reportFile ? path.join(ROOT, 'reports', row.reportFile) : null;
+  if (reportPath && existsSync(reportPath)) return editReportField(reportPath, field, value, row);
+  if (field === 'team' || field === 'why') return editTrackerNote(row.trackerNum, field, value, row);
+  throw new Error(`"${field}" has no editable source for this row yet (no evaluation report)`);
+}
+
+async function editTrackerColumn(num, key, value) {
+  const tx = await openTrackerTransaction(TRACKER);
+  try {
+    const lines = tx.read().split('\n');
+    const colmap = resolveColumns(lines);
+    if (colmap[key] == null) throw new Error(`Tracker has no ${key} column`);
+    let hit = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const r = parseTrackerRow(lines[i], colmap);
+      if (r && r.num === num) { hit = i; break; }
+    }
+    if (hit < 0) throw new Error(`Tracker row #${num} not found`);
+    const parts = lines[hit].split('|').map((s) => s.trim());
+    parts[colmap[key]] = value || '—';
+    lines[hit] = rebuildRow(parts);
+    tx.replace(lines.join('\n'));
+  } finally {
+    tx.close();
+  }
+  return { id: `tracker:${num}`, field: key, value };
+}
+
+async function editTrackerNote(num, field, value, row) {
+  const tx = await openTrackerTransaction(TRACKER);
+  try {
+    const lines = tx.read().split('\n');
+    const colmap = resolveColumns(lines);
+    let hit = -1;
+    let r = null;
+    for (let i = 0; i < lines.length; i++) {
+      const rr = parseTrackerRow(lines[i], colmap);
+      if (rr && rr.num === num) { hit = i; r = rr; break; }
+    }
+    if (hit < 0) throw new Error(`Tracker row #${num} not found`);
+    const parts = (r.notes || '').split(' · ');
+    let pctSeg;
+    let team;
+    let why;
+    if (parts.length >= 3 && /^pct\s+\d+$/i.test(parts[0].trim())) {
+      pctSeg = parts[0].trim();
+      team = parts[1].trim();
+      why = parts.slice(2).join(' · ').trim();
+    } else if (row.pct != null) {
+      pctSeg = `pct ${row.pct}`;
+      team = row.team || '';
+      why = row.why || '';
+    } else {
+      throw new Error('No report and no "pct N · team · why" note to edit — evaluate the role first');
+    }
+    if (field === 'team') team = value; else why = value;
+    const cells = lines[hit].split('|').map((s) => s.trim());
+    cells[colmap.notes] = [pctSeg, team, why].join(' · ');
+    lines[hit] = rebuildRow(cells);
+    tx.replace(lines.join('\n'));
+  } finally {
+    tx.close();
+  }
+  return { id: `tracker:${num}`, field, value };
+}
+
+function editReportField(file, field, value, row) {
+  let text = readFileSync(file, 'utf-8');
+  const before = text;
+  const q = (s) => `"${String(s).replace(/"/g, "'")}"`;
+  if (field === 'team') {
+    text = replaceYamlScalar(text, 'archetype', value ? q(value) : 'null');
+    text = text.replace(/^\*\*Archetype:\*\*[ \t]*.*$/m, () => `**Archetype:** ${value || '—'}`);
+  } else if (field === 'sal') {
+    text = replaceYamlScalar(text, 'advertised_comp', value ? q(value) : 'null');
+  } else if (field === 'why') {
+    if (!value) throw new Error('"Why it fits" cannot be blank');
+    if (/^top_strengths:[ \t]*\[[ \t]*\][ \t]*$/m.test(text)) {
+      text = text.replace(/^top_strengths:[ \t]*\[[ \t]*\][ \t]*$/m, () => `top_strengths:\n  - ${q(value)}`);
+    } else {
+      text = text.replace(/^(top_strengths:[ \t]*\n[ \t]*-[ \t]*).*$/m, (_m, pre) => pre + q(value));
+    }
+  }
+  if (text === before) throw new Error(`Could not find the ${field} field in ${path.basename(file)}`);
+  writeFileSync(file, text, 'utf-8');
+  return { id: row.id, field, value };
+}
+
+// The replacement values come from user input, so every .replace() here uses a
+// function replacer — a string replacer would treat `$1`, `$&`, `$\`` etc. in
+// the typed text as pattern references.
+function replaceYamlScalar(text, key, literal) {
+  const re = new RegExp(`^(${key}:[ \\t]*).*$`, 'm');
+  if (re.test(text)) return text.replace(re, (_m, pre) => pre + literal);
+  return text.replace(/(##\s*Machine Summary\s*\n+```(?:ya?ml)?\n)/, (_m, pre) => `${pre}${key}: ${literal}\n`);
+}
+
+function editLocation(row, field, value) {
+  const file = row.reportFile ? path.join(ROOT, 'reports', row.reportFile) : null;
+  if (file && existsSync(file)) {
+    const text = readFileSync(file, 'utf-8');
+    const re = /(\|\s*\*\*Remote\*\*\s*\|\s*)([^|]+?)(\s*\|)/;
+    const m = text.match(re);
+    if (m) {
+      const cur = m[2].trim();
+      const next = field === 'loc'
+        ? (value || '—')
+        : (value === 'yes'
+          ? (/remote/i.test(cur) ? cur : `Remote${cur && cur !== '—' ? ` — ${cur}` : ''}`)
+          : (cur.replace(/remote(\s*[—-]\s*)?/i, '').trim() || '—'));
+      writeFileSync(file, text.replace(re, (_m, pre, _cur, post) => pre + next + post), 'utf-8');
+      return { id: row.id, field, value };
+    }
+  }
+  if (row.url && editScanHistoryLocation(row.url, field, value)) return { id: row.id, field, value };
+  throw new Error(
+    `No editable location source for this row (its report has no Remote row${row.url ? '' : ', and it has no URL'})`,
+  );
+}
+
+function editScanHistoryLocation(url, field, value) {
+  if (!existsSync(SCAN_HISTORY)) return false;
+  const key = normalizeUrlForDedup(url);
+  const lines = readFileSync(SCAN_HISTORY, 'utf-8').split('\n');
+  let touched = false;
+  const out = lines.map((line, i) => {
+    if (i === 0 || !line.trim()) return line;
+    const cells = line.split('\t');
+    if (normalizeUrlForDedup(cells[0]) !== key) return line;
+    while (cells.length < 9) cells.push('');
+    const cur = cells[6] || '';
+    cells[6] = field === 'loc'
+      ? value
+      : (value === 'yes'
+        ? (/remote/i.test(cur) ? cur : `Remote${cur ? ` — ${cur}` : ''}`)
+        : cur.replace(/remote(\s*[—-]\s*)?/i, '').trim());
+    touched = true;
+    return cells.join('\t');
+  });
+  if (touched) writeFileSync(SCAN_HISTORY, out.join('\n'), 'utf-8');
+  return touched;
+}
+
+function editPipelineField(row, field, value) {
+  if (!['co', 'role', 'loc'].includes(field)) {
+    throw new Error(`"${field}" can't be edited before the role is evaluated — pipeline.md only stores company, role and location`);
+  }
+  if (!row.url || !existsSync(PIPELINE)) throw new Error('pipeline.md row not found for this URL');
+  const key = normalizeUrlForDedup(row.url);
+  const lines = readFileSync(PIPELINE, 'utf-8').split('\n');
+  let touched = false;
+  const out = lines.map((line) => {
+    const m = line.match(/^(\s*-\s*\[\s*\]\s*)(.+)$/);
+    if (!m) return line;
+    const cells = m[2].split('|').map((s) => s.trim());
+    if (!/^https?:\/\//.test(cells[0] || '') || normalizeUrlForDedup(cells[0]) !== key) return line;
+    if (field === 'co') cells[1] = value;
+    else if (field === 'role') cells[2] = value;
+    else {
+      let idx = -1;
+      for (let i = 3; i < cells.length; i++) {
+        if (/^(posted|trust|note):/i.test(cells[i])) continue;
+        idx = i; break;
+      }
+      if (idx === -1) cells.splice(3, 0, value);
+      else cells[idx] = value;
+    }
+    touched = true;
+    return m[1] + cells.join(' | ');
+  });
+  if (!touched) throw new Error('Pending pipeline row not found for this URL');
+  writeFileSync(PIPELINE, out.join('\n'), 'utf-8');
+  return { id: row.id, field, value };
+}
+
 // ── pipeline.md / scan-history.tsv edits (no shared lock exists for these
 // two files from Node today; scan.mjs's withPipelineLock is scan.mjs-internal
 // and not exported, so these are best-effort direct edits — acceptable because
@@ -171,16 +380,17 @@ function cooldownScanHistory(url, company, days) {
 }
 
 // ── CLI entry ────────────────────────────────────────────────────────
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const [cmd, id, arg] = process.argv.slice(2);
+if (isMainModule(import.meta.url)) {
+  const [cmd, id, arg, arg2] = process.argv.slice(2);
   try {
     let result;
     if (cmd === 'move') result = await move(id, arg);
     else if (cmd === 'temporary-delete') result = await temporaryDelete(id);
     else if (cmd === 'permanent-delete') result = await permanentDelete(id);
     else if (cmd === 'blacklist-company') result = blacklistCompany(id, arg);
+    else if (cmd === 'edit') result = await editField(id, arg, arg2);
     else {
-      console.error('Usage: node roles-actions.mjs <move|temporary-delete|permanent-delete|blacklist-company> <id> [arg]');
+      console.error('Usage: node roles-actions.mjs <move|temporary-delete|permanent-delete|blacklist-company|edit> <id> [arg] [value]');
       process.exit(1);
     }
     console.log(JSON.stringify(result, null, 2));

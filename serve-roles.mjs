@@ -2,7 +2,7 @@
 /**
  * serve-roles.mjs — local companion server for ai-security-roles.html.
  *
- * Zero new dependencies (Node's built-in http only), bound to 127.0.0.1 only.
+ * Zero new dependencies (Node's built-in http only), bound to 0.0.0.0 only.
  * Serves the generated page and exposes the write endpoints the page's
  * Actions column calls. Every write is delegated to roles-actions.mjs, which
  * in turn shells out to set-status.mjs / tracker.mjs — the same locked,
@@ -10,11 +10,11 @@
  * This process never edits applications.md directly.
  *
  * Usage:
- *   node serve-roles.mjs             # http://127.0.0.1:7777
+ *   node serve-roles.mjs             # http://0.0.0.0:7777
  *   node serve-roles.mjs --port 8080
  */
 import { createServer } from 'http';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -78,6 +78,30 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Evaluation report viewer — the Report column links here. Read-only, one
+    // dir, name-only (no slashes, no `..`), .md files under reports/ only.
+    if (req.method === 'GET' && url.pathname.startsWith('/reports/')) {
+      const name = decodeURIComponent(url.pathname.slice('/reports/'.length));
+      if (!/^[A-Za-z0-9._-]+\.md$/.test(name) || name.includes('..')) {
+        return sendJson(res, 400, { error: 'bad report name' });
+      }
+      const file = path.join(ROOT, 'reports', name);
+      if (!file.startsWith(path.join(ROOT, 'reports') + path.sep) || !existsSync(file)) {
+        return sendJson(res, 404, { error: 'report not found' });
+      }
+      const md = readFileSync(file, 'utf-8');
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const page = `<!doctype html><meta charset="utf-8"><title>${esc(name)}</title>`
+        + '<style>body{margin:0;background:#0e1118;color:#dce1ec}'
+        + 'pre{white-space:pre-wrap;word-wrap:break-word;padding:28px 32px;max-width:900px;margin:0 auto;'
+        + "font:13px/1.6 'IBM Plex Mono',ui-monospace,Menlo,monospace}"
+        + '@media(prefers-color-scheme:light){body{background:#fff;color:#0d1322}}</style>'
+        + `<pre>${esc(md)}</pre>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(page);
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/data') {
       const model = buildRoleModel({ root: ROOT });
       return sendJson(res, 200, model);
@@ -99,6 +123,12 @@ const server = createServer(async (req, res) => {
       ));
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/edit') {
+      const body = await readBody(req);
+      if (!body.id || !body.field) return sendJson(res, 400, { error: 'id and field are required' });
+      return withWriteLock(res, () => actions.editField(body.id, body.field, body.value));
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/blacklist') {
       const body = await readBody(req);
       if (!body.id) return sendJson(res, 400, { error: 'id is required' });
@@ -111,7 +141,7 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`serve-roles: http://127.0.0.1:${PORT}  (Ctrl+C to stop)`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`serve-roles: http://0.0.0.0:${PORT}  (Ctrl+C to stop)`);
   console.log(`  reads/writes: ${ROOT}`);
 });

@@ -163,7 +163,10 @@ const CSS = String.raw`
 }
 *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
 body { font-family:var(--sans); background:var(--bg); color:var(--text); min-height:100vh; font-size:13px; line-height:1.5; }
-.page { max-width:1720px; margin:0 auto; padding:28px 24px 60px; }
+/* Track the window width — the table fills whatever room the viewport gives it
+   (autoFit distributes the slack to the text columns). Cap only guards against
+   a degenerate stretch on an ultra-wide display. */
+.page { max-width:2560px; margin:0 auto; padding:28px 24px 60px; }
 header { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom:20px; padding-bottom:22px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
 .eyebrow { font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--accent); margin-bottom:6px; }
 h1 { font-size:20px; font-weight:600; letter-spacing:-.02em; margin-bottom:12px; text-wrap:balance; }
@@ -310,6 +313,22 @@ tbody tr:hover .desc-more { background:var(--surface-alt); }
 footer { margin-top:22px; padding-top:16px; border-top:1px solid var(--border); font-family:var(--mono); font-size:10px; color:var(--text-dim); display:flex; gap:16px; flex-wrap:wrap; }
 .toast { position:fixed; bottom:20px; right:20px; background:var(--surface); border:1px solid var(--border-hi); border-radius:6px; padding:10px 14px; font-family:var(--mono); font-size:11px; color:var(--text); box-shadow:0 8px 24px rgba(0,0,0,.3); z-index:50; }
 .toast.err { border-color:var(--danger); color:var(--danger); }
+
+/* Column drag-to-reorder — the whole header cell is a drag source (the
+   resize handle on its right edge opts out via pointerdown/preventDefault and
+   an explicit target check in dragstart). */
+thead th[draggable="true"] { cursor:grab; }
+body.col-dragging, body.col-dragging * { cursor:grabbing !important; }
+thead th.col-dragging { opacity:.4; }
+thead th.col-drop-before { box-shadow:inset 3px 0 0 var(--accent); }
+thead th.col-drop-after  { box-shadow:inset -3px 0 0 var(--accent); }
+
+/* Click-to-edit cells (live server only). */
+tbody td.editable .cellbox { cursor:text; }
+tbody td.editable:hover .cellbox { outline:1px dashed var(--border-hi); outline-offset:2px; border-radius:3px; }
+.cell-edit { width:100%; box-sizing:border-box; font-family:var(--sans); font-size:var(--table-fs); color:var(--text); background:var(--surface-alt); border:1px solid var(--accent); border-radius:3px; padding:4px 6px; outline:none; }
+textarea.cell-edit { min-height:56px; resize:vertical; line-height:1.5; }
+.cell-saving { font-family:var(--mono); font-size:.8em; color:var(--text-dim); }
 `;
 
 const colToggleHtml = COLS.map((c) => `<button class="col-tag on" data-col="${c.id}" onclick="toggleCol('${c.id}')">${esc(c.label)}</button>`).join('');
@@ -381,6 +400,7 @@ const html = `<!doctype html>
     <button class="col-tag mini-btn" onclick="setAllCols(false)">None</button>
     <div class="sep"></div>
     <button class="col-tag mini-btn" onclick="resetColW()" title="Clear manual column widths — back to auto-fit">Reset widths</button>
+    <button class="col-tag mini-btn" onclick="resetColOrder()" title="Back to the default column order">Reset order</button>
   </div>
 
   <div class="table-outer">
@@ -437,8 +457,31 @@ function applyColVisibility(){
 }
 function toggleCol(id){ colState[id] = !colState[id]; saveCols(); applyColVisibility(); layout(); }
 function setAllCols(v){ for (const c of COLS) colState[c.id] = v; saveCols(); applyColVisibility(); layout(); }
-const visCols = () => COLS.filter(c => colState[c.id]);
 const COLMAP = Object.fromEntries(COLS.map(c => [c.id, c]));
+
+// ── column order (persisted, drag to reorder) ──────────────────────
+let colOrder = [];
+try { colOrder = JSON.parse(localStorage.getItem('roles.colorder.v1') || '[]'); } catch {}
+function saveColOrder(){ try { localStorage.setItem('roles.colorder.v1', JSON.stringify(colOrder)); } catch {} }
+// Saved ids first (in saved order, dropping unknowns), then any column the saved
+// list doesn't mention yet — so a new column added to COLS still shows up.
+function orderedCols(){
+  const seen = new Set();
+  const out = [];
+  for (const id of colOrder) { const c = COLMAP[id]; if (c && !seen.has(id)) { seen.add(id); out.push(c); } }
+  for (const c of COLS) if (!seen.has(c.id)) out.push(c);
+  return out;
+}
+function moveCol(fromId, toId, after){
+  const ids = orderedCols().map(c => c.id).filter(id => id !== fromId);
+  let ti = ids.indexOf(toId);
+  if (ti < 0) return;
+  ids.splice(after ? ti + 1 : ti, 0, fromId);
+  colOrder = ids; saveColOrder();
+  buildHeader(); go();
+}
+function resetColOrder(){ colOrder = []; try { localStorage.removeItem('roles.colorder.v1'); } catch {} buildHeader(); go(); }
+const visCols = () => orderedCols().filter(c => colState[c.id]);
 
 // ── column widths: content-aware auto-fit + manual drag (persisted) ────────
 // <colgroup> + table-layout:fixed make column widths authoritative. autoFit()
@@ -509,10 +552,19 @@ function autoFit(){
       const grow = vis.filter(c => c.grow && manualW(c.id) == null);
       let slack = budget - sum;
       if (grow.length && slack > 0) {
+        // Pass 1: grow the text columns toward a comfortable ~1.7x their natural
+        // width, weighted so the widest ones take the most.
         const caps = grow.map(c => Math.max(0, c.w * 1.7 - w[c.id]));
         const tot = caps.reduce((a, b) => a + b, 0);
         const give = Math.min(slack, tot);
         grow.forEach((c, i) => { if (tot) w[c.id] += give * caps[i] / tot; });
+        slack -= give;
+        // Pass 2: any slack still left goes out proportionally so the table
+        // always spans the full container (no dead gap on wide monitors).
+        if (slack > 1) {
+          const wtot = grow.reduce((a, c) => a + c.w, 0);
+          grow.forEach(c => { w[c.id] += slack * c.w / wtot; });
+        }
       }
       chosen = w; break;
     }
@@ -541,8 +593,10 @@ function autoFit(){
   tbl.style.minWidth = total + 'px';
 }
 
-// ── description clamp: cap Why-it-fits / Notes at the tallest sibling cell ──
-const DESC_COLS = new Set(['why', 'loc']);
+// ── description clamp: cap long free-text cells at the tallest sibling cell ──
+// Any column whose cell can hold a paragraph / multi-item list: it is clamped to
+// the height of the rest of its row and gets a "more" toggle when it overflows.
+const DESC_COLS = new Set(['why', 'loc', 'softgaps', 'hardstops']);
 const _expanded = new Set(); // "rowId:colId" — session-only, survives re-filter
 function _ensureMore(wrap, key, label){
   let btn = wrap.querySelector('.desc-more');
@@ -662,13 +716,53 @@ let sortKey='pct', sortAsc=false;
 
 function buildHeader(){
   const row = document.getElementById('thead-row');
-  const cells = COLS.map(c => '<th data-col="'+c.id+'" onclick="sort(\\''+c.id+'\\')">'
+  const cells = orderedCols().map(c => '<th data-col="'+c.id+'" onclick="maybeSort(\\''+c.id+'\\')">'
     + '<span class="th-label">'+esc(c.label)+' <span class="si" id="si-'+c.id+'">↕</span></span>'
     + '<span class="col-resize" data-rz="'+c.id+'"></span></th>');
   cells.push('<th data-nosort><span class="th-label">Actions</span></th>');
   row.innerHTML = cells.join('');
   buildColgroup();
   wireResize();
+  wireHeaderDnD();
+}
+
+// ── header drag-to-reorder ─────────────────────────────────────────
+let _dragCol = null, _dragJustHappened = false;
+function maybeSort(k){ if (_dragJustHappened) { _dragJustHappened = false; return; } sort(k); }
+function wireHeaderDnD(){
+  document.querySelectorAll('#thead-row th[data-col]').forEach(th => {
+    th.setAttribute('draggable', 'true');
+    const clearMarks = () => document.querySelectorAll('#thead-row th').forEach(x =>
+      x.classList.remove('col-drop-before', 'col-drop-after', 'col-dragging'));
+    th.addEventListener('dragstart', e => {
+      if (e.target.closest('.col-resize')) { e.preventDefault(); return; }
+      _dragCol = th.dataset.col;
+      try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', _dragCol); } catch {}
+      th.classList.add('col-dragging');
+      document.body.classList.add('col-dragging');
+    });
+    th.addEventListener('dragend', () => { _dragCol = null; document.body.classList.remove('col-dragging'); clearMarks(); });
+    th.addEventListener('dragover', e => {
+      if (!_dragCol || th.dataset.col === _dragCol) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'move'; } catch {}
+      const r = th.getBoundingClientRect();
+      const after = e.clientX > r.left + r.width / 2;
+      th.classList.toggle('col-drop-after', after);
+      th.classList.toggle('col-drop-before', !after);
+    });
+    th.addEventListener('dragleave', () => th.classList.remove('col-drop-before', 'col-drop-after'));
+    th.addEventListener('drop', e => {
+      e.preventDefault();
+      const from = _dragCol, to = th.dataset.col;
+      const r = th.getBoundingClientRect();
+      const after = e.clientX > r.left + r.width / 2;
+      clearMarks();
+      _dragCol = null;
+      document.body.classList.remove('col-dragging');
+      if (from && to && from !== to) { _dragJustHappened = true; moveCol(from, to, after); }
+    });
+  });
 }
 
 function cellFor(key, r, t){
@@ -691,9 +785,14 @@ function cellFor(key, r, t){
     case 'source': return '<span class="mono-cell">'+esc(r.source||'—')+'</span>';
     case 'posted': return '<span class="mono-cell">'+esc(r.posted_at||'—')+'</span>';
     case 'seen': return '<span class="mono-cell">'+(r.age==null?'—':(r.age===0?'today':r.age+'d ago'))+'</span>';
-    case 'softgaps': return listCell(r.soft_gaps);
-    case 'hardstops': return listCell(r.hard_stops, true);
-    case 'report': return esc(r.report||'—');
+    case 'softgaps': return descListCell(r.soft_gaps);
+    case 'hardstops': return descListCell(r.hard_stops, true);
+    case 'report': {
+      if (!r.reportFile) return '—';
+      const rn = String(r.reportFile).split('-')[0] || 'view';
+      const href = (IS_LIVE ? '/reports/' : 'career-ops/reports/') + r.reportFile;
+      return '<a class="apply-link" href="'+esc(href)+'" target="_blank" rel="noopener">#'+esc(rn)+' ↗</a>';
+    }
     case 'pdf': return esc(r.pdf||'—');
     case 'apply': return r.url ? '<a class="apply-link" href="'+esc(r.url)+'" target="_blank" rel="noopener">Open ↗</a>' : '<span class="direct-tag">Outreach</span>';
     default: return '—';
@@ -702,6 +801,11 @@ function cellFor(key, r, t){
 function listCell(list, neg){
   if (!list || !list.length) return '—';
   return '<div class="tag-list">'+list.map(x => '<div'+(neg?' class="neg"':'')+'>· '+esc(x)+'</div>').join('')+'</div>';
+}
+// listCell wrapped for height-clamping (see DESC_COLS / clampDesc).
+function descListCell(list, neg){
+  const inner = listCell(list, neg);
+  return inner === '—' ? '—' : '<div class="desc-clamp" data-desc>'+inner+'</div>';
 }
 function descCell(text){ return '<div class="desc-clamp" data-desc><div class="desc-txt">'+esc(text)+'</div></div>'; }
 
@@ -781,7 +885,7 @@ function render(rows){
     tb.innerHTML=rows.map(r=>{
       const t=tier(r.pct);
       const stale = r.status==='Rejected' || r.status==='Discarded';
-      const cells = COLS.map(c => '<td data-col="'+c.id+'"><div class="cellbox">'+cellFor(c.id, r, t)+'</div></td>').join('');
+      const cells = orderedCols().map(c => '<td data-col="'+c.id+'"'+(IS_LIVE && EDITABLE_COLS.has(c.id) ? ' class="editable" title="Click to edit"' : '')+'><div class="cellbox">'+cellFor(c.id, r, t)+'</div></td>').join('');
       return '<tr class="t-'+t+(stale?' is-stale':'')+'" data-id="'+esc(r.id)+'">'+cells+'<td class="actions-cell-wrap"><div class="cellbox">'+actionsCell(r)+'</div></td></tr>';
     }).join('');
   }
@@ -874,10 +978,78 @@ async function doBlacklist(id){
   catch(e){ toast(e.message, true); }
 }
 
+// ── click-to-edit cells (live server only) ─────────────────────────
+// Company / Team / Role / Why it fits / Location / Remote / Salary. The write
+// target depends on the row (tracker column, evaluation report YAML, scan
+// history, or the pipeline.md line) — resolved server-side in roles-actions.mjs.
+const EDITABLE_COLS = new Set(['co','team','role','why','loc','remote','sal']);
+const EDIT_FIELD_LABEL = { co:'Company', team:'Team', role:'Role', why:'Why it fits', loc:'Location', remote:'Remote', sal:'Salary' };
+let _editing = null;
+function curValFor(col, r){
+  const v = ({ co:r.co, team:r.team, role:r.role, why:r.why, loc:r.loc, sal:r.sal })[col];
+  return (v == null || v === '—') ? '' : String(v);
+}
+function beginEdit(td){
+  if (!IS_LIVE || _editing) return;
+  const col = td.dataset.col;
+  if (!EDITABLE_COLS.has(col)) return;
+  const tr = td.closest('tr'); if (!tr) return;
+  const r = D.find(x => x.id === tr.dataset.id); if (!r) return;
+  const box = td.querySelector('.cellbox'); if (!box) return;
+  const orig = box.innerHTML;
+  const cur = curValFor(col, r);
+  let field;
+  if (col === 'remote') {
+    field = document.createElement('select');
+    field.innerHTML = '<option value="yes">Remote OK</option><option value="no">Not remote</option>';
+    field.value = r.remote ? 'yes' : 'no';
+  } else {
+    field = document.createElement(col === 'why' ? 'textarea' : 'input');
+    if (field.tagName === 'INPUT') field.type = 'text';
+    field.value = cur;
+  }
+  field.className = 'cell-edit';
+  _editing = { box, orig, col, id: r.id };
+  box.innerHTML = '';
+  box.appendChild(field);
+  field.focus();
+  if (field.select) field.select();
+  let done = false;
+  const finish = () => { done = true; _editing = null; };
+  const cancel = () => { if (done) return; finish(); box.innerHTML = orig; };
+  const commit = async () => {
+    if (done) return;
+    const val = field.value;
+    const unchanged = col === 'remote' ? ((val === 'yes') === !!r.remote) : (val.trim() === cur.trim());
+    if (unchanged) { cancel(); return; }
+    finish();
+    box.innerHTML = '<span class="cell-saving">saving…</span>';
+    try {
+      await callApi('/api/edit', { id: r.id, field: col, value: val });
+      toast(EDIT_FIELD_LABEL[col] + ' updated');
+      await refreshData();
+    } catch (e) {
+      toast(e.message, true);
+      box.innerHTML = orig;
+    }
+  };
+  field.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    else if (e.key === 'Enter' && !(col === 'why' && e.shiftKey)) { e.preventDefault(); field.blur(); }
+  });
+  field.addEventListener('blur', commit);
+}
+document.addEventListener('click', e => {
+  if (!IS_LIVE) return;
+  if (e.target.closest('a, button, .desc-more, .cell-edit')) return;
+  const td = e.target.closest('#tb td[data-col]');
+  if (td) beginEdit(td);
+});
+
 buildHeader();
 applyColVisibility();
 document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('on', b.dataset.tab === curTab));
-document.getElementById('mode-note').textContent = IS_LIVE ? 'Live — actions write to the tracker' : 'Static file — run node serve-roles.mjs for row actions';
+document.getElementById('mode-note').textContent = IS_LIVE ? 'Live — row actions + click-to-edit write to disk · drag headers to reorder' : 'Static file — run node serve-roles.mjs for row actions & cell editing · drag headers to reorder';
 go();
 window.addEventListener('resize', scheduleFit);
 // ResizeObserver catches width changes window.resize can miss (devtools dock,
