@@ -403,8 +403,9 @@ Then include:
 - `## G) Posting Legitimacy`
 - `## Risk Summary`
 - `## Extracted Keywords`
+- `## Job Description (scraped {{DATE}})` — **last section, required.** The verbatim scraped posting body inside a ` ```text ` fence, preceded by a one-line `Source: {origin}. Verbatim except HTML stripped to text; {N} chars.` note. Never paraphrase, summarise, or truncate; replace any ` ``` ` in the JD with `'''`. If extraction failed, write `_extraction failed: {reason}_` and the raw URL instead. Keeps the report usable after the posting goes dead.
 
-Translate these human-facing headings according to `language.output` when it is not English. Keep `## Machine Summary` and YAML keys exact for downstream parsers.
+Translate these human-facing headings according to `language.output` when it is not English. Keep `## Machine Summary`, the `## Job Description` fence contents, and YAML keys exact for downstream parsers.
 
 ### Step 4 — Generate PDF (configurable)
 

@@ -626,7 +626,12 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
 ## Keywords extracted
 (list of 15-20 keywords from the JD for ATS optimization)
+
+## Job Description (verbatim)
+(the full scraped JD text — see requirement below)
 ```
+
+**Job Description (required):** every report ends with a `## Job Description (scraped {YYYY-MM-DD})` section carrying the **verbatim** scraped posting body inside a ` ```text ` fence, preceded by a one-line `Source: {origin}. … {N} chars.` note. Strip HTML to text and drop nav/footer chrome, but never paraphrase, summarise, or truncate — the report must stay usable after the posting goes dead. If a ` ``` ` fence appears in the JD, replace it with `'''`. If extraction genuinely failed, write the section with `_extraction failed: {reason}_` and the raw URL rather than a hand-written stand-in. See `modes/_custom.md` → "Report contents".
 
 **Machine Summary (required):** every report carries a `## Machine Summary` YAML fence directly after the header — same schema, exact field names, and rules as the "Machine Summary" block in `batch/batch-prompt.md` (do not duplicate the schema here; that file is the source of truth). It includes `advertised_comp`: the JD's own salary figure **verbatim** (e.g. `"80-90k EUR"`), or `null` when the JD states nothing — never estimated, never replaced with researched market data. This key seeds the advertised salary observation read by `node salary-gap.mjs`. It also includes `risk_summary`: the Risk Summary block mirrored as a map (schema and enum values in `batch/batch-prompt.md`).
 

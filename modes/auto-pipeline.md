@@ -49,6 +49,7 @@ The evaluation inherits `oferta`'s bounded research budget. Company, compensatio
 
 Save the full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` (see format in `modes/oferta.md`).
 Include Block G in the saved report. Add **URL:** {url} and **Legitimacy:** {tier} to the report header.
+End the report with a `## Job Description (scraped {YYYY-MM-DD})` section holding the **verbatim** JD text captured in Step 0 (a ` ```text ` fence + a one-line `Source:` note) — never paraphrased or truncated. See `modes/oferta.md` → "Job Description (required)".
 
 ## Step 3 — Generate PDF
 
