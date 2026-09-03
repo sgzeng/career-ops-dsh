@@ -95,6 +95,20 @@ If the final score is >= 4.5, generate a draft of responses for the application 
 
 ## Step 5 — Update Tracker
 
-Record it in `data/applications.md` with all columns including Report and PDF as ✅.
+Do **not** hand-edit `data/applications.md` (see `_shared.md` rule 9). Write one
+tab-separated line to `batch/tracker-additions/{num}-{company-slug}.tsv` in the
+9-column format (`AGENTS.md` → "TSV Format for Tracker Additions" / `batch/batch-prompt.md`
+§Step 5), then run `node merge-tracker.mjs`. If the entry came from
+`data/pipeline.md`, also run `node reconcile-pipeline.mjs`.
+
+```
+{num}\t{date}\t{company}\t{role}\t{status}\t{score}/5\t{pdf ✅|❌}\t[{num}](reports/{num}-{company-slug}-{date}.md)\t{one-line note}\t{url}
+```
+
+- **Column 8 is the report link** — `[{num}](reports/{num}-{company-slug}-{date}.md)`,
+  reusing the exact `num` / `company-slug` / `date` from the file written in Step 2.
+  **Never `—`, never `report #{num}` in the Notes column.** `—` is valid only for a
+  retroactively added row that has no evaluation and no report file.
+- After merge, release the reserve sentinel: `node reserve-report-num.mjs --release {num}`.
 
 **If any step fails**, continue with the next ones and mark the failed step as pending in the tracker.

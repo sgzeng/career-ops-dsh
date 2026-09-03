@@ -136,18 +136,30 @@ function parseReport(file) {
   return out;
 }
 
-function resolveReport(reportCell, reportsDir, root) {
-  const m = String(reportCell || '').match(/\(([^)]+\.md)\)/) || String(reportCell || '').match(/(\d{3})/);
-  if (m && m[1] && m[1].endsWith('.md')) {
-    const p = path.resolve(root, m[1].replace(/^\.\.\//, ''));
+function resolveReport(reportCell, reportsDir, root, fallbackNum) {
+  // 1. Explicit markdown link in the Report cell — `[N](reports/N-slug-date.md)`
+  //    or an already-normalized `../reports/...`.
+  const linkM = String(reportCell || '').match(/\(([^)]+\.md)\)/);
+  if (linkM && linkM[1]) {
+    const p = path.resolve(root, linkM[1].replace(/^(?:\.\.\/)+/, ''));
     if (existsSync(p)) return p;
-    const alt = path.join(reportsDir, path.basename(m[1]));
+    const alt = path.join(reportsDir, path.basename(linkM[1]));
     if (existsSync(alt)) return alt;
   }
-  const num = (String(reportCell || '').match(/(\d{2,3})/) || [])[1];
-  if (num && existsSync(reportsDir)) {
-    const pad = num.padStart(3, '0');
-    const hit = readdirSync(reportsDir).find((f) => f.startsWith(pad + '-') && f.endsWith('.md'));
+  // 2. Bare number in the cell, or (last resort) the row's own tracker number:
+  //    report files are `reports/{num}-{slug}-{date}.md` with a 2–4 digit
+  //    prefix, so a row whose Report cell is `—` still resolves as long as
+  //    reports/{rowNum}-*.md exists (report num == tracker num in the common
+  //    single-eval case). Handles 4-digit numbers the old `\d{2,3}` regex and
+  //    padStart(3) could not (9028 → looked for `902-*.md`).
+  const cellNum = (String(reportCell || '').match(/\b(\d{2,4})\b/) || [])[1];
+  for (const cand of [cellNum, fallbackNum != null ? String(fallbackNum) : null]) {
+    if (!cand || !existsSync(reportsDir)) continue;
+    const prefixes = cand.length < 3 ? [cand, cand.padStart(3, '0')] : [cand];
+    const hit = readdirSync(reportsDir).find(
+      (f) => f.endsWith('.md') && !f.endsWith('-RESERVED.md')
+        && prefixes.some((v) => f.startsWith(v + '-')),
+    );
     if (hit) return path.join(reportsDir, hit);
   }
   return null;
@@ -237,7 +249,7 @@ export function buildRoleModel(opts = {}) {
       const urlCellIdx = colmap.url;
       const url = urlCellIdx != null ? (line.split('|').map((s) => s.trim())[urlCellIdx] || '') : '';
 
-      const reportPath = r.report && r.report !== '—' ? resolveReport(r.report, REPORTS, root) : null;
+      const reportPath = resolveReport(r.report, REPORTS, root, r.num);
       const meta = reportPath ? parseReport(reportPath) : {};
 
       const notePct = (r.notes.match(/\bpct[:\s]+(\d{1,3})\b/i) || [])[1];
@@ -289,6 +301,7 @@ export function buildRoleModel(opts = {}) {
         risk_summary: meta.risk_summary || null,
         notes: r.notes,
         report: r.report && r.report !== '—' ? r.report : null,
+        reportFile: reportPath ? path.basename(reportPath) : null,
         pdf: r.pdf || '',
         date: r.date,
         posted_at: hist?.postedAt || null,
@@ -338,6 +351,7 @@ export function buildRoleModel(opts = {}) {
         risk_summary: null,
         notes: '',
         report: null,
+        reportFile: null,
         pdf: '',
         date: p.posted_at || hist?.firstSeen || null,
         posted_at: p.posted_at || hist?.postedAt || null,

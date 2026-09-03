@@ -12,6 +12,10 @@
  * Validates status against states.yml (rejects non-canonical, logs warning)
  *
  * Run: node career-ops/merge-tracker.mjs [--dry-run] [--verify]
+ *
+ * --backfill-reports: one-time pass that links the Report column on existing
+ *   rows whose cell is `—`/link-less, from a report file on disk (reports/{N}-*.md
+ *   by row number, or a `report #N` reference in Notes). Idempotent.
  */
 
 import { readFileSync, readdirSync, mkdirSync, renameSync, existsSync } from 'fs';
@@ -75,6 +79,7 @@ const VERIFY = process.argv.includes('--verify');
 const MIGRATE = process.argv.includes('--migrate');
 const MIGRATE_VIA = process.argv.includes('--migrate-via');
 const BACKFILL_URLS = process.argv.includes('--backfill-urls');
+const BACKFILL_REPORTS = process.argv.includes('--backfill-reports');
 const MERGE_HOLD_MS = Number(process.env.CAREER_OPS_MERGE_HOLD_MS) || 0;
 const MERGE_READY_IPC = process.env.CAREER_OPS_MERGE_READY_IPC === '1';
 
@@ -904,6 +909,48 @@ if (BACKFILL_URLS) {
   trackerLock.release();
   process.exit(0);
 }
+// One-time backfill linking the Report column on existing rows whose cell is
+// empty/`—`/link-less, from a report file on disk. A row links its report when
+// reports/{rowNum}-*.md exists, or when Notes carries `report #N` / a bare
+// number sits in the Report cell and reports/{N}-*.md exists. This repairs rows
+// written by the pre-fix interactive pipeline path, which left `—` in column 8
+// and dropped `report #NNNN` into Notes — so every report-sourced column
+// (Location / Legitimacy / Work auth / Risk / gaps) rendered blank in the roles
+// view. Idempotent: only fills link-less rows.
+// Run with: node merge-tracker.mjs --backfill-reports [--dry-run]
+if (BACKFILL_REPORTS) {
+  const reportsDir = join(REPORTS_ROOT, 'reports');
+  const reportFiles = existsSync(reportsDir)
+    ? readdirSync(reportsDir).filter(f => /^\d+-.+\.md$/.test(f) && !f.endsWith('-RESERVED.md'))
+    : [];
+  const fileForNum = (n) => reportFiles.find(f => f.startsWith(String(n) + '-'))
+    || reportFiles.find(f => f.startsWith(String(n).padStart(3, '0') + '-')) || null;
+  const hasLink = (s) => /\]\([^)]*reports\/[^)]+\.md\)/.test(String(s || ''));
+  let filled = 0, already = 0, noFile = 0;
+  const out = appLines.map(line => {
+    if (!line.startsWith('|')) return line;
+    const app = parseAppLine(line);
+    if (!app) return line;
+    if (hasLink(app.report)) { already++; return buildRow({ ...app }); }
+    const notesNum = (String(app.notes || '').match(/report #(\d+)/i) || [])[1];
+    const cellNum = (String(app.report || '').match(/\b(\d{2,4})\b/) || [])[1];
+    const num = notesNum || cellNum || app.num;
+    const file = num ? fileForNum(num) : null;
+    if (!file) { noFile++; return buildRow({ ...app }); }
+    filled++;
+    return buildRow({ ...app, report: normalizeReportLink(`[${parseInt(num, 10)}](reports/${file})`) });
+  });
+  const summary = `${filled} filled, ${already} already linked, ${noFile} link-less with no report file`;
+  if (DRY_RUN) {
+    console.log(`🔎 Backfill reports (dry-run): would link ${filled} row(s). (${summary})`);
+  } else {
+    writeFileAtomic(APPS_FILE, out.join('\n'));
+    console.log(`✅ Backfill reports: ${summary}.`);
+  }
+  trackerLock.release();
+  process.exit(0);
+}
+
 // Full set of numbers already on the tracker (#1704). Deliberately broader than
 // the existingApps loop above: it reserves the number from any row with a
 // numeric # cell, including a row too malformed for parseAppLine to return.
@@ -1014,6 +1061,23 @@ for (const file of tsvFiles) {
   if (addition.url && COLMAP.url == null && !warnedNoUrlCol) {
     console.warn('⚠️  Additions carry a URL but this tracker has no URL column — URL dedup is INACTIVE (fuzzy fallback). Add a `URL` header column to enable it.');
     warnedNoUrlCol = true;
+  }
+
+  // If the TSV left the Report cell empty/`—`/bare-number but a report file for
+  // this row's number exists on disk, synthesize the link before normalizing.
+  // The interactive pipeline path historically wrote `—` here (with `report
+  // #NNNN` in Notes instead), leaving every report-sourced column blank in the
+  // roles view — this closes that gap at merge time as well as at authoring time.
+  if (!/\]\([^)]*reports\//.test(String(addition.report || ''))) {
+    const bareNum = (String(addition.report || '').match(/\b(\d{2,4})\b/) || [])[1]
+      || (String(addition.notes || '').match(/report #(\d+)/i) || [])[1]
+      || addition.num;
+    const rd = join(REPORTS_ROOT, 'reports');
+    const f = bareNum && existsSync(rd) && readdirSync(rd).find(
+      (x) => /^\d+-.+\.md$/.test(x) && !x.endsWith('-RESERVED.md')
+        && (x.startsWith(String(bareNum) + '-') || x.startsWith(String(bareNum).padStart(3, '0') + '-')),
+    );
+    if (f) addition.report = `[${parseInt(bareNum, 10)}](reports/${f})`;
   }
 
   // Normalize the report link to be relative to the tracker file's directory.

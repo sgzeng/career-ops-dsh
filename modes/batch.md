@@ -137,7 +137,7 @@ Each worker receives `batch-prompt.md` as a system prompt. It is self-contained.
 The worker produces:
 1. `.md` report in `reports/`
 2. PDF in `output/`
-3. Tracker line in `batch/tracker-additions/{id}.tsv`
+3. Tracker line in `batch/tracker-additions/{id}.tsv` — 9 columns per `batch-prompt.md` §Step 5, **column 8 = `[{num}](reports/{num}-{slug}-{date}.md)`**, never `—`
 4. Result JSON via stdout
 
 ## Error handling

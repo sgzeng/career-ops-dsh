@@ -632,7 +632,20 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
 ### 2. Record in tracker
 
-**ALWAYS** record in `data/applications.md`:
+Do **not** hand-edit `data/applications.md` — write one 9-column tab-separated line
+to `batch/tracker-additions/{num}-{company-slug}.tsv` and run `node merge-tracker.mjs`
+(see `AGENTS.md` → "TSV Format for Tracker Additions" and `batch/batch-prompt.md` §Step 5):
+
+```
+{num}\t{date}\t{company}\t{role}\t{status}\t{score}/5\t{pdf ✅|❌}\t[{num}](reports/{num}-{company-slug}-{date}.md)\t{one-line note}\t{url}
+```
+
+**Invariant: the Report cell (column 8) carries the `[{num}](reports/…)` link
+whenever the report `.md` exists** — reuse the exact `num`/`slug`/`date` from step 1.
+`—` in that cell is valid only for a retroactively added row with no evaluation.
+Never put `report #{num}` in the Notes column as a substitute.
+
+**ALWAYS** record:
 - Next sequential number
 - Current date
 - Company — the END employer. If the JD is agency-mediated ("our client", agency domain, no employer named), ASK the user which agency it came through, use `?` as Company, and put a distinguishing descriptor in Notes (e.g. `fintech, Leeds`). Never write "Confidential" — the `?` marker is locale-invariant and can't collide with a real firm.

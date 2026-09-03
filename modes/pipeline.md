@@ -34,14 +34,20 @@ Read `spend_tier` from `config/profile.yml` (see `modes/_shared.md` -- Spend Tie
    b. If the URL is not accessible → mark as `- [!]` with a note and continue
    c. **Pre-screen gate**: apply the gate above (using the extracted JD). If the JD is an obvious mismatch, log the discard to `data/discard.log` (per the **Discard log** rule above — three fields, no job ID in interactive mode), mark it `- [x] #-- | {url} | skipped (pre-screen mismatch: {reason})` in "Processed", and continue to the next URL. No `REPORT_NUM` is claimed for discarded postings.
    d. Claim the next sequential `REPORT_NUM` atomically by running `node reserve-report-num.mjs` (and release the sentinel using `node reserve-report-num.mjs --release <num>` after the report is written)
-   e. **Execute full auto-pipeline**: Evaluation A-F → Report .md → PDF (if score >= `auto_pdf_score_threshold`) → Tracker. Read `modes/_custom.md` → Pipeline Rules, if it exists, and apply its override here. Default (if absent or silent): standard pipeline execution.
+   e. **Execute full auto-pipeline**: Evaluation A-F → Report .md → PDF (if score >= `auto_pdf_score_threshold`) → Tracker. Read `modes/_custom.md` → Pipeline Rules, if it exists, and apply its override here. Default (if absent or silent): standard pipeline execution. The tracker write follows `modes/auto-pipeline.md` Step 5 — a 9-column TSV in `batch/tracker-additions/`, **column 8 = `[{num}](reports/{num}-{slug}-{date}.md)` (never `—`, never `report #{num}` in Notes)**.
    f. **Move from "Pending" to "Processed"**: `- [x] #NNN | URL | Company | Role | Score/5 | PDF ✅/❌`
 
    **About the PDF gate (configurable):** Read `config/profile.yml` → `auto_pdf_score_threshold`. If the key does not exist, default to `3.0` (this mode's original gate). If the evaluation score is less than the threshold, skip PDF generation: write the report normally, show in the header `**PDF:** not generated — run /career-ops pdf {company-slug} to create on demand`, and mark PDF ❌ in the tracker. If the score is ≥ threshold, generate the PDF as usual.
 
    **Tuning it:** Generating a tailored PDF costs ~30–60s per entry (Playwright launch + HTML render) and produces files that often go unused — most roles score in the 2.x/3.x range and never reach the application stage. Raise `auto_pdf_score_threshold` (e.g. `4.0`) to write only the report for marginal offers and produce the PDF on demand via `/career-ops pdf {slug}`; set `0` to generate one for every offer. Both modes (Path A `/career-ops pipeline` and Path B `batch/batch-runner.sh`) read the same key, so behavior is identical regardless of which path processes an offer.
 3. **Concurrency is conditional on the extraction tool.** If the surviving URLs will use browser-backed Playwright/MCP (`browser_navigate` + `browser_snapshot`), process them **one at a time**: multiple workers must never share one browser session, because navigation and snapshots can cross-contaminate and evaluate the wrong posting. If every worker uses the isolated CLI extractor or non-browser fallback, **and** the orchestrator can guarantee independent process/session state, 3+ URLs may use `run_in_background`, at most one URL per worker. Each worker is a **single-pass worker**: it evaluates its one URL and must **not** spawn further subagents or invoke other skills; its company/comp research stays inline and bounded (see `modes/_shared.md` → Subagent delegation). When in doubt, use the sequential path.
-4. **At the end**, show summary table:
+4. **At the end**:
+   - `node merge-tracker.mjs` to merge every TSV written this run, then
+     `node reconcile-pipeline.mjs` to sync the `## Processed` links, then
+     `node reserve-report-num.mjs --release <nums>` for the numbers claimed.
+   - `node verify-pipeline.mjs` — every processed URL's tracker row must carry
+     the `[num](reports/…)` link; 0 errors before finishing.
+   - Show summary table:
 
 ```
 | # | Company | Role | Score | PDF | Recommended action |
