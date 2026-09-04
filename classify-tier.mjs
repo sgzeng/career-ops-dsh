@@ -73,8 +73,13 @@ export function classifyTier(title) {
     { pattern: /\b(l1|l2)\b/i, tier: 'entry', weight: 2 },
 
     // Intern Tier (weight 1)
-    { pattern: /\binternship\b/i, tier: 'intern', weight: 1 },
-    { pattern: /\bintern\b/i, tier: 'intern', weight: 1 },
+    // Plurals matter: a trailing \b after "internship" fails against
+    // "Internships", so titles like "NVIDIA 2027 Internships: Ph.D. Research
+    // Large Language Models" classified as 'mid' and sailed past
+    // skip_tiers: [intern]. Big-tech boards batch their intern reqs under one
+    // plural heading, so this was the common spelling, not the rare one.
+    { pattern: /\binternships?\b/i, tier: 'intern', weight: 1 },
+    { pattern: /\binterns?\b/i, tier: 'intern', weight: 1 },
     { pattern: /\btrainee\b/i, tier: 'intern', weight: 1 },
     { pattern: /\bco-op\b/i, tier: 'intern', weight: 1 },
     {
@@ -235,6 +240,11 @@ function runTests() {
     // additional checks to verify our regex logic
     { title: "Graduate Engineer", expected: "mid" },
     { title: "Graduate Engineer Program", expected: "intern" },
+    // Plural forms — big-tech boards batch intern reqs under one heading
+    { title: "Software Engineering Internship", expected: "intern" },
+    { title: "NVIDIA 2027 Internships: Ph.D. Research Large Language Models", expected: "intern" },
+    { title: "2026 Summer Internships: Security", expected: "intern" },
+    { title: "Internal Communications Manager", expected: "mid" },
     { title: "A.I. Researcher", expected: "mid" },
     { title: "I.T. Specialist II", expected: "mid" }
   ];

@@ -191,9 +191,17 @@ export function buildTrustValidator(config) {
     .map(d => String(d).toLowerCase().trim())
     .filter(Boolean);
 
-  const atsAllowlist = (Array.isArray(config.ats_allowlist)
-    ? config.ats_allowlist
-    : DEFAULT_ATS_ALLOWLIST)
+  // MERGE, not replace. This list only ever suppresses Rule 4's
+  // company_domain_mismatch flag for known multi-tenant ATS hosts — adding a
+  // key means "also trust this host", never "forget the 16 built-ins". The
+  // replace idiom (still used for suspicious_domains below, where a custom list
+  // genuinely wants to start clean) forced portals.yml to hand-copy all 16
+  // defaults just to append linkedin.com, and that copy silently rots the day
+  // a 17th default lands here.
+  const atsAllowlist = [...new Set([
+    ...DEFAULT_ATS_ALLOWLIST,
+    ...(Array.isArray(config.ats_allowlist) ? config.ats_allowlist : []),
+  ])]
     .map(d => String(d).toLowerCase().trim())
     .filter(Boolean);
 
