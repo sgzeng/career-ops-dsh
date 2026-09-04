@@ -8,22 +8,23 @@
  * web/src/app/api/status/route.ts, web/src/app/api/tracker/delete/route.ts).
  *
  * Usable both from serve-roles.mjs and directly from the CLI:
- *   node roles-actions.mjs move tracker:12 submitted
- *   node roles-actions.mjs temporary-delete tracker:12
- *   node roles-actions.mjs permanent-delete pipeline:https://...
- *   node roles-actions.mjs blacklist-company tracker:12 "reason text"
+ *   node roles/roles-actions.mjs move tracker:12 submitted
+ *   node roles/roles-actions.mjs temporary-delete tracker:12
+ *   node roles/roles-actions.mjs permanent-delete pipeline:https://...
+ *   node roles/roles-actions.mjs blacklist-company tracker:12 "reason text"
  */
 
 import { execFile } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'fs';
 import path from 'path';
-import { normalizeUrlForDedup } from './scan.mjs';
+import { normalizeUrlForDedup } from '../scan.mjs';
 import { buildRoleModel, TAB_TARGET_STATUS } from './roles-model.mjs';
-import { isMainModule } from './lib/is-main-module.mjs';
-import { openTrackerTransaction, rebuildRow } from './tracker-utils.mjs';
-import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+import { isMainModule } from '../lib/is-main-module.mjs';
+import { openTrackerTransaction, rebuildRow } from '../tracker-utils.mjs';
+import { resolveColumns, parseTrackerRow } from '../tracker-parse.mjs';
+import { setMachineSummaryScalar, setRemoteRow } from '../report-format.mjs';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname);
+const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const TRACKER = path.join(ROOT, 'data/applications.md');
 const PIPELINE = path.join(ROOT, 'data/pipeline.md');
 const SCAN_HISTORY = path.join(ROOT, 'data/scan-history.tsv');
@@ -240,10 +241,10 @@ function editReportField(file, field, value, row) {
   const before = text;
   const q = (s) => `"${String(s).replace(/"/g, "'")}"`;
   if (field === 'team') {
-    text = replaceYamlScalar(text, 'archetype', value ? q(value) : 'null');
+    text = setMachineSummaryScalar(text, 'archetype', value ? q(value) : 'null');
     text = text.replace(/^\*\*Archetype:\*\*[ \t]*.*$/m, () => `**Archetype:** ${value || '—'}`);
   } else if (field === 'sal') {
-    text = replaceYamlScalar(text, 'advertised_comp', value ? q(value) : 'null');
+    text = setMachineSummaryScalar(text, 'advertised_comp', value ? q(value) : 'null');
   } else if (field === 'why') {
     if (!value) throw new Error('"Why it fits" cannot be blank');
     if (/^top_strengths:[ \t]*\[[ \t]*\][ \t]*$/m.test(text)) {
@@ -257,29 +258,20 @@ function editReportField(file, field, value, row) {
   return { id: row.id, field, value };
 }
 
-// The replacement values come from user input, so every .replace() here uses a
-// function replacer — a string replacer would treat `$1`, `$&`, `$\`` etc. in
-// the typed text as pattern references.
-function replaceYamlScalar(text, key, literal) {
-  const re = new RegExp(`^(${key}:[ \\t]*).*$`, 'm');
-  if (re.test(text)) return text.replace(re, (_m, pre) => pre + literal);
-  return text.replace(/(##\s*Machine Summary\s*\n+```(?:ya?ml)?\n)/, (_m, pre) => `${pre}${key}: ${literal}\n`);
-}
-
 function editLocation(row, field, value) {
   const file = row.reportFile ? path.join(ROOT, 'reports', row.reportFile) : null;
   if (file && existsSync(file)) {
     const text = readFileSync(file, 'utf-8');
-    const re = /(\|\s*\*\*Remote\*\*\s*\|\s*)([^|]+?)(\s*\|)/;
-    const m = text.match(re);
+    const m = text.match(/\|\s*\*\*Remote\*\*\s*\|\s*([^|]+?)\s*\|/);
     if (m) {
-      const cur = m[2].trim();
+      const cur = m[1].trim();
       const next = field === 'loc'
         ? (value || '—')
         : (value === 'yes'
           ? (/remote/i.test(cur) ? cur : `Remote${cur && cur !== '—' ? ` — ${cur}` : ''}`)
           : (cur.replace(/remote(\s*[—-]\s*)?/i, '').trim() || '—'));
-      writeFileSync(file, text.replace(re, (_m, pre, _cur, post) => pre + next + post), 'utf-8');
+      const { text: patched } = setRemoteRow(text, next);
+      writeFileSync(file, patched, 'utf-8');
       return { id: row.id, field, value };
     }
   }
@@ -390,7 +382,7 @@ if (isMainModule(import.meta.url)) {
     else if (cmd === 'blacklist-company') result = blacklistCompany(id, arg);
     else if (cmd === 'edit') result = await editField(id, arg, arg2);
     else {
-      console.error('Usage: node roles-actions.mjs <move|temporary-delete|permanent-delete|blacklist-company|edit> <id> [arg] [value]');
+      console.error('Usage: node roles/roles-actions.mjs <move|temporary-delete|permanent-delete|blacklist-company|edit> <id> [arg] [value]');
       process.exit(1);
     }
     console.log(JSON.stringify(result, null, 2));

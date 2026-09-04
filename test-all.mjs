@@ -222,7 +222,12 @@ console.log('\n🧪 career-ops test suite\n');
 
 console.log('1. Syntax checks');
 
-const mjsFiles = readdirSync(ROOT).filter(f => f.endsWith('.mjs'));
+const mjsFiles = [
+  ...readdirSync(ROOT).filter(f => f.endsWith('.mjs')),
+  // roles/ is a feature subdir (like providers/); its scripts must stay in the
+  // syntax sweep after being moved out of the root (#roles-dir).
+  ...readdirSync(join(ROOT, 'roles')).filter(f => f.endsWith('.mjs')).map(f => `roles/${f}`),
+];
 
 // `node --check` parses a file and exits; it runs no user code, touches no
 // shared state, and its result depends on nothing but that one file. Spawning
@@ -9494,7 +9499,7 @@ try {
 }
 
 // ── VERIFY-PIPELINE CHECK 15: renderer-consumed report fields ──────────
-// roles-model.mjs reads the dashboard's Location column from a `| **Remote** |`
+// roles/roles-model.mjs reads the dashboard's Location column from a `| **Remote** |`
 // row / `location:` key, Salary from `advertised_comp:`, etc. A 2026-09-03
 // batch shipped 16 reports with none of these and every row rendered a blank
 // Location — the suite did not notice. Check 15 warns (never errors) on any

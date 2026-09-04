@@ -16,12 +16,12 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildRoleModel } from '../roles-model.mjs';
+import { buildRoleModel } from '../roles/roles-model.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const MERGE = join(ROOT, 'merge-tracker.mjs');
-const RENDER = join(ROOT, 'render-roles-html.mjs');
+const RENDER = join(ROOT, 'roles', 'render-roles-html.mjs');
 const NODE = process.execPath;
 const ok = (name, fn) => { try { fn(); pass(name); } catch (e) { fail(`${name} — ${e.message}`); } };
 
@@ -135,7 +135,7 @@ ok('the `report` cell renderer emits an <a> whose href branches on IS_LIVE', () 
   assert.match(block, /target="_blank" rel="noopener"/, 'opens in a new tab safely');
 });
 ok('serve-roles.mjs exposes a guarded GET /reports/ route', () => {
-  const src = readFileSync(join(ROOT, 'serve-roles.mjs'), 'utf-8');
+  const src = readFileSync(join(ROOT, 'roles', 'serve-roles.mjs'), 'utf-8');
   assert.match(src, /url\.pathname\.startsWith\('\/reports\/'\)/, 'route present');
   assert.match(src, /name\.includes\('\.\.'\)/, 'rejects ".." traversal');
   assert.match(src, /\[A-Za-z0-9\._-\]\+\\\.md\$/, 'restricts to a bare .md filename');

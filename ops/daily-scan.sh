@@ -19,14 +19,16 @@
 # Stage 2 (triage + A-G scoring + tracker + HTML) is the scheduled Claude task:
 # it runs `/career-ops pipeline` over the data/pipeline.md this wrote, then
 # WebSearches the portals.yml `scan_method: websearch` companies into the same
-# pipeline, then `node render-roles-html.mjs`. See ../HOWTO.md and
+# pipeline, then `node roles/render-roles-html.mjs`. See ../../HOWTO.md and
 # modes/_custom.md (the scoring ruleset).
 #
-# Run by hand:   ./daily-scan.sh
-# Or on a timer: see com.haochen.careerops.daily-scan.plist
+# Run by hand:   ./ops/daily-scan.sh   (from the career-ops root)
+# Or on a timer: see ops/com.haochen.careerops.daily-scan.plist
 
 set -uo pipefail
-cd "$(dirname "$0")" || exit 1
+# This script lives in career-ops/ops/; every path below is relative to the
+# career-ops root, so step up one level from the script's own directory.
+cd "$(dirname "$0")/.." || exit 1
 
 LOG_DIR="data/logs"
 mkdir -p "$LOG_DIR"

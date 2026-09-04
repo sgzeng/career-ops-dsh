@@ -507,7 +507,7 @@ if (!existsSync(FOLLOWUPS_FILE)) {
 }
 
 // --- Check 15: Report completeness for renderer-consumed fields ---
-// roles-model.mjs -> parseReport() populates the dashboard columns (Location,
+// roles/roles-model.mjs -> parseReport() populates the dashboard columns (Location,
 // Salary, Legitimacy, Work auth, Team, Match %) from specific fields in the
 // report. When one of those is missing the column silently renders "—": the
 // evaluation looks done but a reader comparing roles is missing the data.

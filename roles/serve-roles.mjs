@@ -10,8 +10,8 @@
  * This process never edits applications.md directly.
  *
  * Usage:
- *   node serve-roles.mjs             # http://0.0.0.0:7777
- *   node serve-roles.mjs --port 8080
+ *   node roles/serve-roles.mjs             # http://0.0.0.0:7777  (or: npm run serve:roles)
+ *   node roles/serve-roles.mjs --port 8080
  */
 import { createServer } from 'http';
 import { readFileSync, existsSync } from 'fs';
@@ -21,7 +21,7 @@ import { fileURLToPath } from 'url';
 import { buildRoleModel } from './roles-model.mjs';
 import * as actions from './roles-actions.mjs';
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HTML_PATH = path.resolve(ROOT, '../ai-security-roles.html');
 
 const args = process.argv.slice(2);
@@ -32,7 +32,7 @@ const PORT = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : 7777;
 let writing = false;
 
 function renderFresh() {
-  execFileSync('node', [path.join(ROOT, 'render-roles-html.mjs')], { cwd: ROOT });
+  execFileSync('node', [path.join(ROOT, 'roles', 'render-roles-html.mjs')], { cwd: ROOT });
   return readFileSync(HTML_PATH, 'utf-8');
 }
 

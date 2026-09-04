@@ -17,8 +17,9 @@
 
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import path from 'path';
-import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
-import { normalizeUrlForDedup } from './scan.mjs';
+import { resolveColumns, parseTrackerRow } from '../tracker-parse.mjs';
+import { normalizeUrlForDedup } from '../scan.mjs';
+import { parseReportMeta } from '../report-format.mjs';
 
 // ── Tab model ────────────────────────────────────────────────────────
 // UI tab id → canonical states.yml labels it shows (case-sensitive, matches
@@ -63,90 +64,13 @@ function clampPct(n) {
 }
 
 // ── reports/*.md — full Machine Summary schema ──────────────────────
-// Every key documented in batch/batch-prompt.md's Machine Summary fence,
-// plus the header fields the renderer already used (URL, Archetype, Remote).
+// The on-disk report format (header fields + `## Machine Summary` YAML fence +
+// `| **Remote** |` row) lives in report-format.mjs, shared with the write path
+// in roles-actions.mjs. This is just the file read.
 function parseReport(file) {
   let text;
   try { text = readFileSync(file, 'utf-8'); } catch { return {}; }
-  const out = {};
-
-  const url = text.match(/^\*\*URL:\*\*\s*(\S+)/m);
-  if (url && /^https?:\/\//.test(url[1])) out.url = url[1];
-
-  const arche = text.match(/^\*\*Archetype:\*\*\s*(.+)$/m);
-  if (arche) out.archetype = arche[1].trim();
-
-  const legHeader = text.match(/^\*\*Legitimacy:\*\*\s*(.+)$/m);
-  if (legHeader) out.legitimacy_tier = legHeader[1].trim();
-
-  const workAuthHeader = text.match(/^\*\*Work Auth:\*\*\s*(.+)$/m);
-  if (workAuthHeader) out.work_auth_display = workAuthHeader[1].trim();
-
-  const remoteRow = text.match(/\|\s*\*\*Remote\*\*\s*\|\s*([^|]+?)\s*\|/);
-  if (remoteRow) {
-    out.loc = remoteRow[1].trim();
-    out.remote = /remote/i.test(remoteRow[1]);
-  }
-
-  const ms = text.match(/##\s*Machine Summary\s*\n+```(?:ya?ml)?\n([\s\S]*?)\n```/);
-  if (ms) {
-    const y = ms[1];
-    const scalar = (k) => {
-      const m = y.match(new RegExp('^' + k + ':\\s*(.+)$', 'm'));
-      return m ? m[1].trim().replace(/^["']|["']$/g, '') : null;
-    };
-    const list = (k) => {
-      const m = y.match(new RegExp('^' + k + ':\\s*\\n((?:\\s*-\\s*.*\\n?)+)', 'm'));
-      if (!m) return [];
-      return m[1].split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l.startsWith('-'))
-        .map((l) => l.replace(/^-\s*/, '').replace(/^["']|["']$/g, '').trim())
-        .filter(Boolean);
-    };
-    const nullable = (v) => (v == null || v === 'null' ? null : v);
-
-    const pct = scalar('pct');
-    if (pct != null && /^\d+$/.test(pct)) out.pct = +pct;
-    // Location fallback: the `| **Remote** | … |` header row is the primary
-    // source (above), but reports that write Block A as prose instead of a
-    // table have no such row and rendered Location as "—". Accept a Machine
-    // Summary `location:` key as a structured second source so a missing
-    // header row degrades to a filled column, not a blank one (verify-pipeline
-    // Check 15 flags reports that carry neither).
-    if (!out.loc) {
-      const msLoc = nullable(scalar('location'));
-      if (msLoc) {
-        out.loc = msLoc;
-        if (out.remote == null) out.remote = /remote/i.test(msLoc);
-      }
-    }
-    out.legitimacy_tier = out.legitimacy_tier || nullable(scalar('legitimacy_tier'));
-    out.archetype = out.archetype || nullable(scalar('archetype'));
-    out.final_decision = nullable(scalar('final_decision'));
-    out.risk_level = nullable(scalar('risk_level'));
-    out.confidence = nullable(scalar('confidence'));
-    out.next_action = nullable(scalar('next_action'));
-    out.work_auth = nullable(scalar('work_auth'));
-    out.via = nullable(scalar('via'));
-    out.reports_to = nullable(scalar('reports_to'));
-    const comp = nullable(scalar('advertised_comp'));
-    if (comp) out.advertised_comp = comp;
-    out.hard_stops = list('hard_stops');
-    out.soft_gaps = list('soft_gaps');
-    out.discard_reasons = list('discard_reasons');
-    const strengths = list('top_strengths');
-    if (strengths.length) out.why = strengths[0];
-    out.risk_summary = {
-      legitimacy: nullable(scalar('legitimacy')),
-      classification: nullable(scalar('classification')),
-      culture: nullable(scalar('culture')),
-      interview_redflags: nullable(scalar('interview_redflags')),
-      ai_infra: nullable(scalar('ai_infra')),
-      ai_screening_disclosure: nullable(scalar('ai_screening_disclosure')),
-    };
-  }
-  return out;
+  return parseReportMeta(text);
 }
 
 function resolveReport(reportCell, reportsDir, root, fallbackNum) {
@@ -234,7 +158,7 @@ function loadScanHistory(text) {
  * @returns {{rows: object[], generatedAt: string}}
  */
 export function buildRoleModel(opts = {}) {
-  const root = opts.root || path.dirname(new URL(import.meta.url).pathname);
+  const root = opts.root || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
   const TRACKER = opts.trackerPath || path.join(root, 'data/applications.md');
   const REPORTS = opts.reportsDir || path.join(root, 'reports');
   const PIPELINE = opts.pipelinePath || path.join(root, 'data/pipeline.md');

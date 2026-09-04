@@ -9,8 +9,8 @@
  * renders the page. Run it after every pipeline run, or use `npm run
  * serve:roles` for a live view with working row actions (move/delete).
  *
- *   node render-roles-html.mjs
- *   node render-roles-html.mjs --out ../ai-security-roles.html
+ *   node roles/render-roles-html.mjs
+ *   node roles/render-roles-html.mjs --out ../ai-security-roles.html
  *
  * This file opened directly (file://) is read-only — the Actions column and
  * its API calls only activate when the page is served over http (see
@@ -25,7 +25,7 @@ import { buildRoleModel } from './roles-model.mjs';
 const args = process.argv.slice(2);
 const flag = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d; };
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname));
+const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const OUT = path.resolve(flag('--out', '../ai-security-roles.html'));
 
 const esc = (s) => String(s ?? '')
@@ -811,7 +811,7 @@ function descCell(text){ return '<div class="desc-clamp" data-desc><div class="d
 
 const TAB_MOVE_TARGETS = ['evaluated','submitted','pending','offered','rejected','archived'];
 function actionsCell(r){
-  if (!IS_LIVE) return '<span class="readonly-note">run serve-roles.mjs</span>';
+  if (!IS_LIVE) return '<span class="readonly-note">run npm run serve:roles</span>';
   return '<button class="actions-btn" onclick="openActionsMenu(event,\\''+r.id+'\\',\\''+r.tab+'\\')">Actions ▾</button>';
 }
 
@@ -1049,7 +1049,7 @@ document.addEventListener('click', e => {
 buildHeader();
 applyColVisibility();
 document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('on', b.dataset.tab === curTab));
-document.getElementById('mode-note').textContent = IS_LIVE ? 'Live — row actions + click-to-edit write to disk · drag headers to reorder' : 'Static file — run node serve-roles.mjs for row actions & cell editing · drag headers to reorder';
+document.getElementById('mode-note').textContent = IS_LIVE ? 'Live — row actions + click-to-edit write to disk · drag headers to reorder' : 'Static file — run npm run serve:roles for row actions & cell editing · drag headers to reorder';
 go();
 window.addEventListener('resize', scheduleFit);
 // ResizeObserver catches width changes window.resize can miss (devtools dock,
