@@ -118,6 +118,33 @@ async function loadProviderIds() {
 
 const TITLE_FILTER_FIELDS = ['positive', 'negative', 'seniority_boost'];
 
+// Top-level keys the scanner + the stage-2 agent understand. An unknown key here
+// is almost always a typo (`serch_queries`) that would silently do nothing, so it
+// is surfaced as a warning (not an error — a stripped-down or future config may
+// legitimately carry keys this checkout does not know).
+const KNOWN_TOP_LEVEL = new Set([
+  'scan_history', 'location_filter', 'visa_filter', 'country_eligibility_filter',
+  'max_posting_age_days', 'trust_filter', 'skip_tiers', 'title_filter',
+  'title_filter_full', 'content_filter', 'salary_filter', 'search_keyword_groups',
+  'search_queries', 'linkedin_post_queries', 'tracked_companies', 'job_boards',
+  'interamt_searches', 'hn_hiring',
+]);
+
+// Per-entry keys recognised on tracked_companies[] / job_boards[].
+const KNOWN_COMPANY_KEYS = new Set([
+  'name', 'careers_url', 'api', 'provider', 'parser', 'domain', 'enabled',
+  'max_pages', 'ibm', 'amazon', 'notes', 'verified',
+  'scan_method', 'scan_query', 'groups', 'search_site',
+]);
+
+const KNOWN_SEARCH_QUERY_KEYS = new Set(['name', 'query', 'groups', 'site', 'enabled']);
+
+const SCAN_METHODS = new Set(['websearch', 'playwright', 'local_parser']);
+
+function looksScoped(str) {
+  return typeof str === 'string' && /\bsite:/i.test(str);
+}
+
 export async function validatePortalsConfig(config, { providerIds = new Set() } = {}) {
   const errors = [];
   const warnings = [];
@@ -220,8 +247,71 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
-  if (config.search_queries !== undefined && !Array.isArray(config.search_queries)) {
-    add(errors, 'search_queries', 'search_queries must be an array when set');
+  // search_keyword_groups: the canonical vocabulary the stage-2 agent expands
+  // into `site:<domain> ("t1" OR "t2" …)`. Object of name -> non-empty keyword list.
+  const groupNames = new Set();
+  if (config.search_keyword_groups !== undefined) {
+    if (!isObject(config.search_keyword_groups)) {
+      add(errors, 'search_keyword_groups', 'must be an object of name -> keyword list');
+    } else {
+      for (const [name, list] of Object.entries(config.search_keyword_groups)) {
+        groupNames.add(name);
+        const path = `search_keyword_groups.${name}`;
+        if (!Array.isArray(list) || list.length === 0) {
+          add(errors, path, 'must be a non-empty list of keyword strings');
+          continue;
+        }
+        validateKeywordList(list, path, errors);
+      }
+    }
+  }
+
+  if (config.search_queries !== undefined) {
+    if (!Array.isArray(config.search_queries)) {
+      add(errors, 'search_queries', 'search_queries must be an array when set');
+    } else {
+      for (const [idx, entry] of config.search_queries.entries()) {
+        const path = `search_queries[${idx}]`;
+        if (!isObject(entry)) {
+          add(errors, path, 'must be an object');
+          continue;
+        }
+        const hasQuery = typeof entry.query === 'string' && entry.query.trim() !== '';
+        const hasGroups = Array.isArray(entry.groups) && entry.groups.length > 0;
+        if (!hasQuery && !hasGroups) {
+          add(errors, path, 'must have either a non-empty `query` string or a non-empty `groups` list');
+        }
+        if (hasQuery && hasGroups) {
+          add(errors, path, 'has both `query` and `groups` — use one (a literal `query` wins and makes `groups` dead)');
+        }
+        if (hasGroups) {
+          for (const g of entry.groups) {
+            if (!groupNames.has(g)) {
+              add(errors, `${path}.groups`, `references unknown keyword group "${g}"`);
+            }
+          }
+          if (entry.site !== undefined && (typeof entry.site !== 'string' || entry.site.trim() === '')) {
+            add(errors, `${path}.site`, 'must be a non-empty domain string when `groups` is used');
+          } else if (entry.site === undefined) {
+            add(warnings, path, 'uses `groups` without a `site:` scope — the expanded query will be unscoped');
+          }
+        }
+        if (hasQuery && !looksScoped(entry.query)) {
+          add(warnings, `${path}.query`, 'literal query has no `site:` scope — unscoped queries return SEO listicles');
+        }
+        for (const key of Object.keys(entry)) {
+          if (!KNOWN_SEARCH_QUERY_KEYS.has(key)) {
+            add(warnings, `${path}.${key}`, `unknown search_queries field — expected one of ${[...KNOWN_SEARCH_QUERY_KEYS].join(', ')}`);
+          }
+        }
+      }
+    }
+  }
+
+  for (const key of Object.keys(config)) {
+    if (!KNOWN_TOP_LEVEL.has(key)) {
+      add(warnings, key, 'unknown top-level portals.yml key (typo?)');
+    }
   }
 
   const companies = config.tracked_companies;
@@ -262,6 +352,40 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       }
 
       validateParser(company.parser, `${base}.parser`, errors);
+
+      if (company.scan_method !== undefined && !SCAN_METHODS.has(company.scan_method)) {
+        add(warnings, `${base}.scan_method`, `unrecognised scan_method "${company.scan_method}" — expected one of ${[...SCAN_METHODS].join(', ')}`);
+      }
+      if (company.scan_query !== undefined) {
+        if (typeof company.scan_query !== 'string' || company.scan_query.trim() === '') {
+          add(errors, `${base}.scan_query`, 'must be a non-empty string when set');
+        } else if (!looksScoped(company.scan_query)) {
+          add(warnings, `${base}.scan_query`, 'has no `site:` scope — unscoped queries return SEO listicles');
+        }
+      }
+      if (company.groups !== undefined) {
+        if (!Array.isArray(company.groups) || company.groups.length === 0) {
+          add(errors, `${base}.groups`, 'must be a non-empty list of keyword-group names');
+        } else {
+          for (const g of company.groups) {
+            if (!groupNames.has(g)) {
+              add(errors, `${base}.groups`, `references unknown keyword group "${g}"`);
+            }
+          }
+        }
+        if (company.scan_query !== undefined) {
+          add(warnings, `${base}.groups`, 'ignored — a literal `scan_query` overrides `groups`');
+        }
+      }
+      if (company.search_site !== undefined && (typeof company.search_site !== 'string' || company.search_site.trim() === '')) {
+        add(errors, `${base}.search_site`, 'must be a non-empty domain string when set');
+      }
+
+      for (const key of Object.keys(company)) {
+        if (!KNOWN_COMPANY_KEYS.has(key)) {
+          add(warnings, `${base}.${key}`, 'unknown company field (typo?)');
+        }
+      }
     }
   }
 

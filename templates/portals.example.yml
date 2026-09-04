@@ -461,7 +461,30 @@ title_filter:
 # Each query triggers a WebSearch. Use site: to filter by portal.
 # The scanner extracts title, URL, and company from results.
 
+# ── Search keyword groups (optional) ───────────────────────────────────────
+# One canonical vocabulary for the agent-run WebSearch path. A `search_queries`
+# entry or a `scan_method: websearch` company can carry `site:` + `groups: [...]`
+# instead of a hand-written `query:` string; the agent expands it to
+# `site:<domain> ("term" OR "term" …)` by unioning the named groups. Add a term
+# HERE once and every query that references the group picks it up.
+#   scan.mjs does NOT read this — the zero-token scanner filters on `title_filter`.
+search_keyword_groups:
+  core:
+    - '"AI Engineer"'
+    - '"LLM Engineer"'
+    - '"Machine Learning Engineer"'
+  agentic:
+    - '"Agentic"'
+    - '"AI Agent"'
+    - '"Automation Architect"'
+
 search_queries:
+  # -- Keyword-group form (preferred): site + groups, no literal query --
+  - name: Ashby — core + agentic (keyword groups)
+    site: jobs.ashbyhq.com
+    groups: [core, agentic]
+    enabled: false
+
   # -- Visa sponsorship (US) --
   # Explicitly hunt for roles that sponsor a US work visa. Pair these with the
   # `visa_filter` block above (require_mention: true) so the scan-side filter

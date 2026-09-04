@@ -149,7 +149,9 @@ For companies with a public API or structured feed **that are not in `local_pars
 
 ### Level 3 — WebSearch Queries (BROAD DISCOVERY)
 
-The `search_queries` with `site:` filters cover portals transversally (all Ashby, all Greenhouse, etc.). Useful for discovering NEW companies that are not yet in `tracked_companies`, but results might be outdated. After filtering out hits from companies in `local_parser_ok`, the remaining results are deduplicated with Levels 0–2.
+The `search_queries` with `site:` filters cover portals transversally (all Ashby, all Greenhouse, etc.). Useful for discovering NEW companies that are not yet in `tracked_companies`, but results might be outdated.
+
+> **Shorthand:** a `search_queries` entry (or a `scan_method: websearch` company) may carry `site:` + `groups: [...]` instead of a literal `query:` string. Expand it to `site:<site> ("term" OR "term" …)` by unioning the named groups from `portals.yml → search_keyword_groups`. If a project keeps house rules (e.g. `modes/_custom.md § WebSearch query construction`), follow those verbatim. A literal `query:` / `scan_query:` still wins when present. After filtering out hits from companies in `local_parser_ok`, the remaining results are deduplicated with Levels 0–2.
 
 > **Caution — Level-3 hits can be weeks stale.** WebSearch is fed by a search index that lags the live board, so a result can describe a posting that has already closed. Treat every Level-3 hit as unverified: before adding it to `data/pipeline.md` or evaluating it, confirm liveness against the real posting (`node check-liveness.mjs <url>` for ATS-hosted pages, or Playwright for non-ATS pages). Unlike the real-time ATS responses in Level 2, a Level-3 snippet is never proof a role is still open.
 
@@ -201,7 +203,7 @@ Levels are additive — they are executed in order, and results are merged and d
 
 6. **Level 3 — WebSearch Queries** (parallel if possible):
    For each query in `search_queries` with `enabled: true` (general queries by portal/role — not dedicated queries for a company with an active local parser):
-   a. Execute WebSearch with the defined `query`.
+   a. Execute WebSearch with the defined `query`, or, if the entry uses `site:` + `groups:`, with the query expanded from `search_keyword_groups` (see the Level 3 shorthand note above).
    b. From each result, extract: `{title, url, company}`.
       - **title**: from the result title (before " @ " or " | ")
       - **url**: URL of the result

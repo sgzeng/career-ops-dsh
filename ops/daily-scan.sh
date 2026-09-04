@@ -45,6 +45,9 @@ LOG="$LOG_DIR/scan-$(date +%Y-%m-%d).log"
     exit 1
   fi
 
+  echo "--- portals.yml schema preflight ---"
+  node validate-portals.mjs || echo "WARN: portals.yml has schema issues (see above) — scanning anyway"
+
   echo "--- node scan.mjs --since 7 (curated watchlist) ---"
   node scan.mjs --since 7 --quiet
   echo "scan.mjs exit=$?"
