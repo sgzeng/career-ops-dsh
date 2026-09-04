@@ -108,6 +108,19 @@ function parseReport(file) {
 
     const pct = scalar('pct');
     if (pct != null && /^\d+$/.test(pct)) out.pct = +pct;
+    // Location fallback: the `| **Remote** | … |` header row is the primary
+    // source (above), but reports that write Block A as prose instead of a
+    // table have no such row and rendered Location as "—". Accept a Machine
+    // Summary `location:` key as a structured second source so a missing
+    // header row degrades to a filled column, not a blank one (verify-pipeline
+    // Check 15 flags reports that carry neither).
+    if (!out.loc) {
+      const msLoc = nullable(scalar('location'));
+      if (msLoc) {
+        out.loc = msLoc;
+        if (out.remote == null) out.remote = /remote/i.test(msLoc);
+      }
+    }
     out.legitimacy_tier = out.legitimacy_tier || nullable(scalar('legitimacy_tier'));
     out.archetype = out.archetype || nullable(scalar('archetype'));
     out.final_decision = nullable(scalar('final_decision'));

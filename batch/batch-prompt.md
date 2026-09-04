@@ -290,6 +290,7 @@ Create a machine-readable summary from the completed A-G evaluation and global s
 ```yaml
 company: "{company}"
 role: "{role}"
+location: {verbatim JD work location as a quoted string (e.g. "San Francisco, CA / Remote (US)"), or null when the JD states nothing}
 score: {X.X}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detected}"
@@ -323,6 +324,7 @@ Rules:
 - Use `[]` for `hard_stops`, `soft_gaps`, `top_strengths`, or `discard_reasons` when empty.
 - `score` is numeric only, without `/5`.
 - `final_decision` must reflect the full evaluation, not only the CV match.
+- `location` is the JD's **own** stated work location, verbatim; `null` when the JD names none. This seeds the dashboard's Location column via `roles-model.mjs` — it is a structured fallback for the `| **Remote** | … |` row in Block A, and `verify-pipeline.mjs` Check 15 flags any report that carries neither. Do not infer a location from the company HQ or the team.
 - `advertised_comp` is the JD's **own** figure, verbatim; `null` when the JD states nothing — never estimate it and never substitute researched market data (Block D research stays in Block D). Batch workers never write `data/salary-observations.tsv` — the report itself is the advertised observation (`salary-gap.mjs` reads it).
 - `reports_to` is the reporting line the JD itself states, in the JD's own wording; `null` when the JD names none — never infer it from the title, the team size, or company research. It records the seat's altitude, which the title alone does not: an IC seat reporting to a Head of Marketing and one reporting to the CEO are different roles.
 - Do not invent missing data. If confidence is limited, set `confidence: "Low"` and explain the limitation in the human-readable sections.
@@ -361,6 +363,7 @@ Report header:
 ```yaml
 company: "{empresa}"
 role: "{rol}"
+location: {verbatim JD work location as a quoted string, or null when the JD states nothing}
 score: {X.X}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detectado}"

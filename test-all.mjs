@@ -9493,6 +9493,67 @@ try {
   fail(`verify-pipeline report checks crashed: ${e.message}`);
 }
 
+// ── VERIFY-PIPELINE CHECK 15: renderer-consumed report fields ──────────
+// roles-model.mjs reads the dashboard's Location column from a `| **Remote** |`
+// row / `location:` key, Salary from `advertised_comp:`, etc. A 2026-09-03
+// batch shipped 16 reports with none of these and every row rendered a blank
+// Location — the suite did not notice. Check 15 warns (never errors) on any
+// referenced real evaluation report that is missing one.
+console.log('\n🧪 Testing verify-pipeline renderer-completeness check (Check 15)...');
+try {
+  const c15Tmp = mkdtempSync(join(tmpdir(), 'career-ops-verify-c15-'));
+  try {
+    const c15Reports = join(c15Tmp, 'reports');
+    mkdirSync(c15Reports, { recursive: true });
+    const c15Tracker = join(c15Tmp, 'applications.md');
+    const c15Env = { ...process.env, CAREER_OPS_TRACKER: c15Tracker, CAREER_OPS_REPORTS: c15Reports };
+
+    const bare = (company, role) =>
+      `# Evaluation: ${company} — ${role}\n\n**Date:** 2026-01-04\n**Score:** 4.2/5\n\n` +
+      `## Machine Summary\n\n\`\`\`yaml\ncompany: "${company}"\nrole: "${role}"\nscore: 4.2\n\`\`\`\n\n` +
+      `## A) Role Summary\nProse, no table. Located in Berlin.\n`;
+    const complete = (company, role) =>
+      `# Evaluation: ${company} — ${role}\n\n**Date:** 2026-01-04\n**URL:** https://example.com/j/1\n` +
+      `**Archetype:** X\n**Score:** 4.2/5\n**Legitimacy:** High Confidence\n**Work Auth:** ⚠️ Unstated\n\n` +
+      `| **Remote** | Berlin, DE — hybrid |\n\n` +
+      `## Machine Summary\n\n\`\`\`yaml\ncompany: "${company}"\nrole: "${role}"\nlocation: "Berlin, DE"\nscore: 4.2\nadvertised_comp: null\n\`\`\`\n`;
+    writeFileSync(join(c15Reports, '001-acme-2026-01-04.md'), bare('Acme', 'Staff AI Engineer'));
+    writeFileSync(join(c15Reports, '002-acme-2026-01-05.md'), complete('Acme', 'Platform Engineer'));
+    writeFileSync(c15Tracker,
+      '# Applications Tracker\n\n' +
+      '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
+      '|---|------|---------|------|-------|--------|-----|--------|-------|\n' +
+      '| 1 | 2026-01-04 | Acme | Staff AI Engineer | 4.2/5 | Evaluated | ❌ | [1](reports/001-acme-2026-01-04.md) | ok |\n' +
+      '| 2 | 2026-01-05 | Acme | Platform Engineer | 4.2/5 | Evaluated | ❌ | [2](reports/002-acme-2026-01-05.md) | ok |\n');
+
+    const c15Out = run(NODE, ['verify-pipeline.mjs'], { env: c15Env, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (c15Out === null) {
+      fail('Check 15: verify-pipeline exited non-zero — completeness findings must stay warning-level');
+    } else {
+      pass('Check 15: completeness findings stay warning-level (exit 0)');
+      if (/001-acme-2026-01-04\.md:.*Remote.*row.*location/i.test(c15Out)) {
+        pass('Check 15: report missing the Remote row and location: key is flagged');
+      } else {
+        fail('Check 15: bare report not flagged for missing Location source');
+      }
+      if (/001-acme-2026-01-04\.md:.*URL:/.test(c15Out) && /001-acme-2026-01-04\.md:.*Legitimacy:/.test(c15Out)) {
+        pass('Check 15: missing **URL:** / **Legitimacy:** headers are flagged');
+      } else {
+        fail('Check 15: missing header fields not flagged');
+      }
+      if (/002-acme-2026-01-05\.md/.test(c15Out)) {
+        fail('Check 15: the complete report was falsely flagged');
+      } else {
+        pass('Check 15: a report with the Remote row + location: key + headers passes clean');
+      }
+    }
+  } finally {
+    rmSync(c15Tmp, { recursive: true, force: true });
+  }
+} catch (e) {
+  fail(`Check 15 test crashed: ${e.message}`);
+}
+
 // ── VERIFY-PIPELINE, THE ALPHABET THE FIXTURE ABOVE DOES NOT COVER ──────
 // The fixture above proves the duplicate MECHANISM works. Every string in it
 // is ASCII, so it cannot tell "the detector works" apart from "the detector

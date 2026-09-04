@@ -506,6 +506,75 @@ if (!existsSync(FOLLOWUPS_FILE)) {
   }
 }
 
+// --- Check 15: Report completeness for renderer-consumed fields ---
+// roles-model.mjs -> parseReport() populates the dashboard columns (Location,
+// Salary, Legitimacy, Work auth, Team, Match %) from specific fields in the
+// report. When one of those is missing the column silently renders "—": the
+// evaluation looks done but a reader comparing roles is missing the data.
+// A 16-report batch shipped 2026-09-03 with Block A written as prose instead
+// of a table, so none carried the `| **Remote** | … |` row parseReport() reads
+// for Location, and every row showed a blank Location — caught by eye, not by
+// this suite. This check makes that failure loud.
+//
+// Everything here is warning-level, consistent with the sibling report checks
+// (Check 9 duplicate reports, Check 10 orphan reports): a blank dashboard
+// column is bad data, not a broken pipeline, so it must not flip the exit code
+// (CI / pre-push hooks gate on that). The **URL:** / **Legitimacy:** / Machine
+// Summary checks restate the AGENTS.md -> Pipeline Integrity "MUST" as a
+// visible reminder, not a hard gate.
+const CHECKED_REPORT_URL_RE = /^\*\*URL:\*\*\s*(\S.*)$/m;
+const seenReports = new Set();
+let incompleteReports = 0;
+for (const e of entries) {
+  const targets = [...e.report.matchAll(/\]\(([^)]+)\)/g)].map((m) => m[1]);
+  for (const link of targets) {
+    if (seenReports.has(link)) continue;
+    seenReports.add(link);
+    const abs = existsSync(join(TRACKER_DIR, link))
+      ? join(TRACKER_DIR, link)
+      : (existsSync(join(CAREER_OPS, link)) ? join(CAREER_OPS, link) : null);
+    if (!abs) continue; // Check 3 already flagged the broken link
+    let body;
+    try { body = readFileSync(abs, 'utf-8'); } catch { continue; }
+    const where = `${link.split('/').pop()}`;
+
+    const hasMS = /##\s*Machine Summary\s*\n+```(?:ya?ml|json)?\n[\s\S]*?\n```/.test(body);
+    // Only completeness-check reports that are actual evaluation reports (a
+    // `# Evaluation:` / `# Evaluación:` H1 plus a Machine Summary fence). Bare
+    // stub files and test fixtures fail every sub-check for no useful signal.
+    if (!/^#\s+Evalua(tion|ción):/m.test(body) || !hasMS) continue;
+
+    const urlM = body.match(CHECKED_REPORT_URL_RE);
+    if (!urlM || !/^https?:\/\//.test(urlM[1].trim())) {
+      warn(`#${e.num} report ${where}: header **URL:** missing or not a URL (AGENTS.md Pipeline Integrity #3)`);
+      incompleteReports++;
+    }
+    if (!/^\*\*Legitimacy:\*\*\s*\S/m.test(body)) {
+      warn(`#${e.num} report ${where}: header **Legitimacy:** missing (AGENTS.md Pipeline Integrity #3)`);
+      incompleteReports++;
+    }
+
+    // Location: parseReport() reads a `| **Remote** | <value> |` table row, and
+    // (as of the 2026-09-03 fix) falls back to a Machine Summary `location:`
+    // key. Neither present -> Location renders "—".
+    const hasRemoteRow = /\|\s*\*\*Remote\*\*\s*\|\s*[^|]*\S[^|]*\|/.test(body);
+    const hasMSLocation = /^location:\s*["']?\S/m.test(body);
+    if (!hasRemoteRow && !hasMSLocation) {
+      warn(`#${e.num} report ${where}: no "| **Remote** | … |" row and no Machine Summary "location:" key — Location column will render blank (see modes/oferta.md Block A)`);
+      incompleteReports++;
+    }
+    if (hasMS && !/^advertised_comp:/m.test(body)) {
+      warn(`#${e.num} report ${where}: Machine Summary has no advertised_comp: key — Salary column renders blank and salary-gap.mjs sees no observation (use null if the JD states nothing)`);
+      incompleteReports++;
+    }
+    if (!/^\*\*Archetype:\*\*\s*\S/m.test(body) && !/^archetype:\s*["']?\S/m.test(body)) {
+      warn(`#${e.num} report ${where}: no **Archetype:** header and no Machine Summary archetype: key — Team column renders blank`);
+      incompleteReports++;
+    }
+  }
+}
+if (incompleteReports === 0) ok('All referenced reports carry the renderer-consumed fields');
+
 // --- Summary ---
 console.log('\n' + '='.repeat(50));
 console.log(`📊 Pipeline Health: ${errors} errors, ${warnings} warnings`);

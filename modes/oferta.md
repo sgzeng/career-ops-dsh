@@ -590,6 +590,8 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 **Work Auth:** {✅ Sponsors | ➖ Not needed | ⚠️ Unstated | ⛔ No sponsorship}
 **PDF:** {path or pending}
 
+| **Remote** | {verbatim JD work location, e.g. "San Francisco, CA / Remote (US) — hybrid"} |
+
 ---
 
 ## Machine Summary
@@ -632,6 +634,8 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 ```
 
 **Job Description (required):** every report ends with a `## Job Description (scraped {YYYY-MM-DD})` section carrying the **verbatim** scraped posting body inside a ` ```text ` fence, preceded by a one-line `Source: {origin}. … {N} chars.` note. Strip HTML to text and drop nav/footer chrome, but never paraphrase, summarise, or truncate — the report must stay usable after the posting goes dead. If a ` ``` ` fence appears in the JD, replace it with `'''`. If extraction genuinely failed, write the section with `_extraction failed: {reason}_` and the raw URL rather than a hand-written stand-in. See `modes/_custom.md` → "Report contents".
+
+**Location (required, renderer-consumed):** the `| **Remote** | {location} |` row in the header and the Machine Summary `location:` key both feed the dashboard's Location column (`roles-model.mjs` → `parseReport()`). Write the JD's own stated work location verbatim in both; use `null` for the key (and "Not stated on posting" for the row) only when the JD genuinely names no location. `verify-pipeline.mjs` Check 15 flags any report that has neither — a silently blank Location column is the bug this check exists to catch (see the 2026-09-03 batch).
 
 **Machine Summary (required):** every report carries a `## Machine Summary` YAML fence directly after the header — same schema, exact field names, and rules as the "Machine Summary" block in `batch/batch-prompt.md` (do not duplicate the schema here; that file is the source of truth). It includes `advertised_comp`: the JD's own salary figure **verbatim** (e.g. `"80-90k EUR"`), or `null` when the JD states nothing — never estimated, never replaced with researched market data. This key seeds the advertised salary observation read by `node salary-gap.mjs`. It also includes `risk_summary`: the Risk Summary block mirrored as a map (schema and enum values in `batch/batch-prompt.md`).
 
