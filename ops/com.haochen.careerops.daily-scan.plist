@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Runs daily-scan.sh every day at 19:30 local time, 30 minutes before the
-  Claude scheduled task at 20:00 (8pm) picks up the results.
+  Runs daily-scan.sh once a week, Monday at 19:30 local time, 30 minutes before
+  the Claude scheduled task picks up the results.
 
   Install (in your own Mac terminal):
 
@@ -14,7 +14,7 @@
   Run it now: launchctl start com.haochen.careerops.daily-scan
   Remove it:  launchctl unload ~/Library/LaunchAgents/com.haochen.careerops.daily-scan.plist
 
-  If the Mac is asleep at 19:30, launchd runs the job at the next wake.
+  If the Mac is asleep at the scheduled time, launchd runs the job at the next wake.
 -->
 <plist version="1.0">
 <dict>
@@ -32,6 +32,7 @@
 
   <key>StartCalendarInterval</key>
   <dict>
+    <key>Weekday</key><integer>1</integer>
     <key>Hour</key><integer>19</integer>
     <key>Minute</key><integer>30</integer>
   </dict>
