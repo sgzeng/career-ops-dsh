@@ -51,7 +51,7 @@ hard_stops: []
 soft_gaps:
   - "needs production infra experience"
 top_strengths:
-  - "PBFuzz maps directly to the ask"
+  - "Core requirements map directly to the CV"
 \`\`\`
 
 ## A) Role Summary

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * render-roles-html.mjs — rebuild ai-security-roles.html from the native tracker.
+ * render-roles-html.mjs — rebuild roles.html from the native tracker.
  *
  * Source of truth: roles-model.mjs, which reads data/applications.md (tracker),
  * reports/*.md (Machine Summary), data/pipeline.md (unevaluated scan hits) and
@@ -10,7 +10,10 @@
  * serve:roles` for a live view with working row actions (move/delete).
  *
  *   node roles/render-roles-html.mjs
- *   node roles/render-roles-html.mjs --out ../ai-security-roles.html
+ *   node roles/render-roles-html.mjs --out ../roles.html
+ *
+ * The header (title, keyword chips) and the salary / work-authorization
+ * tooltips come from the user's own config/profile.yml and portals.yml.
  *
  * This file opened directly (file://) is read-only — the Actions column and
  * its API calls only activate when the page is served over http (see
@@ -18,15 +21,30 @@
  * viewer's own localStorage.
  */
 
-import { writeFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import path from 'path';
+import * as yaml from 'js-yaml';
 import { buildRoleModel } from './roles-model.mjs';
 
 const args = process.argv.slice(2);
 const flag = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d; };
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const OUT = path.resolve(flag('--out', '../ai-security-roles.html'));
+const OUT = path.resolve(flag('--out', '../roles.html'));
+
+// Candidate-specific text is read from the user layer, never hardcoded here.
+const readYaml = (rel) => {
+  try { return yaml.load(readFileSync(path.join(ROOT, rel), 'utf-8')) ?? {}; } catch { return {}; }
+};
+const profile = readYaml('config/profile.yml');
+const portals = readYaml('portals.yml');
+const strList = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : []);
+const targetRoles = strList(profile.target_roles?.primary);
+const PAGE_TITLE = targetRoles.length ? targetRoles.slice(0, 3).join(' · ') : 'Job Search Roles';
+const TAGS = [...new Set(strList(portals.title_filter?.positive)
+  .map((t) => t.replace(/^(word|stem):/, '').replace(/\s*\+\s*/g, ' ')))].slice(0, 8);
+const COMP_FLOOR = profile.compensation?.minimum ? String(profile.compensation.minimum) : '';
+const WORK_AUTH = profile.location?.visa_status ? String(profile.location.visa_status) : '';
 
 const esc = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -91,15 +109,15 @@ const COL_DOC = {
   why:       { what: '这个岗位最强的一条匹配理由（一句话）。', src: '报告 ## Machine Summary 的 top_strengths 第一条；没有报告时取 Notes 的 why 段。', why: '一眼判断值不值得动手。' },
   loc:       { what: '岗位地点（可能多地并列）。', src: 'data/scan-history.tsv / data/pipeline.md / JD 原文。', why: '远程 / 通勤 / 搬迁 / 签证相关。' },
   remote:    { what: '是否接受远程。', src: '从地点文本和 JD 推断。' },
-  sal:       { what: 'JD 公示的薪资。', src: '报告 ## Machine Summary 的 advertised_comp。', why: '对照你的底线 $150K。' },
+  sal:       { what: 'JD 公示的薪资。', src: '报告 ## Machine Summary 的 advertised_comp。', why: COMP_FLOOR ? `对照你的底线 ${COMP_FLOOR}（config/profile.yml → compensation.minimum）。` : '对照你的薪资底线（config/profile.yml → compensation.minimum）。' },
   pct:       { what: '0–100 匹配分。', src: '按 modes/_custom.md 的 Scoring Rules（0–100 rubric）打分，写进报告的 pct: 字段。', why: '页面默认排序键；≥90 才提示生成定制 CV。' },
   score:     { what: 'pct 投影到 career-ops 的 1–5 分（round(pct/20,1)）。', src: '由 pct 换算。', why: 'stats / dashboard 等原生工具用的口径。' },
   legitimacy:{ what: '招聘启事的可信度分级。', src: '评估报告 Block G（Posting Legitimacy）的 legitimacy_tier。', why: '过滤影子岗 / 钓鱼帖。' },
-  workauth:  { what: '针对该岗位的签证 / sponsorship 判断。', src: '报告的 work_auth 字段。', why: 'F-1 / 需要 H-1B —— 硬门槛。' },
+  workauth:  { what: '针对该岗位的签证 / sponsorship 判断。', src: '报告的 work_auth 字段。', why: WORK_AUTH ? `你的情况：${WORK_AUTH}（config/profile.yml → location）。` : '对照你的工作许可（config/profile.yml → location）。' },
   risk:      { what: '综合风险级别。', src: '报告 Risk Summary 的 risk_level。' },
   source:    { what: '哪个扫描器 / 渠道发现的（greenhouse-api / ashby-api / lever-api / yc-seed / websearch …）。', src: 'data/scan-history.tsv 的 portal 列。' },
   posted:    { what: '岗位发布日期。', src: 'data/scan-history.tsv 的 posted_at。', why: '新鲜度。' },
-  seen:      { what: '扫描器第一次看到它是多久以前。', src: 'data/scan-history.tsv 的首见日期换算。', why: '>60 天且无在招证据 → 硬排除。' },
+  seen:      { what: '扫描器第一次看到它是多久以前。', src: 'data/scan-history.tsv 的首见日期换算。', why: '新鲜度；多久算过期见 modes/_custom.md → Hard blockers。' },
   softgaps:  { what: '可弥补的简历 ↔ JD 差距。', src: '报告的 soft_gaps 列表。', why: '面试前要补的点。' },
   hardstops: { what: '硬性阻断项（不满足的强制条件）。', src: '报告的 hard_stops 列表。', why: '命中即淘汰。' },
   report:    { what: '完整评估报告的链接。', src: 'reports/NNN-*.md。' },
@@ -338,7 +356,7 @@ const html = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AI Security Roles</title>
+<title>${esc(PAGE_TITLE)} — Roles</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap">
@@ -350,16 +368,9 @@ const html = `<!doctype html>
   <header>
     <div>
       <div class="eyebrow">Job Search · updated ${esc(generatedAt)}</div>
-      <h1>AI Security &amp; Vulnerability Research Roles</h1>
+      <h1>${esc(PAGE_TITLE)}</h1>
       <div class="skill-tags">
-        <span class="skill-tag">Fuzzing</span>
-        <span class="skill-tag">Concolic Execution</span>
-        <span class="skill-tag">Program Analysis</span>
-        <span class="skill-tag">Vulnerability Research</span>
-        <span class="skill-tag">Reverse Engineering</span>
-        <span class="skill-tag">AI Agents</span>
-        <span class="skill-tag">LLVM · C/C++ · Python</span>
-        <span class="skill-tag">PhD 2026</span>
+        ${TAGS.map((t) => `<span class="skill-tag">${esc(t)}</span>`).join('\n        ')}
       </div>
     </div>
     <div class="header-stats">

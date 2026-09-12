@@ -10,7 +10,7 @@
 #                            SAME title_filter/location_filter in portals.yml, so
 #                            new companies surface without anyone curating a list.
 #   3. discover-ats.mjs against data/seeds/*.yml — resolves any seed list
-#      (currently: Black Hat USA sponsors, AIxCC teams) to real ATS boards and
+#      (e.g. conference sponsors, a VC portfolio) to real ATS boards and
 #      promotes the ones that resolve into portals.yml → tracked_companies, so
 #      they join step 1's zero-token scan from then on.
 #
@@ -19,11 +19,11 @@
 # Stage 2 (triage + A-G scoring + tracker + HTML) is the scheduled Claude task:
 # it runs `/career-ops pipeline` over the data/pipeline.md this wrote, then
 # WebSearches the portals.yml `scan_method: websearch` companies into the same
-# pipeline, then `node roles/render-roles-html.mjs`. See ../../HOWTO.md and
-# modes/_custom.md (the scoring ruleset).
+# pipeline, then `node roles/render-roles-html.mjs`. See modes/_custom.md
+# (the scoring ruleset).
 #
 # Run by hand:   ./ops/daily-scan.sh   (from the career-ops root)
-# Or on a timer: see ops/com.haochen.careerops.daily-scan.plist
+# Or on a timer: see ops/daily-scan.plist.example (launchd, macOS)
 
 set -uo pipefail
 # This script lives in career-ops/ops/; every path below is relative to the

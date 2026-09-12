@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * serve-roles.mjs — local companion server for ai-security-roles.html.
+ * serve-roles.mjs — local companion server for roles.html.
  *
  * Zero new dependencies (Node's built-in http only), bound to 0.0.0.0 only.
  * Serves the generated page and exposes the write endpoints the page's
@@ -22,7 +22,7 @@ import { buildRoleModel } from './roles-model.mjs';
 import * as actions from './roles-actions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const HTML_PATH = path.resolve(ROOT, '../ai-security-roles.html');
+const HTML_PATH = path.resolve(ROOT, '../roles.html');
 
 const args = process.argv.slice(2);
 const portIdx = args.indexOf('--port');

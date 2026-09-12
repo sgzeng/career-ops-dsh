@@ -5,7 +5,7 @@
 // Three drift points:
 //   1. roles-model.mjs TAB_STATUSES hard-codes the canonical state labels. A
 //      new/renamed state in templates/states.yml that no tab lists makes
-//      tabForStatus() return null and the row vanishes from ai-security-roles.html.
+//      tabForStatus() return null and the row vanishes from roles.html.
 //   2. buildRoleModel() reads specific fields off parseTrackerRow() — a rename
 //      in tracker-parse.mjs would blank those columns.
 //   3. parseReportMeta() (report-format.mjs) reads specific report-format

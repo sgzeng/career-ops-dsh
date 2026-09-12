@@ -30,9 +30,8 @@ Read `modes/_brief.md` (keyword spine, archetypes, hard DQ) and
 
 - `portals.yml → linkedin_post_queries` — list of `{query, enabled}`. Use enabled
   entries only, **max 5 per run**.
-- `modes/_brief.md` → the keyword spine (fuzzing / program analysis / symbolic or
-  concolic execution / vulnerability research / exploit dev / reverse engineering
-  / offensive security / AI agents *for security*) and the Hard DQ list.
+- `modes/_brief.md` → the keyword spine (the candidate's core pillars and
+  techniques) and the Hard DQ list.
 - `data/scan-history.tsv` — read it first; collect every URL whose row has
   `source == linkedin-post` (col 3), normalized by dropping the query string, to
   skip posts already seen on a previous run.

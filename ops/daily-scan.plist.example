@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job for ops/daily-scan.sh — stage 1 of the job scan (zero tokens), macOS.
+  (The dsh-job-hunter DeepSeek Harness plugin runs stage 1 itself; this is for
+  running career-ops standalone.)
+
+  Install (in your own terminal, from the career-ops root):
+
+    sed "s#__CAREER_OPS_DIR__#$PWD#g" ops/daily-scan.plist.example \
+      > ~/Library/LaunchAgents/com.career-ops.daily-scan.plist
+    launchctl unload ~/Library/LaunchAgents/com.career-ops.daily-scan.plist 2>/dev/null
+    launchctl load  ~/Library/LaunchAgents/com.career-ops.daily-scan.plist
+
+  Check it:   launchctl list | grep career-ops
+  Run it now: launchctl start com.career-ops.daily-scan
+  Remove it:  launchctl unload ~/Library/LaunchAgents/com.career-ops.daily-scan.plist
+
+  Default schedule: Mondays at 19:30 local time (Weekday 1 = Monday; delete the
+  Weekday key to run every day). If the Mac is asleep then, launchd runs the job
+  at the next wake. Machine-specific copies (ops/*.plist) are gitignored.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.career-ops.daily-scan</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__CAREER_OPS_DIR__/ops/daily-scan.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__CAREER_OPS_DIR__</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>1</integer>
+    <key>Hour</key><integer>19</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__CAREER_OPS_DIR__/data/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>__CAREER_OPS_DIR__/data/logs/launchd.err</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
