@@ -9,8 +9,8 @@
 #                            (--seeds yc,a16z) and matches postings against the
 #                            SAME title_filter/location_filter in portals.yml, so
 #                            new companies surface without anyone curating a list.
-#   3. (every 3rd day) discover-ats.mjs against data/seeds/*.yml — resolves any
-#      seed list (currently: Black Hat USA sponsors) to real ATS boards and
+#   3. discover-ats.mjs against data/seeds/*.yml — resolves any seed list
+#      (currently: Black Hat USA sponsors, AIxCC teams) to real ATS boards and
 #      promotes the ones that resolve into portals.yml → tracked_companies, so
 #      they join step 1's zero-token scan from then on.
 #
@@ -56,25 +56,20 @@ LOG="$LOG_DIR/scan-$(date +%Y-%m-%d).log"
   node scan-ats-full.mjs --seeds yc,a16z --since 3
   echo "scan-ats-full.mjs exit=$?"
 
-  # Weekly (Mondays): re-probe every tracked slug so a silently-404ing board gets caught.
-  if [ "$(date +%u)" = "1" ]; then
-    echo "--- weekly slug sweep: verify-portals.mjs ---"
-    node verify-portals.mjs || true
-  fi
+  # Re-probe every tracked slug so a silently-404ing board gets caught.
+  # This script runs weekly (Mondays), so this runs once a week.
+  echo "--- slug sweep: verify-portals.mjs ---"
+  node verify-portals.mjs || true
 
-  # Every 3rd day: resolve any seed list in data/seeds/ (e.g. Black Hat
-  # sponsors) against live ATS boards and promote hits into portals.yml.
-  # --write is additive and idempotent (discover-ats.mjs dedupes by slug), so
-  # this is safe to run unattended. The cadence is keyed off the Unix epoch
-  # day count (days since 1970 mod 3), so it is stable across month/year
-  # boundaries and independent of when the job was installed.
-  if [ "$(( $(date +%s) / 86400 % 3 ))" = "0" ]; then
-    for seed in data/seeds/*.yml; do
-      [ -f "$seed" ] || continue
-      echo "--- 3-day seed resolution: discover-ats.mjs --in $seed --write ---"
-      node discover-ats.mjs --in "$seed" --write --summary || true
-    done
-  fi
+  # Resolve any seed list in data/seeds/ (e.g. Black Hat sponsors) against live
+  # ATS boards and promote hits into portals.yml. --write is additive and
+  # idempotent (discover-ats.mjs dedupes by slug), so this is safe to run
+  # unattended on every scan.
+  for seed in data/seeds/*.yml; do
+    [ -f "$seed" ] || continue
+    echo "--- seed resolution: discover-ats.mjs --in $seed --write ---"
+    node discover-ats.mjs --in "$seed" --write --summary || true
+  done
 
   echo "--- pipeline.md now has $(grep -c '^\- \[ \]' data/pipeline.md 2>/dev/null || echo 0) unprocessed entries ---"
   echo "=== done $(date '+%H:%M:%S') ==="
