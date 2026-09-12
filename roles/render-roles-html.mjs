@@ -13,7 +13,8 @@
  *   node roles/render-roles-html.mjs --out ../roles.html
  *
  * The header (title, keyword chips) and the salary / work-authorization
- * tooltips come from the user's own config/profile.yml and portals.yml.
+ * tooltips come from the user's own config/profile.yml. With no data yet the
+ * page still renders — an empty table and a hint to run the pipeline.
  *
  * This file opened directly (file://) is read-only — the Actions column and
  * its API calls only activate when the page is served over http (see
@@ -32,17 +33,21 @@ const flag = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1]
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const OUT = path.resolve(flag('--out', '../roles.html'));
 
-// Candidate-specific text is read from the user layer, never hardcoded here.
-const readYaml = (rel) => {
-  try { return yaml.load(readFileSync(path.join(ROOT, rel), 'utf-8')) ?? {}; } catch { return {}; }
-};
-const profile = readYaml('config/profile.yml');
-const portals = readYaml('portals.yml');
-const strList = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : []);
+// Candidate-specific text is read from config/profile.yml, never hardcoded here.
+// No profile yet → a generic title and no keyword chips.
+let profile = {};
+try { profile = yaml.load(readFileSync(path.join(ROOT, 'config/profile.yml'), 'utf-8')) ?? {}; } catch { /* generic page */ }
+const strList = (v) => (Array.isArray(v) ? v.map((x) => String(x ?? '').trim()).filter(Boolean) : []);
 const targetRoles = strList(profile.target_roles?.primary);
 const PAGE_TITLE = targetRoles.length ? targetRoles.slice(0, 3).join(' · ') : 'Job Search Roles';
-const TAGS = [...new Set(strList(portals.title_filter?.positive)
-  .map((t) => t.replace(/^(word|stem):/, '').replace(/\s*\+\s*/g, ' ')))].slice(0, 8);
+// Keyword chips: the profile's archetypes (primary fit first), else its superpowers.
+const FIT_RANK = { primary: 0, secondary: 1, adjacent: 2 };
+const archetypes = (Array.isArray(profile.target_roles?.archetypes) ? profile.target_roles.archetypes : [])
+  .filter((a) => a && a.name)
+  .sort((a, b) => (FIT_RANK[a.fit] ?? 3) - (FIT_RANK[b.fit] ?? 3))
+  .map((a) => String(a.name).trim());
+const clip = (s) => (s.length > 48 ? `${s.slice(0, 47)}…` : s);
+const TAGS = [...new Set((archetypes.length ? archetypes : strList(profile.narrative?.superpowers)).map(clip))].slice(0, 8);
 const COMP_FLOOR = profile.compensation?.minimum ? String(profile.compensation.minimum) : '';
 const WORK_AUTH = profile.location?.visa_status ? String(profile.location.visa_status) : '';
 
@@ -890,7 +895,11 @@ document.addEventListener('scroll', hideTip, true);
 function render(rows){
   _rows = rows;
   const tb=document.getElementById('tb'), em=document.getElementById('empty');
-  if(!rows.length){ tb.innerHTML=''; em.classList.remove('hidden'); }
+  if(!rows.length){
+    tb.innerHTML='';
+    em.textContent = D.length ? 'No roles match.' : 'No roles yet — run the pipeline (stage 1 scan + stage 2 evaluation) to fill this table.';
+    em.classList.remove('hidden');
+  }
   else{
     em.classList.add('hidden');
     tb.innerHTML=rows.map(r=>{

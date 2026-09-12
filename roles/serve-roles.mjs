@@ -2,16 +2,18 @@
 /**
  * serve-roles.mjs — local companion server for roles.html.
  *
- * Zero new dependencies (Node's built-in http only), bound to 0.0.0.0 only.
- * Serves the generated page and exposes the write endpoints the page's
- * Actions column calls. Every write is delegated to roles-actions.mjs, which
- * in turn shells out to set-status.mjs / tracker.mjs — the same locked,
- * validated, atomic write paths the CLI and the experimental web/ UI use.
- * This process never edits applications.md directly.
+ * Zero new dependencies (Node's built-in http only). Serves the generated page
+ * and exposes the write endpoints the page's Actions column calls. Every write
+ * is delegated to roles-actions.mjs, which in turn shells out to set-status.mjs
+ * / tracker.mjs — the same locked, validated, atomic write paths the CLI and
+ * the experimental web/ UI use. This process never edits applications.md
+ * directly. Writes must be JSON POSTs (a cross-site form cannot send one
+ * without a CORS preflight, which this server never grants).
  *
  * Usage:
  *   node roles/serve-roles.mjs             # http://0.0.0.0:7777  (or: npm run serve:roles)
- *   node roles/serve-roles.mjs --port 8080
+ *   node roles/serve-roles.mjs --port 8080 --host 127.0.0.1
+ *   node roles/serve-roles.mjs --exit-with-parent   # supervised: exit when stdin closes
  */
 import { createServer } from 'http';
 import { readFileSync, existsSync } from 'fs';
@@ -25,8 +27,17 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HTML_PATH = path.resolve(ROOT, '../roles.html');
 
 const args = process.argv.slice(2);
-const portIdx = args.indexOf('--port');
-const PORT = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : 7777;
+const flag = (name, def) => { const i = args.indexOf(name); return i >= 0 && args[i + 1] ? args[i + 1] : def; };
+const PORT = parseInt(flag('--port', '7777'), 10);
+const HOST = flag('--host', '0.0.0.0');
+
+// A supervisor (e.g. the dsh-job-hunter plugin) keeps our stdin open; when it
+// exits — cleanly or not — the pipe closes and so do we, leaving no orphan.
+if (args.includes('--exit-with-parent')) {
+  process.stdin.on('end', () => process.exit(0));
+  process.stdin.on('error', () => process.exit(0));
+  process.stdin.resume();
+}
 
 // Single-flight guard: one write at a time, mirroring web/src/app/api/status/route.ts.
 let writing = false;
@@ -102,6 +113,10 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && !String(req.headers['content-type'] || '').startsWith('application/json')) {
+      return sendJson(res, 415, { error: 'JSON body required' });
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/data') {
       const model = buildRoleModel({ root: ROOT });
       return sendJson(res, 200, model);
@@ -141,7 +156,14 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`serve-roles: http://0.0.0.0:${PORT}  (Ctrl+C to stop)`);
+server.on('error', (err) => {
+  console.error(err.code === 'EADDRINUSE'
+    ? `serve-roles: port ${PORT} on ${HOST} is already in use`
+    : `serve-roles: ${err.message}`);
+  process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`serve-roles: http://${HOST}:${PORT}  (Ctrl+C to stop)`);
   console.log(`  reads/writes: ${ROOT}`);
 });
