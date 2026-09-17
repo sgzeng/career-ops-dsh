@@ -718,8 +718,13 @@ function wireResize(){
 }
 
 // ── tabs (persisted) ────────────────────────────────────────────────
-let curTab = localStorage.getItem('roles.tab.v1') || 'new';
-if (!TAB_ORDER.includes(curTab)) curTab = 'new';
+// No saved preference (or a stale one, e.g. the tab was renamed) — land on the
+// first tab that actually has something in it, not always 'new': right after a
+// run, 'new' is often empty and every result is sitting in 'evaluated'.
+let curTab = localStorage.getItem('roles.tab.v1');
+if (!curTab || !TAB_ORDER.includes(curTab)) {
+  curTab = TAB_ORDER.find(t => D.some(r => r.tab === t)) || 'new';
+}
 function setTab(t){
   curTab = t;
   try { localStorage.setItem('roles.tab.v1', t); } catch {}
