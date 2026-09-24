@@ -49,6 +49,7 @@ import ashby from './providers/ashby.mjs';
 import workday from './providers/workday.mjs';
 import icims from './providers/icims.mjs';
 import { buildTitleFilter, buildLocationFilter, buildContentFilter, matchedTitleKeywords, loadSeenUrls, normalizeUrlForDedup, appendToPipeline, appendToScanHistory, loadBlacklist, parseSinceDays } from './scan.mjs';
+import { buildLevelFilter } from './lib/level-filter.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { SEED_SOURCES, toPortalEntry } from './seeds/vc-portfolios.mjs';
 import { normalizeCompany } from './tracker-utils.mjs';
@@ -648,7 +649,11 @@ async function main() {
   }
   const config = yaml.load(readFileSync(PORTALS_PATH, 'utf-8'));
   const fullTitleFilterConfig = resolveTitleFilterConfig(config);
-  const titleFilter = buildTitleFilter(fullTitleFilterConfig);
+  // level_filter (lib/level-filter.mjs) caps seniority on the reverse scan too,
+  // folded into titleFilter so every title check below applies it.
+  const baseTitleFilter = buildTitleFilter(fullTitleFilterConfig);
+  const levelFilter = buildLevelFilter(config?.level_filter);
+  const titleFilter = levelFilter ? (t) => baseTitleFilter(t) && levelFilter(t) : baseTitleFilter;
   const locationFilter = buildLocationFilter(config?.location_filter);
   // Same content_filter (incl. by_title_keyword scoping) scan.mjs applies —
   // see #1846. Built once here from the same portals.yml config.

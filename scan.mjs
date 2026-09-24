@@ -53,6 +53,8 @@ import { normalizeCompany } from './tracker-utils.mjs';
 import { normalizeCompanyName } from './invite-match.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { compileKeyword, compilePositiveKeyword, buildTitleFilter } from './title-keywords.mjs';
+import { buildContentRescue } from './lib/content-rescue.mjs';
+import { buildLevelFilter } from './lib/level-filter.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -643,6 +645,13 @@ export const DEFAULT_VISA_NEGATIVE = [
   'not offer visa sponsorship',
 ];
 
+// Export-control boilerplate is about a government export license, not a work
+// visa: Cloudflare ends every JD with "...controlled under these U.S. export laws
+// without sponsorship for an export license", which made "without sponsorship"
+// drop all 382 of its postings once full Greenhouse text was read. Neutralized
+// before the negative match so no default or user phrase can fire on it.
+const EXPORT_LICENSE_SPONSORSHIP_RE = /sponsorship for (?:an? )?(?:u\.s\. )?export licen[cs]es?/g;
+
 export function buildVisaFilter(visaFilter) {
   if (!visaFilter || visaFilter.enabled === false) return () => true;
   const positive = visaFilter.positive != null
@@ -656,7 +665,7 @@ export function buildVisaFilter(visaFilter) {
   return (description) => {
     const hasText = typeof description === 'string' && description.trim() !== '';
     if (!hasText) return !requireMention;
-    const lower = description.toLowerCase();
+    const lower = description.toLowerCase().replace(EXPORT_LICENSE_SPONSORSHIP_RE, 'export license');
     if (negative.length > 0 && negative.some(k => lower.includes(k))) return false;
     if (!requireMention) return true;
     if (positive.length === 0) return true;
@@ -2419,6 +2428,13 @@ async function main() {
   const salaryFilter = buildSalaryFilter(config.salary_filter);
   const trustValidator = buildTrustValidator(config.trust_filter);
   const contentFilter = buildContentFilter(config.content_filter);
+  // Optional (lib/content-rescue.mjs): a title_filter miss may be kept when its
+  // description is strong evidence. Title negatives (Manager, Sales, ...) still veto.
+  const contentRescue = buildContentRescue(config.content_rescue, config.content_filter);
+  const titleNotVetoed = buildTitleFilter({ negative: config.title_filter?.negative });
+  // Optional (lib/level-filter.mjs): drop titles above the candidate's level
+  // ceiling ("Staff", "Principal", ...) while exempting flat/dual titles.
+  const levelFilter = buildLevelFilter(config.level_filter);
   const candidateCountry = loadCandidateCountry();
   const countryEligibilityFilter = buildCountryEligibilityFilter(config.country_eligibility_filter, candidateCountry);
   const visaFilter = buildVisaFilter(config.visa_filter);
@@ -2506,6 +2522,8 @@ async function main() {
   const cooldownOffers = [];
   let totalFound = 0;
   let totalFilteredTitle = 0;
+  let totalContentRescued = 0;
+  let totalFilteredLevel = 0;
   let totalFilteredTier = 0;
   let totalFilteredLocation = 0;
   let totalFilteredPostingAge = 0;
@@ -2588,6 +2606,11 @@ async function main() {
       if (!company._isBoard && jobs.length === 0) {
         emptyTargets.push(company.name);
       }
+      // Per-company: boilerplate stripping needs this company's own postings.
+      // Aggregator boards mix employers, so they are never rescued.
+      const rescue = contentRescue && !company._isBoard
+        ? contentRescue.forCompany(jobs, { providerId: provider.id })
+        : null;
 
       for (const job of jobs) {
         // Trust enrichment — runs before filters, never drops
@@ -2617,7 +2640,18 @@ async function main() {
         }
 
         if (!titleFilter(job.title)) {
-          totalFilteredTitle++;
+          const rescued = rescue && titleNotVetoed(job.title) ? rescue.check(job) : null;
+          if (!rescued) {
+            totalFilteredTitle++;
+            continue;
+          }
+          totalContentRescued++;
+          job.contentRescue = rescued.keywords;
+          const label = `content-rescue: ${rescued.keywords.join(', ')}`;
+          job.note = typeof job.note === 'string' && job.note.trim() ? `${job.note} — ${label}` : label;
+        }
+        if (levelFilter && !levelFilter(job.title)) {
+          totalFilteredLevel++;
           continue;
         }
         if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
@@ -2790,6 +2824,13 @@ async function main() {
   if (config.title_filter || totalFilteredTitle > 0) {
     console.log(`Filtered by title:     ${totalFilteredTitle} removed`);
   }
+  if (contentRescue) {
+    const rescuedNew = verifiedOffers.filter(o => o.contentRescue).length;
+    console.log(`Content-rescued:       ${totalContentRescued} title misses kept on description evidence (${rescuedNew} new)`);
+  }
+  if (levelFilter) {
+    console.log(`Filtered by level:     ${totalFilteredLevel} removed`);
+  }
   if (skipTiers.length > 0) {
     console.log(`Filtered by tier:      ${totalFilteredTier} removed`);
   }
@@ -2959,7 +3000,8 @@ async function main() {
         ? ` [Trust: ${o.trustScore}/100${o.trustFlags?.length ? ' — ' + o.trustFlags.join(', ') : ''}]`
         : '';
       const blacklistSuffix = o.blacklisted ? ' [BLACKLISTED — on your do-not-apply list]' : '';
-      console.log(`  + ${o.company} | ${o.title} | ${o.location || 'N/A'}${trustSuffix}${blacklistSuffix}`);
+      const rescueSuffix = o.contentRescue ? ` [content-rescue: ${o.contentRescue.join(', ')}]` : '';
+      console.log(`  + ${o.company} | ${o.title} | ${o.location || 'N/A'}${trustSuffix}${blacklistSuffix}${rescueSuffix}`);
     }
     if (dryRun) {
       console.log('\n(dry run — run without --dry-run to save results)');

@@ -125,7 +125,7 @@ const TITLE_FILTER_FIELDS = ['positive', 'negative', 'seniority_boost'];
 const KNOWN_TOP_LEVEL = new Set([
   'scan_history', 'location_filter', 'visa_filter', 'country_eligibility_filter',
   'max_posting_age_days', 'trust_filter', 'skip_tiers', 'title_filter',
-  'title_filter_full', 'content_filter', 'salary_filter', 'search_keyword_groups',
+  'title_filter_full', 'content_filter', 'content_rescue', 'level_filter', 'salary_filter', 'search_keyword_groups',
   'search_queries', 'linkedin_post_queries', 'tracked_companies', 'job_boards',
   'interamt_searches', 'hn_hiring',
 ]);
@@ -229,6 +229,55 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
           }
         }
       }
+    }
+  }
+
+  // Fork-local (lib/content-rescue.mjs): description evidence can keep a title miss.
+  if (config.content_rescue !== undefined) {
+    const cr = config.content_rescue;
+    if (!isObject(cr)) {
+      add(errors, 'content_rescue', 'content_rescue must be an object');
+    } else {
+      if (cr.enabled !== undefined && typeof cr.enabled !== 'boolean') {
+        add(errors, 'content_rescue.enabled', 'must be a boolean when set');
+      }
+      for (const key of ['min_distinct', 'min_distinct_no_thesis', 'boilerplate_df_pct', 'min_company_jobs', 'min_description_chars']) {
+        if (cr[key] !== undefined && !(typeof cr[key] === 'number' && Number.isFinite(cr[key]) && cr[key] >= 0)) {
+          add(errors, `content_rescue.${key}`, 'must be a non-negative number when set');
+        }
+      }
+      validateKeywordList(cr.thesis_words, 'content_rescue.thesis_words', errors);
+      validateKeywordList(cr.keywords, 'content_rescue.keywords', errors);
+      validateKeywordList(cr.title_require_any, 'content_rescue.title_require_any', errors);
+      validateKeywordList(cr.skip_providers, 'content_rescue.skip_providers', errors);
+      // A rescue keyword whose text contains no content_filter.positive keyword
+      // can rescue a job that content_filter then drops on the same evidence.
+      const positive = (Array.isArray(config.content_filter?.positive) ? config.content_filter.positive : [])
+        .filter(k => typeof k === 'string').map(k => k.trim().toLowerCase()).filter(Boolean);
+      for (const listKey of ['thesis_words', 'keywords']) {
+        const list = cr[listKey] == null ? [] : (Array.isArray(cr[listKey]) ? cr[listKey] : [cr[listKey]]);
+        for (const w of list) {
+          if (typeof w !== 'string' || positive.length === 0) continue;
+          const bare = w.trim().toLowerCase().replace(/^(word|stem):/, '');
+          if (!positive.some(p => bare.includes(p))) {
+            add(warnings, `content_rescue.${listKey}`, `"${w}" contains no content_filter.positive keyword`);
+          }
+        }
+      }
+    }
+  }
+
+  // Fork-local (lib/level-filter.mjs): whole-word level cap on titles.
+  if (config.level_filter !== undefined) {
+    const lf = config.level_filter;
+    if (!isObject(lf)) {
+      add(errors, 'level_filter', 'level_filter must be an object');
+    } else {
+      if (lf.enabled !== undefined && typeof lf.enabled !== 'boolean') {
+        add(errors, 'level_filter.enabled', 'must be a boolean when set');
+      }
+      validateKeywordList(lf.block, 'level_filter.block', errors);
+      validateKeywordList(lf.exempt, 'level_filter.exempt', errors);
     }
   }
 

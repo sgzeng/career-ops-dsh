@@ -197,6 +197,26 @@ try {
     pass('lever.fetch() maps an empty posting object to empty-string fields without crashing');
   else fail(`lever.fetch() row 2 = ${JSON.stringify(fetched[2])}`);
 
+  // lists[] + additionalPlain — requirements live there, not in descriptionPlain.
+  const [withLists] = await lever.fetch(
+    { name: 'Acme', careers_url: 'https://jobs.lever.co/acme' },
+    { fetchJson: async () => [{
+      text: 'Vulnerability Researcher',
+      hostedUrl: 'https://jobs.lever.co/acme/6666-vr',
+      descriptionPlain: 'Join our research team.',
+      lists: [
+        { text: 'What You Will Do', content: '<li>Build &amp; run <b>fuzzing</b> campaigns</li>' },
+        { text: 'Requirements', content: '<li>Reverse engineering experience</li>' },
+        { text: 42, content: null },
+      ],
+      additionalPlain: 'We do not sponsor visas.',
+    }] },
+  );
+  const d = withLists?.description || '';
+  if (d === 'Join our research team.\nWhat You Will Do\nBuild & run fuzzing campaigns\nRequirements\nReverse engineering experience\nWe do not sponsor visas.')
+    pass('lever.fetch() appends lists[] (heading + stripped HTML) and additionalPlain to the intro, skipping malformed items');
+  else fail(`lever.fetch() lists description = ${JSON.stringify(d)}`);
+
   // categories.allLocations — the multi-location fix. Lever puts a single
   // primary city in `location`; reading only that hides every other eligible
   // location from scan.mjs's location_filter (a Barcelona+Montevideo req looks

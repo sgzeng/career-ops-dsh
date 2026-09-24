@@ -9,8 +9,9 @@
  *
  * Contract with local-parser.mjs: print a JSON array of
  *   { title, url, company, location, postedAt?, source? }
- * to stdout. local-parser keeps only title/url/company/location; postedAt/source
- * are carried for forward-compat and for this script's own recency filter.
+ * to stdout. local-parser keeps title/url/company/location and passes postedAt
+ * through (YYYY-MM-DD → UTC-midnight epoch ms, used by scan.mjs's age filters);
+ * source is dropped. postedAt also drives this script's own recency filter.
  *
  * The guest endpoint returns an HTML fragment of ~10 <li> cards per page:
  *   GET https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search

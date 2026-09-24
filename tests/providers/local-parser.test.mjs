@@ -129,6 +129,52 @@ try {
     fail(`Envelope extraction failed: ${JSON.stringify(envJobs[0])}`);
   }
 
+  // 7b. Fetch - postedAt / description passthrough
+  const datedJobs = await localParser.fetch({
+    parser: { command: 'node', script: 'tests/providers/_fixture-local-parser.mjs', args: ['dated'] },
+  });
+  const byTitle = Object.fromEntries(datedJobs.map((j) => [j.title, j]));
+  if (byTitle.ISO?.postedAt === Date.parse('2026-09-23T06:38:32.724Z')) {
+    pass('localParser.fetch() converts an ISO postedAt to epoch ms');
+  } else {
+    fail(`ISO postedAt = ${JSON.stringify(byTitle.ISO?.postedAt)}`);
+  }
+  if (byTitle.Day?.postedAt === Date.parse('2026-08-27T00:00:00Z')) {
+    pass('localParser.fetch() converts a YYYY-MM-DD postedAt to UTC-midnight epoch ms');
+  } else {
+    fail(`YYYY-MM-DD postedAt = ${JSON.stringify(byTitle.Day?.postedAt)}`);
+  }
+  if (byTitle.Epoch?.postedAt === 1790000000000) {
+    pass('localParser.fetch() keeps an epoch-ms postedAt');
+  } else {
+    fail(`epoch postedAt = ${JSON.stringify(byTitle.Epoch?.postedAt)}`);
+  }
+  if (byTitle.Huge && !('postedAt' in byTitle.Huge)) {
+    pass('localParser.fetch() drops an out-of-range postedAt (would crash toISOString downstream)');
+  } else {
+    fail(`huge postedAt row = ${JSON.stringify(byTitle.Huge)}`);
+  }
+  if (byTitle.Garbage && !('postedAt' in byTitle.Garbage) && !('description' in byTitle.Garbage)) {
+    pass('localParser.fetch() omits an unparseable postedAt and a non-string description');
+  } else {
+    fail(`garbage row = ${JSON.stringify(byTitle.Garbage)}`);
+  }
+  if (byTitle.ISO?.description === 'Fuzzing and program analysis.') {
+    pass('localParser.fetch() passes the description through, trimmed');
+  } else {
+    fail(`description = ${JSON.stringify(byTitle.ISO?.description)}`);
+  }
+  if (byTitle.Long?.description?.length === 20000) {
+    pass('localParser.fetch() caps a parser description at 20000 chars');
+  } else {
+    fail(`capped description length = ${byTitle.Long?.description?.length}`);
+  }
+  if (!('postedAt' in (fetchJobs[0] || {})) && !('description' in (fetchJobs[0] || {}))) {
+    pass('localParser.fetch() adds no postedAt/description keys when the parser omits them');
+  } else {
+    fail(`undated row = ${JSON.stringify(fetchJobs[0])}`);
+  }
+
   // 8. Fetch - Invalid JSON
   try {
     await localParser.fetch({

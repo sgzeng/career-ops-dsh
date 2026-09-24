@@ -48,12 +48,20 @@ LOG="$LOG_DIR/scan-$(date +%Y-%m-%d).log"
   echo "--- portals.yml schema preflight ---"
   node validate-portals.mjs || echo "WARN: portals.yml has schema issues (see above) — scanning anyway"
 
-  echo "--- node scan.mjs --since 7 (curated watchlist) ---"
-  node scan.mjs --since 7 --quiet
+  # Known titles/locations that must (not) pass the filters; catches a config
+  # edit that silently drops a class of roles. WARN only, never blocks the scan.
+  echo "--- filter regression fixtures ---"
+  node ops/check-config-regression.mjs || echo "WARN: filter regression fixtures failed (see above) — scanning anyway"
+
+  # Windows are wider than the weekly cadence on purpose: a run that fires late
+  # (Mac asleep) or a skipped week must not leave jobs unreachable. Overlap is
+  # free — only `added` rows reach scan-history.tsv, so re-seen jobs dedup.
+  echo "--- node scan.mjs --since 14 (curated watchlist) ---"
+  node scan.mjs --since 14 --quiet
   echo "scan.mjs exit=$?"
 
   echo "--- node scan-ats-full.mjs --seeds yc,a16z (reverse discovery, not limited to the watchlist) ---"
-  node scan-ats-full.mjs --seeds yc,a16z --since 3
+  node scan-ats-full.mjs --seeds yc,a16z --since 10
   echo "scan-ats-full.mjs exit=$?"
 
   # Re-probe every tracked slug so a silently-404ing board gets caught.

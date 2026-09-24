@@ -5,6 +5,8 @@
 // Auto-detects from careers_url via jobs.(eu.)?lever.co/<slug>.
 // Handles both explicit `api:` URLs and auto-detection from `careers_url`.
 
+import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
+
 const ALLOWED_LEVER_HOSTS = new Set(['api.lever.co', 'api.eu.lever.co']);
 
 /** @param {string} url */
@@ -62,6 +64,25 @@ function resolveLocation(categories) {
   return merged.join('; ');
 }
 
+/** `descriptionPlain` is only a posting's intro. Its responsibilities and
+ *  requirements live in `lists[]` (heading `text` + HTML `content`) and the
+ *  closing `additionalPlain` (measured on magnetforensics: ~2k chars of intro vs
+ *  ~11k total), so content/visa filters reading only the intro missed them.
+ *  A posting without lists or additional text maps to exactly its intro.
+ *  @param {any} j */
+function fullDescription(j) {
+  const parts = [];
+  if (typeof j.descriptionPlain === 'string') parts.push(j.descriptionPlain);
+  if (Array.isArray(j.lists)) {
+    for (const list of j.lists) {
+      if (typeof list?.text === 'string') parts.push(list.text);
+      if (typeof list?.content === 'string') parts.push(htmlToText(list.content, FULL_DESCRIPTION_CAP));
+    }
+  }
+  if (typeof j.additionalPlain === 'string') parts.push(j.additionalPlain);
+  return parts.map(p => p.trim()).filter(Boolean).join('\n').slice(0, FULL_DESCRIPTION_CAP);
+}
+
 /** @type {Provider} */
 export default {
   id: 'lever',
@@ -88,7 +109,7 @@ export default {
       location: resolveLocation(j.categories),
       // Lever's v0 postings list ships the full description for free (same
       // payload, no per-job request) — enables scan.mjs content_filter.
-      description: typeof j.descriptionPlain === 'string' ? j.descriptionPlain : '',
+      description: fullDescription(j),
       postedAt: typeof j.createdAt === 'number' ? j.createdAt : undefined,
     }));
   },

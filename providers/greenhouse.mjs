@@ -8,7 +8,7 @@
 // country_eligibility filter and visa_filter all read that field, and without
 // it every Greenhouse board passed those filters blind.
 
-import { htmlToText } from './_html-to-text.mjs';
+import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
 
 const ALLOWED_GREENHOUSE_HOSTS = new Set([
   'boards-api.greenhouse.io',
@@ -131,10 +131,13 @@ export function buildOfficeMap(json) {
 
 /**
  * Entity-decoded markup → stripped plain text. Exported for tests.
+ * Uses FULL_DESCRIPTION_CAP, not the 4000 default: at 4000, 2040 of 2083
+ * tracked Greenhouse bodies lost their requirements section (measured
+ * 2026-09-23), which content_filter, visa_filter and content rescue read.
  * @param {unknown} content
  */
 export function contentToText(content) {
-  return htmlToText(content);
+  return htmlToText(content, FULL_DESCRIPTION_CAP);
 }
 
 /** @type {Provider} */

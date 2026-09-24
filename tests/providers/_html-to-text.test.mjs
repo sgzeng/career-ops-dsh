@@ -16,6 +16,16 @@ try {
   if (DESCRIPTION_CAP === 4000) pass('DESCRIPTION_CAP is 4000 (greenhouse/alibaba precedent)');
   else fail(`DESCRIPTION_CAP = ${JSON.stringify(DESCRIPTION_CAP)}, expected 4000`);
 
+  const { FULL_DESCRIPTION_CAP } = mod;
+  const big = 'z'.repeat(30000);
+  if (htmlToText(big).length === DESCRIPTION_CAP) pass('htmlToText() defaults to DESCRIPTION_CAP');
+  else fail(`default cap length = ${htmlToText(big).length}`);
+  if (FULL_DESCRIPTION_CAP === 20000 && htmlToText(big, FULL_DESCRIPTION_CAP).length === 20000) {
+    pass('htmlToText(content, cap) honors an explicit cap (FULL_DESCRIPTION_CAP = 20000)');
+  } else {
+    fail(`explicit cap length = ${htmlToText(big, FULL_DESCRIPTION_CAP).length}`);
+  }
+
   // Non-string and empty inputs degrade to "" — never a thrown error.
   if (htmlToText(null) === '' && htmlToText(undefined) === '' && htmlToText(42) === '' && htmlToText('') === '') {
     pass('htmlToText() returns "" for missing / non-string / empty input');

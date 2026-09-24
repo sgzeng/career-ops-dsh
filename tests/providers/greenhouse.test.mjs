@@ -193,15 +193,21 @@ try {
     pass('greenhouse.fetch() does not leak the raw content field into the normalized job');
   else fail('greenhouse.fetch() leaked raw content');
 
-  // Cap: a full JD body is ~10 KB of HTML; the stripped text is sliced so scan
-  // payloads stay sane (same rationale as alibaba's 4000-char cap).
+  // Cap: greenhouse keeps the whole body up to FULL_DESCRIPTION_CAP (20000) so
+  // the requirements section reaches content/visa filters; only outliers are cut.
   const longBody = await greenhouse.fetch(
     { name: 'Acme', careers_url: 'https://job-boards.greenhouse.io/acme' },
-    { fetchJson: async () => ({ jobs: [{ id: 9, title: 'Long', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/9', content: '&lt;p&gt;' + 'x'.repeat(5000) + '&lt;/p&gt;' }] }) },
+    { fetchJson: async () => ({ jobs: [
+      { id: 9, title: 'Long', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/9', content: '&lt;p&gt;' + 'x'.repeat(25000) + '&lt;/p&gt;' },
+      { id: 10, title: 'Typical', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/10', content: '&lt;p&gt;' + 'y'.repeat(7600) + '&lt;/p&gt;' },
+    ] }) },
   );
-  if (longBody[0]?.description?.length === 4000 && /^x+$/.test(longBody[0].description))
-    pass('greenhouse.fetch() caps the stripped description at 4000 chars');
+  if (longBody[0]?.description?.length === 20000 && /^x+$/.test(longBody[0].description))
+    pass('greenhouse.fetch() caps the stripped description at 20000 chars');
   else fail(`greenhouse.fetch() capped length = ${longBody[0]?.description?.length}`);
+  if (longBody[1]?.description?.length === 7600)
+    pass('greenhouse.fetch() keeps a typical 7.6k-char body whole (no 4000 truncation)');
+  else fail(`greenhouse.fetch() typical body length = ${longBody[1]?.description?.length}`);
 
   // Unit: contentToText contract on the shapes the API can produce.
   if (contentToText(null) === '' && contentToText(undefined) === '' && contentToText(42) === '' && contentToText('') === '')

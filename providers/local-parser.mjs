@@ -137,6 +137,24 @@ function normalizeLocation(value) {
   return String(value).trim();
 }
 
+// Same bound as the full-text ATS providers; a parser can't flood the scan.
+const PARSER_DESCRIPTION_CAP = 20000;
+
+// postedAt → epoch ms (the shape scan.mjs's age/posted-date filters and
+// scan-history read), or undefined. Accepts epoch-ms numbers, ISO timestamps
+// and bare YYYY-MM-DD (UTC midnight). Anything else is dropped, and an absent
+// date passes those filters, same as every other provider. A value more than a
+// year in the future (µs/ns epochs, typos) is dropped too: past the Date range
+// it would make scan.mjs's toISOString() throw and abort the whole scan.
+const MAX_FUTURE_MS = 366 * 24 * 60 * 60 * 1000;
+function normalizePostedAt(value) {
+  const ms = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' && value.trim() ? Date.parse(value.trim()) : NaN);
+  if (!Number.isFinite(ms) || ms <= 0 || ms > Date.now() + MAX_FUTURE_MS) return undefined;
+  return ms;
+}
+
 function normalizeParserJob(job, entry) {
   if (!job || typeof job !== 'object') return null;
 
@@ -147,11 +165,21 @@ function normalizeParserJob(job, entry) {
   );
   if (!title || !url) return null;
 
+  // Optional, passed through so parser jobs get the same age / content / visa
+  // filtering (and content rescue) as ATS jobs. Omitted when absent, matching
+  // the greenhouse/ashby shape where "no signal" differs from an empty string.
+  const postedAt = normalizePostedAt(job.postedAt ?? job.posted_at);
+  const description = typeof job.description === 'string'
+    ? job.description.trim().slice(0, PARSER_DESCRIPTION_CAP)
+    : '';
+
   return {
     title,
     url,
     company: String(job.company || entry.name || '').trim(),
     location: normalizeLocation(job.location || job.locations),
+    ...(description ? { description } : {}),
+    ...(postedAt !== undefined ? { postedAt } : {}),
   };
 }
 

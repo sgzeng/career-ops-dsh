@@ -10,6 +10,13 @@ import { decodeEntities } from './_html-entities.mjs';
 // normal on these boards, and scan payloads must stay sane.
 export const DESCRIPTION_CAP = 4000;
 
+// Opt-in larger cap for providers whose description drives filtering beyond a
+// keyword sniff (content rescue, visa/country language). At 4000 chars ~98% of
+// Greenhouse bodies were cut before their requirements section, where the
+// "vulnerability research" / "no sponsorship" lines usually sit. 20000 keeps
+// the whole body for all but outliers.
+export const FULL_DESCRIPTION_CAP = 20000;
+
 // A tag ends at an unquoted `>`. Attribute values may contain angle brackets,
 // so the common `<[^>]+>` shortcut can stop midway through a tag and expose
 // the remaining attributes as description text. Requiring content between the
@@ -35,14 +42,15 @@ function stripMarkup(content) {
  * Exported for tests.
  *
  * @param {unknown} content
+ * @param {number} [cap] - max output length; defaults to DESCRIPTION_CAP
  * @returns {string}
  */
-export function htmlToText(content) {
+export function htmlToText(content, cap = DESCRIPTION_CAP) {
   if (typeof content !== 'string' || !content) return '';
   // Strip literal markup before decoding: quote entities inside a quoted
   // attribute are data, and decoding them first would turn them into false
   // delimiters. The second strip handles entity-escaped tags revealed by the
   // first decode; the final decode retains the existing double-decode behavior.
   const decoded = decodeEntities(stripMarkup(content));
-  return decodeEntities(stripMarkup(decoded)).replace(/\s+/g, ' ').trim().slice(0, DESCRIPTION_CAP);
+  return decodeEntities(stripMarkup(decoded)).replace(/\s+/g, ' ').trim().slice(0, cap);
 }
