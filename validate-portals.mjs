@@ -197,6 +197,9 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       validateKeywordList(config.location_filter.allow, 'location_filter.allow', errors);
       validateKeywordList(config.location_filter.block, 'location_filter.block', errors);
       validateKeywordList(config.location_filter.block_hard, 'location_filter.block_hard', errors);
+      if (config.location_filter.strict !== undefined && typeof config.location_filter.strict !== 'boolean') {
+        add(errors, 'location_filter.strict', 'must be a boolean when set');
+      }
     }
   }
 
@@ -363,80 +366,91 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
-  const companies = config.tracked_companies;
-  if (companies !== undefined && !Array.isArray(companies)) {
-    add(errors, 'tracked_companies', 'tracked_companies must be an array when set');
-  }
-
+  // tracked_companies and job_boards share one entry schema (name / careers_url /
+  // api / provider / parser) and one dedup namespace downstream, so validate them
+  // in a single pass. seenEnabledNames spans both lists: a board and a company
+  // that share a name would still collide in the scanner's reporting.
   const seenEnabledNames = new Map();
-  if (Array.isArray(companies)) {
-    for (const [idx, company] of companies.entries()) {
-      const base = `tracked_companies[${idx}]`;
-      if (!isObject(company)) {
-        add(errors, base, 'company entry must be an object');
+  const validateEntryList = (list, key, noun) => {
+    if (list === undefined) return;
+    if (!Array.isArray(list)) {
+      add(errors, key, `${key} must be an array when set`);
+      return;
+    }
+    for (const [idx, entry] of list.entries()) {
+      const base = `${key}[${idx}]`;
+      if (!isObject(entry)) {
+        add(errors, base, `${noun} entry must be an object`);
         continue;
       }
-      if (company.enabled === false) continue;
+      if (entry.enabled === false) continue;
 
-      if (typeof company.name !== 'string' || company.name.trim() === '') {
-        add(errors, `${base}.name`, 'enabled company must have a non-empty string name');
+      if (typeof entry.name !== 'string' || entry.name.trim() === '') {
+        add(errors, `${base}.name`, `enabled ${noun} must have a non-empty string name`);
       } else {
-        const normalized = normalizeName(company.name);
+        const normalized = normalizeName(entry.name);
         if (seenEnabledNames.has(normalized)) {
-          add(warnings, `${base}.name`, `duplicate enabled company name also seen at ${seenEnabledNames.get(normalized)}`);
+          add(warnings, `${base}.name`, `duplicate enabled ${noun} name also seen at ${seenEnabledNames.get(normalized)}`);
         } else {
           seenEnabledNames.set(normalized, `${base}.name`);
         }
       }
 
-      validateUrl(company.careers_url, `${base}.careers_url`, errors);
-      validateUrl(company.api, `${base}.api`, errors);
+      validateUrl(entry.careers_url, `${base}.careers_url`, errors);
+      validateUrl(entry.api, `${base}.api`, errors);
 
-      if (company.provider !== undefined) {
-        if (typeof company.provider !== 'string' || company.provider.trim() === '') {
+      if (entry.provider !== undefined) {
+        if (typeof entry.provider !== 'string' || entry.provider.trim() === '') {
           add(errors, `${base}.provider`, 'provider must be a non-empty string when set');
-        } else if (!providerIds.has(company.provider)) {
-          add(errors, `${base}.provider`, `unknown provider "${company.provider}"`);
+        } else if (!providerIds.has(entry.provider)) {
+          add(errors, `${base}.provider`, `unknown provider "${entry.provider}"`);
         }
       }
 
-      validateParser(company.parser, `${base}.parser`, errors);
+      validateParser(entry.parser, `${base}.parser`, errors);
 
-      if (company.scan_method !== undefined && !SCAN_METHODS.has(company.scan_method)) {
-        add(warnings, `${base}.scan_method`, `unrecognised scan_method "${company.scan_method}" — expected one of ${[...SCAN_METHODS].join(', ')}`);
-      }
-      if (company.scan_query !== undefined) {
-        if (typeof company.scan_query !== 'string' || company.scan_query.trim() === '') {
-          add(errors, `${base}.scan_query`, 'must be a non-empty string when set');
-        } else if (!looksScoped(company.scan_query)) {
-          add(warnings, `${base}.scan_query`, 'has no `site:` scope — unscoped queries return SEO listicles');
+      // Fork-local stage-2 WebSearch fields (companies only, as before the
+      // tracked_companies/job_boards merge into this shared validator).
+      if (noun === 'company') {
+        if (entry.scan_method !== undefined && !SCAN_METHODS.has(entry.scan_method)) {
+          add(warnings, `${base}.scan_method`, `unrecognised scan_method "${entry.scan_method}" — expected one of ${[...SCAN_METHODS].join(', ')}`);
         }
-      }
-      if (company.groups !== undefined) {
-        if (!Array.isArray(company.groups) || company.groups.length === 0) {
-          add(errors, `${base}.groups`, 'must be a non-empty list of keyword-group names');
-        } else {
-          for (const g of company.groups) {
-            if (!groupNames.has(g)) {
-              add(errors, `${base}.groups`, `references unknown keyword group "${g}"`);
-            }
+        if (entry.scan_query !== undefined) {
+          if (typeof entry.scan_query !== 'string' || entry.scan_query.trim() === '') {
+            add(errors, `${base}.scan_query`, 'must be a non-empty string when set');
+          } else if (!looksScoped(entry.scan_query)) {
+            add(warnings, `${base}.scan_query`, 'has no `site:` scope — unscoped queries return SEO listicles');
           }
         }
-        if (company.scan_query !== undefined) {
-          add(warnings, `${base}.groups`, 'ignored — a literal `scan_query` overrides `groups`');
+        if (entry.groups !== undefined) {
+          if (!Array.isArray(entry.groups) || entry.groups.length === 0) {
+            add(errors, `${base}.groups`, 'must be a non-empty list of keyword-group names');
+          } else {
+            for (const g of entry.groups) {
+              if (!groupNames.has(g)) {
+                add(errors, `${base}.groups`, `references unknown keyword group "${g}"`);
+              }
+            }
+          }
+          if (entry.scan_query !== undefined) {
+            add(warnings, `${base}.groups`, 'ignored — a literal `scan_query` overrides `groups`');
+          }
         }
-      }
-      if (company.search_site !== undefined && (typeof company.search_site !== 'string' || company.search_site.trim() === '')) {
-        add(errors, `${base}.search_site`, 'must be a non-empty domain string when set');
-      }
+        if (entry.search_site !== undefined && (typeof entry.search_site !== 'string' || entry.search_site.trim() === '')) {
+          add(errors, `${base}.search_site`, 'must be a non-empty domain string when set');
+        }
 
-      for (const key of Object.keys(company)) {
-        if (!KNOWN_COMPANY_KEYS.has(key)) {
-          add(warnings, `${base}.${key}`, 'unknown company field (typo?)');
+        for (const key of Object.keys(entry)) {
+          if (!KNOWN_COMPANY_KEYS.has(key)) {
+            add(warnings, `${base}.${key}`, 'unknown company field (typo?)');
+          }
         }
       }
     }
-  }
+  };
+
+  validateEntryList(config.tracked_companies, 'tracked_companies', 'company');
+  validateEntryList(config.job_boards, 'job_boards', 'job board');
 
   return { errors, warnings };
 }

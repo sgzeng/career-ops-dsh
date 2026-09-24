@@ -79,7 +79,9 @@ tracked_companies:
 `);
     const stdout = execFileSync(NODE, [join(ROOT, 'scan.mjs'), '--quiet'], {
       cwd: dir,
-      env: { ...process.env, CAREER_OPS_PORTALS: join(dir, 'portals.yml') },
+      // CAREER_OPS_ROOT, not cwd, anchors data/ (path-resolver.mjs): without it
+      // this run would write into the real data/pipeline.md.
+      env: { ...process.env, CAREER_OPS_ROOT: dir, CAREER_OPS_PORTALS: join(dir, 'portals.yml') },
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });

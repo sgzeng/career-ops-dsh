@@ -410,10 +410,11 @@ section('buildTrustValidator — custom ATS allowlist');
     enabled: true,
     ats_allowlist: ['custom-ats.io'],
   });
-  // Default ATS (greenhouse) is no longer in the allowlist, and "test" is not
-  // a substring of "boards.greenhouse.io", so mismatch IS expected here.
+  // Fork behavior: ats_allowlist MERGES with the built-in defaults rather than
+  // replacing them (providers/_trust-validator.mjs), so greenhouse stays exempt
+  // and a custom list only ever adds hosts.
   const r = v({ url: 'https://boards.greenhouse.io/test/jobs/1', company: 'Test' });
-  assert(r.flags.includes('company_domain_mismatch'), 'custom ATS replaces defaults: greenhouse no longer exempt → mismatch');
+  assert(!r.flags.includes('company_domain_mismatch'), 'custom ATS allowlist merges with defaults: greenhouse still exempt');
 }
 
 // ══════════════════════════════════════════════════════════════════════
