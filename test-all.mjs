@@ -10344,8 +10344,8 @@ try {
     const complete = (company, role) =>
       `# Evaluation: ${company} — ${role}\n\n**Date:** 2026-01-04\n**URL:** https://example.com/j/1\n` +
       `**Archetype:** X\n**Score:** 4.2/5\n**Legitimacy:** High Confidence\n**Work Auth:** ⚠️ Unstated\n\n` +
-      `| **Remote** | Berlin, DE — hybrid |\n\n` +
-      `## Machine Summary\n\n\`\`\`yaml\ncompany: "${company}"\nrole: "${role}"\nlocation: "Berlin, DE"\nscore: 4.2\nadvertised_comp: null\n\`\`\`\n`;
+      `| **Remote** | Berlin, Germany |\n\n` +
+      `## Machine Summary\n\n\`\`\`yaml\ncompany: "${company}"\nrole: "${role}"\nteam: null\nlocation: "Berlin, Germany"\nscore: 4.2\nadvertised_comp: null\n\`\`\`\n`;
     writeFileSync(join(c15Reports, '001-acme-2026-01-04.md'), bare('Acme', 'Staff AI Engineer'));
     writeFileSync(join(c15Reports, '002-acme-2026-01-05.md'), complete('Acme', 'Platform Engineer'));
     writeFileSync(c15Tracker,

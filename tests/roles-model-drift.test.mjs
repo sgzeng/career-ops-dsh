@@ -93,6 +93,7 @@ const REPORT_FIXTURE = `# Evaluation: Acme — Security Researcher
 pct: 86
 legitimacy_tier: "High Confidence"
 archetype: "Offensive Security"
+team: "Product Security"
 final_decision: "apply"
 risk_level: "low"
 work_auth: "unstated"
@@ -111,7 +112,8 @@ ok('parseReportMeta extracts every field the roles view consumes', () => {
     url: 'https://acme.example/jobs/42',
     archetype: 'Offensive Security',
     legitimacy_tier: 'High Confidence',
-    work_auth_display: '⚠️ Unstated',
+    team: 'Product Security',
+    work_auth_header: '⚠️ Unstated',
     loc: 'Remote — US',
     remote: true,
     pct: 86,
@@ -127,4 +129,21 @@ ok('parseReportMeta extracts every field the roles view consumes', () => {
   // risk_summary is always present as a key set (values populate from top-level
   // scalars only; nested `risk_summary:` sub-keys are not read — pre-existing).
   assert.ok(m.risk_summary && typeof m.risk_summary === 'object', 'risk_summary map missing');
+});
+
+ok('Team never falls back to the archetype verdict', () => {
+  const m = parseReportMeta(REPORT_FIXTURE.replace(/^team:.*\n/m, ''));
+  assert.equal(m.team, null, `team = ${JSON.stringify(m.team)} — archetype must not leak into Team`);
+  assert.equal(m.archetype, 'Offensive Security');
+});
+
+ok('YAML-escaped quotes are unescaped, not shown as \\"', () => {
+  const m = parseReportMeta(REPORT_FIXTURE.replace('"Ships PoVs, not crash buckets"', '"\\"Build verifiable tasks\\" per JD"'));
+  assert.equal(m.why, '"Build verifiable tasks" per JD');
+});
+
+ok('Machine Summary location: wins over the Remote row', () => {
+  const m = parseReportMeta(REPORT_FIXTURE.replace('pct: 86', 'pct: 86\nlocation: "San Jose, CA"'));
+  assert.equal(m.loc, 'San Jose, CA');
+  assert.equal(m.remote, false);
 });

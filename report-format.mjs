@@ -47,20 +47,24 @@ export function parseReportMeta(text) {
   if (legHeader) out.legitimacy_tier = legHeader[1].trim();
 
   const workAuthHeader = text.match(/^\*\*Work Auth:\*\*\s*(.+)$/m);
-  if (workAuthHeader) out.work_auth_display = workAuthHeader[1].trim();
+  if (workAuthHeader) out.work_auth_header = workAuthHeader[1].trim();
 
   const remoteRow = text.match(REMOTE_ROW_RE);
-  if (remoteRow) {
-    out.loc = remoteRow[1].trim();
-    out.remote = /remote/i.test(remoteRow[1]);
-  }
+  if (remoteRow) out.loc = remoteRow[1].trim();
 
   const ms = text.match(MACHINE_SUMMARY_FENCE_RE);
   if (ms) {
     const y = ms[1];
+    // A YAML double-quoted string escapes inner quotes as \" — drop the outer
+    // quotes and unescape, or the page shows a literal backslash.
+    const unquote = (s) => {
+      const t = s.trim();
+      if (/^".*"$/.test(t)) return t.slice(1, -1).replace(/\\(["\\])/g, '$1');
+      return t.replace(/^'|'$/g, '');
+    };
     const scalar = (k) => {
       const m = y.match(new RegExp('^' + k + ':\\s*(.+)$', 'm'));
-      return m ? m[1].trim().replace(/^["']|["']$/g, '') : null;
+      return m ? unquote(m[1]) : null;
     };
     const list = (k) => {
       const m = y.match(new RegExp('^' + k + ':\\s*\\n((?:\\s*-\\s*.*\\n?)+)', 'm'));
@@ -68,28 +72,23 @@ export function parseReportMeta(text) {
       return m[1].split('\n')
         .map((l) => l.trim())
         .filter((l) => l.startsWith('-'))
-        .map((l) => l.replace(/^-\s*/, '').replace(/^["']|["']$/g, '').trim())
+        .map((l) => unquote(l.replace(/^-\s*/, '')))
         .filter(Boolean);
     };
     const nullable = (v) => (v == null || v === 'null' ? null : v);
 
     const pct = scalar('pct');
     if (pct != null && /^\d+$/.test(pct)) out.pct = +pct;
-    // Location fallback: the `| **Remote** | … |` header row is the primary
-    // source (above), but reports that write Block A as prose instead of a
-    // table have no such row and rendered Location as "—". Accept a Machine
-    // Summary `location:` key as a structured second source so a missing
-    // header row degrades to a filled column, not a blank one (verify-pipeline
-    // Check 15 flags reports that carry neither).
-    if (!out.loc) {
-      const msLoc = nullable(scalar('location'));
-      if (msLoc) {
-        out.loc = msLoc;
-        if (out.remote == null) out.remote = /remote/i.test(msLoc);
-      }
-    }
+    // Location: the Machine Summary `location:` key is the structured source;
+    // the `| **Remote** | … |` header row (read above) is the fallback for
+    // older reports that carry only the row. Both hold places only — see
+    // lib/column-contract.mjs → locationProblem.
+    const msLoc = nullable(scalar('location'));
+    if (msLoc) out.loc = msLoc;
     out.legitimacy_tier = out.legitimacy_tier || nullable(scalar('legitimacy_tier'));
     out.archetype = out.archetype || nullable(scalar('archetype'));
+    // Team is the posting's own team name, never the archetype verdict.
+    out.team = nullable(scalar('team'));
     out.final_decision = nullable(scalar('final_decision'));
     out.risk_level = nullable(scalar('risk_level'));
     out.confidence = nullable(scalar('confidence'));
@@ -113,6 +112,7 @@ export function parseReportMeta(text) {
       ai_screening_disclosure: nullable(scalar('ai_screening_disclosure')),
     };
   }
+  if (out.loc) out.remote = /\bremote\b/i.test(out.loc);
   return out;
 }
 
@@ -128,12 +128,16 @@ export function parseReportMeta(text) {
  * @returns {string}
  */
 export function setMachineSummaryScalar(text, key, literal) {
+  // Scoped to the fence body: the archived JD at the end of a report can carry
+  // its own "location:" / "team:" lines, which must never be rewritten.
+  const fence = text.match(/(##\s*Machine Summary\s*\n+```(?:ya?ml)?\n)([\s\S]*?)(\n```)/);
+  if (!fence) return text;
+  const [whole, open, body, close] = fence;
   const re = new RegExp(`^(${key}:[ \\t]*).*$`, 'm');
-  if (re.test(text)) return text.replace(re, (_m, pre) => pre + literal);
-  return text.replace(
-    /(##\s*Machine Summary\s*\n+```(?:ya?ml)?\n)/,
-    (_m, pre) => `${pre}${key}: ${literal}\n`,
-  );
+  const nextBody = re.test(body)
+    ? body.replace(re, (_m, pre) => pre + literal)
+    : `${key}: ${literal}\n${body}`;
+  return text.replace(whole, () => open + nextBody + close);
 }
 
 /**

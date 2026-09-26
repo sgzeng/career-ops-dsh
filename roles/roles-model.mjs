@@ -20,6 +20,7 @@ import path from 'path';
 import { resolveColumns, parseTrackerRow } from '../tracker-parse.mjs';
 import { normalizeUrlForDedup } from '../scan.mjs';
 import { parseReportMeta } from '../report-format.mjs';
+import { WORK_AUTH_LABEL, workAuthFromHeader } from '../lib/column-contract.mjs';
 
 // ── Tab model ────────────────────────────────────────────────────────
 // UI tab id → canonical states.yml labels it shows (case-sensitive, matches
@@ -126,6 +127,9 @@ function parsePendingPipeline(text) {
       const pm = c.match(/^posted:\s*(\d{4}-\d{2}-\d{2})/i);
       if (pm) { posted = pm[1]; continue; }
       if (/^(trust|note):/i.test(c)) continue;
+      // The optional compensation cell follows location; when location is
+      // absent it must not be taken for one.
+      if (/[$€£]\s?\d|\b\d{2,3}k\b/i.test(c)) continue;
       if (!location) location = c;
     }
     if (!company || !title) continue;
@@ -215,7 +219,9 @@ export function buildRoleModel(opts = {}) {
         tab,
         status: r.status,
         co: r.company,
-        team: meta.archetype || noteTeam,
+        // A report is authoritative even when its team is null (the JD names
+        // none); the Notes segment only stands in for rows with no report.
+        team: reportPath ? (meta.team || '') : noteTeam,
         role: r.role,
         loc: meta.loc || hist?.location || '—',
         remote: meta.remote ? 1 : 0,
@@ -226,7 +232,8 @@ export function buildRoleModel(opts = {}) {
         via: meta.via || (r.via || null),
         why: meta.why || noteWhy,
         legitimacy_tier: meta.legitimacy_tier || null,
-        work_auth: meta.work_auth_display || meta.work_auth || null,
+        work_auth: WORK_AUTH_LABEL[meta.work_auth]
+          || WORK_AUTH_LABEL[workAuthFromHeader(meta.work_auth_header)] || null,
         risk_level: meta.risk_level || null,
         confidence: meta.confidence || null,
         final_decision: meta.final_decision || null,

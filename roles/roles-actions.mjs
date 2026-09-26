@@ -144,10 +144,11 @@ export function blacklistCompany(id, reason, rowsOverride) {
 // different files. A manual edit is routed to whichever file actually owns that
 // field for that row:
 //   co / role      → the tracker column        (locked tracker transaction)
-//   team / why     → the report Machine Summary, else the `pct N · team · why`
+//   team / why     → the report Machine Summary (`team:` / `top_strengths`), else the `pct N · team · why`
 //                    convention in the tracker Notes cell
 //   sal            → the report `advertised_comp:` scalar
-//   loc / remote   → the report `| **Remote** |` row, else scan-history.tsv
+//   loc / remote   → the report `location:` scalar + `| **Remote** |` row,
+//                    else scan-history.tsv
 //   (pipeline-only rows: co / role / loc live on the pipeline.md line itself)
 // Reports and pipeline.md / scan-history.tsv have no Node-side lock (same
 // best-effort rationale as the block below); the tracker edits go through the
@@ -241,8 +242,8 @@ function editReportField(file, field, value, row) {
   const before = text;
   const q = (s) => `"${String(s).replace(/"/g, "'")}"`;
   if (field === 'team') {
-    text = setMachineSummaryScalar(text, 'archetype', value ? q(value) : 'null');
-    text = text.replace(/^\*\*Archetype:\*\*[ \t]*.*$/m, () => `**Archetype:** ${value || '—'}`);
+    // Team is its own key; the **Archetype:** verdict is a different field.
+    text = setMachineSummaryScalar(text, 'team', value ? q(value) : 'null');
   } else if (field === 'sal') {
     text = setMachineSummaryScalar(text, 'advertised_comp', value ? q(value) : 'null');
   } else if (field === 'why') {
@@ -262,15 +263,20 @@ function editLocation(row, field, value) {
   const file = row.reportFile ? path.join(ROOT, 'reports', row.reportFile) : null;
   if (file && existsSync(file)) {
     const text = readFileSync(file, 'utf-8');
-    const m = text.match(/\|\s*\*\*Remote\*\*\s*\|\s*([^|]+?)\s*\|/);
-    if (m) {
-      const cur = m[1].trim();
-      const next = field === 'loc'
-        ? (value || '—')
-        : (value === 'yes'
-          ? (/remote/i.test(cur) ? cur : `Remote${cur && cur !== '—' ? ` — ${cur}` : ''}`)
-          : (cur.replace(/remote(\s*[—-]\s*)?/i, '').trim() || '—'));
-      const { text: patched } = setRemoteRow(text, next);
+    const hasRow = /\|\s*\*\*Remote\*\*\s*\|/.test(text);
+    const hasMS = /##\s*Machine Summary\s*\n+```/.test(text);
+    if (hasRow || hasMS) {
+      // Location is " / "-separated places (lib/column-contract.mjs); the Remote
+      // toggle adds or drops a "Remote" place rather than prefixing prose.
+      const cur = row.loc && row.loc !== '—' ? row.loc : '';
+      const places = cur ? cur.split(' / ').map((s) => s.trim()).filter(Boolean) : [];
+      let next;
+      if (field === 'loc') next = value;
+      else if (value === 'yes') next = places.some((p) => /^remote\b/i.test(p)) ? cur : [...places, 'Remote'].join(' / ');
+      else next = places.filter((p) => !/^remote\b/i.test(p)).join(' / ');
+      let patched = text;
+      if (hasMS) patched = setMachineSummaryScalar(patched, 'location', next ? `"${next.replace(/"/g, "'")}"` : 'null');
+      if (hasRow) patched = setRemoteRow(patched, next || '—').text;
       writeFileSync(file, patched, 'utf-8');
       return { id: row.id, field, value };
     }

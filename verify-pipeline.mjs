@@ -32,6 +32,10 @@ import {
   normalizeTextKey, normalizeVia,
 } from './tracker-parse.mjs';
 import { CONTROL_CHARS } from './tracker-utils.mjs';
+import {
+  teamProblem, locationProblem, providerLocationProblem, compProblem, roleProblem, enumProblem,
+  WORK_AUTH_LABEL, WORK_AUTH_HEADER, RISK_LEVELS, LEGITIMACY_TIERS,
+} from './lib/column-contract.mjs';
 import { checkTrackerSync } from './tracker-sync-check.mjs';
 import { checkFollowupsSchema } from './stats.mjs';
 
@@ -670,13 +674,96 @@ for (const e of entries) {
       warn(`#${e.num} report ${where}: Machine Summary has no advertised_comp: key — Salary column renders blank and salary-gap.mjs sees no observation (use null if the JD states nothing)`);
       incompleteReports++;
     }
-    if (!/^\*\*Archetype:\*\*\s*\S/m.test(body) && !/^archetype:\s*["']?\S/m.test(body)) {
-      warn(`#${e.num} report ${where}: no **Archetype:** header and no Machine Summary archetype: key — Team column renders blank`);
+    if (hasMS && !/^team:/m.test(body)) {
+      warn(`#${e.num} report ${where}: Machine Summary has no team: key — Team column renders blank (the JD's team name, or null if it names none; never the archetype)`);
       incompleteReports++;
     }
   }
 }
 if (incompleteReports === 0) ok('All referenced reports carry the renderer-consumed fields');
+
+// --- Check 18: Column contract — each roles-view column holds only its own field (fork) ---
+// Check 17 asks "is the field there?"; this asks "is it only that field?".
+// Team used to be fed by the **Archetype:** fit verdict, and Location / Salary /
+// Work auth / Risk / Role were free text, so evaluators filled them with pay
+// bands, JD quotes, req IDs and commentary. The shapes live in
+// lib/column-contract.mjs; any stored value that breaks one is an error so the
+// writer (pipeline / oferta / batch run, which must finish at 0 errors) fixes it
+// at write time instead of the reader finding it on the page.
+const MS_BODY_RE = /##\s*Machine Summary\s*\n+```(?:ya?ml)?\n([\s\S]*?)\n```/;
+const msScalar = (body, key) => {
+  const fence = body.match(MS_BODY_RE);
+  if (!fence) return undefined;
+  const m = fence[1].match(new RegExp(`^${key}:[ \\t]*(.*)$`, 'm'));
+  if (!m) return undefined;
+  const v = m[1].trim().replace(/^["']|["']$/g, '');
+  return v === 'null' || v === '' ? null : v;
+};
+let contractViolations = 0;
+const contractErr = (msg) => { error(msg); contractViolations++; };
+const checkField = (where, label, value, problem) => {
+  const p = problem(value);
+  if (p) contractErr(`${where} ${label} ${JSON.stringify(value)}: ${p}`);
+};
+
+for (const e of entries) {
+  checkField(`#${e.num}`, 'Role', e.role, roleProblem);
+  // The Notes "pct N · team · why" segment is rendered as Team only for rows
+  // with no report (roles-model.mjs); with a report, the report's team: wins.
+  const hasReport = /\]\([^)]+\.md\)/.test(e.report);
+  const seg = e.notes.split(' · ');
+  if (!hasReport && seg.length >= 3 && /^pct\s+\d+$/i.test(seg[0].trim())) {
+    checkField(`#${e.num}`, 'Notes team segment', seg[1].trim(), teamProblem);
+  }
+}
+
+const contractSeen = new Set();
+for (const e of entries) {
+  for (const link of [...e.report.matchAll(/\]\(([^)]+)\)/g)].map((m) => m[1])) {
+    if (contractSeen.has(link)) continue;
+    contractSeen.add(link);
+    const abs = existsSync(join(TRACKER_DIR, link))
+      ? join(TRACKER_DIR, link)
+      : (existsSync(join(CAREER_OPS, link)) ? join(CAREER_OPS, link) : null);
+    if (!abs) continue;
+    let body;
+    try { body = readFileSync(abs, 'utf-8'); } catch { continue; }
+    if (!/^#\s+Evalua(tion|ción):/m.test(body) || !MS_BODY_RE.test(body)) continue;
+    const where = `#${e.num} report ${link.split('/').pop()}:`;
+
+    checkField(where, 'team:', msScalar(body, 'team'), teamProblem);
+    checkField(where, 'location:', msScalar(body, 'location'), locationProblem);
+    const row = body.match(/\|\s*\*\*Remote\*\*\s*\|\s*([^|]+?)\s*\|/);
+    if (row && row[1].trim() !== '—') checkField(where, '| **Remote** | row', row[1].trim(), locationProblem);
+    checkField(where, 'advertised_comp:', msScalar(body, 'advertised_comp'), compProblem);
+    checkField(where, 'work_auth:', msScalar(body, 'work_auth'), (v) => enumProblem(v, Object.keys(WORK_AUTH_LABEL)));
+    const waHeader = body.match(/^\*\*Work Auth:\*\*[ \t]*(.*)$/m);
+    if (waHeader) checkField(where, '**Work Auth:**', waHeader[1].trim(), (v) => enumProblem(v, Object.values(WORK_AUTH_HEADER)));
+    checkField(where, 'risk_level:', msScalar(body, 'risk_level'), (v) => enumProblem(v, RISK_LEVELS));
+    checkField(where, 'legitimacy_tier:', msScalar(body, 'legitimacy_tier'), (v) => enumProblem(v, LEGITIMACY_TIERS));
+    const legHeader = body.match(/^\*\*Legitimacy:\*\*[ \t]*(.*)$/m);
+    if (legHeader) checkField(where, '**Legitimacy:**', legHeader[1].trim(), (v) => enumProblem(v, LEGITIMACY_TIERS));
+  }
+}
+
+// data/pipeline.md ## Pending lines render as "New openings" rows; their
+// Location is the cell after the title. Read from beside the tracker so a test
+// that points CAREER_OPS_TRACKER at a temp dir never reads real data.
+const PIPELINE_FILE = join(TRACKER_DIR, 'pipeline.md');
+if (existsSync(PIPELINE_FILE)) {
+  let inPending = false;
+  for (const line of readFileSync(PIPELINE_FILE, 'utf-8').split('\n')) {
+    const t = line.trim();
+    if (/^##\s*(Pending|Pendientes)\s*$/.test(t)) { inPending = true; continue; }
+    if (/^##\s/.test(t)) { inPending = false; continue; }
+    const m = inPending && t.match(/^-\s*\[\s*\]\s*(.+)$/);
+    if (!m) continue;
+    const cells = m[1].split('|').map((s) => s.trim());
+    const loc = cells.slice(3).find((c) => c && !/^(posted|trust|note):/i.test(c) && !/[$€£]\s?\d/.test(c));
+    if (loc) checkField(`pipeline.md ${cells[0]}`, 'location', loc, providerLocationProblem);
+  }
+}
+if (contractViolations === 0) ok('Every roles-view column holds only its own field (lib/column-contract.mjs)');
 
 // --- Summary ---
 console.log('\n' + '='.repeat(50));
