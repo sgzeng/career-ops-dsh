@@ -647,6 +647,7 @@ node scan.mjs --include-blacklisted   # audit: let blacklisted companies through
 | `CAREER_OPS_PROFILE` | `config/profile.yml` |
 | `CAREER_OPS_PIPELINE` | `data/pipeline.md` |
 | `CAREER_OPS_SCAN_HISTORY` | `data/scan-history.tsv` |
+| `CAREER_OPS_SCAN_BACKFILL` | `data/scan-backfill.tsv`; fork-local. When unset, a lane that sets `CAREER_OPS_SCAN_HISTORY` gets a sibling file named after it (`scan-history.bridge.tsv` → `scan-backfill.bridge.tsv`), so each lane has its own first-coverage pass |
 
 ```bash
 CAREER_OPS_PORTALS=portals.bridge.yml \

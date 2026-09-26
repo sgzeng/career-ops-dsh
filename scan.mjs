@@ -30,6 +30,7 @@
  *   node scan.mjs --verify --throttle=8000     # custom base gap in ms (waits base..2*base)
  *   node scan.mjs --include-blacklisted        # let data/blacklist.md matches through (annotated)
  *   node scan.mjs --since 7                    # postings from the last 7 days
+ *   node scan.mjs --since 7 --no-backfill      # ...even on a company's first scan (lib/first-scan-backfill.mjs)
  *   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
  *   node scan.mjs --posted-before 2026-08-01   # absolute upper bound on posting date
  *   node scan.mjs --rediscover-404             # re-verify tracked URLs that 404/410 (rides on --verify)
@@ -72,6 +73,10 @@ import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTit
 import { buildContentRescue } from './lib/content-rescue.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
 import { fetchJobDescription } from './lib/jd-text.mjs';
+import {
+  resolveBackfillConfig, makeBackfillPlanner, loadBackfillState, appendBackfillState, formatBackfillSummary,
+  isTruncatedFetch, resolveBackfillPath,
+} from './lib/first-scan-backfill.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -110,6 +115,17 @@ const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || path.join(DATA_ROOT, 'con
 // anchored one (#3510). One resolution, imported, cannot drift.
 export const SCAN_HISTORY_PATH = process.env.CAREER_OPS_SCAN_HISTORY || path.join(DATA_ROOT, 'data/scan-history.tsv');
 export const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE || path.join(DATA_ROOT, 'data/pipeline.md');
+// Fork-local (lib/first-scan-backfill.mjs): which tracked companies have had their
+// one wider first-coverage pass. Overridable like the two files above. A lane
+// that overrides only CAREER_OPS_SCAN_HISTORY gets a sibling file derived from
+// it, because coverage belongs to a dedup history: a shared file would let lane
+// A's row switch off lane B's first pass.
+export const SCAN_BACKFILL_PATH = resolveBackfillPath({
+  explicit: process.env.CAREER_OPS_SCAN_BACKFILL,
+  historyOverride: Boolean(process.env.CAREER_OPS_SCAN_HISTORY),
+  historyPath: SCAN_HISTORY_PATH,
+  defaultPath: path.join(DATA_ROOT, 'data/scan-backfill.tsv'),
+});
 
 const APPLICATIONS_PATH = path.join(DATA_ROOT, 'data/applications.md');
 const PROVIDERS_DIR = path.resolve(CODE_ROOT, 'providers');
@@ -1638,10 +1654,13 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
   // Counted against the finished set: a released row that applications.md or an
   // actionable pipeline row pinned again is not eligible, and saying so keeps the
   // number the scanners print honest.
-  let recheckEligible = 0;
-  for (const key of recheckCandidates) if (!seen.has(key)) recheckEligible++;
+  // `released` (fork-local, lib/first-scan-backfill.mjs) is the same set by
+  // name, so a first-coverage pass can keep these rows out of the pipeline.
+  const released = new Set();
+  for (const key of recheckCandidates) if (!seen.has(key)) released.add(key);
+  const recheckEligible = released.size;
 
-  return { seen, recheckEligible };
+  return { seen, recheckEligible, released };
 }
 
 // Path options mirror mergeIntoPipeline's seam below: the defaults are the
@@ -2371,7 +2390,7 @@ export function loadFingerprintHistory(historyPath = SCAN_HISTORY_PATH) {
  *   Scan-history recheck policy, shared by the URL and company+role sets.
  * @param {(name: unknown) => string} [canonicalize=defaultCompanyNormalizer] -
  *   Company canonicalizer for the role keys.
- * @returns {{seen: Set<string>, recheckEligible: number, seenCompanyRoles: Set<string>, seenCompanyRoleBases: Set<string>, fingerprintHistory: Array<{url: string, dateStr: string, company: string, title: string, fingerprint: string}>}}
+ * @returns {{seen: Set<string>, recheckEligible: number, released: Set<string>, seenCompanyRoles: Set<string>, seenCompanyRoleBases: Set<string>, fingerprintHistory: Array<{url: string, dateStr: string, company: string, title: string, fingerprint: string}>}}
  */
 // Same path seam as loadSeenUrls/appendToPipeline: anchored defaults, explicit
 // paths for a caller with its own lane or a test with a fixture.
@@ -2384,14 +2403,14 @@ export function loadDedupSnapshot(policy = {}, canonicalize = defaultCompanyNorm
   const scanHistoryText = readIfExists(scanHistoryPath);
   const pipelineText = readIfExists(pipelinePath);
   const applicationsText = readIfExists(applicationsPath);
-  const { seen, recheckEligible } = collectSeenUrls({ scanHistoryText, pipelineText, applicationsText }, policy);
+  const { seen, recheckEligible, released } = collectSeenUrls({ scanHistoryText, pipelineText, applicationsText }, policy);
   // Companion index: the bare key of every seeded row that carried a location.
   // It makes the wildcard rule symmetric in O(1) — see the dedupe check in
   // main() for the direction it closes. Empty whenever the flag is off.
   const seenCompanyRoleBases = new Set();
   const seenCompanyRoles = collectSeenCompanyRoles({ applicationsText, scanHistoryText, pipelineText }, policy, canonicalize, { includeLocation, locatedBases: seenCompanyRoleBases });
   const fingerprintHistory = collectFingerprintHistory(scanHistoryText);
-  return { seen, recheckEligible, seenCompanyRoles, seenCompanyRoleBases, fingerprintHistory };
+  return { seen, recheckEligible, released, seenCompanyRoles, seenCompanyRoleBases, fingerprintHistory };
 }
 
 // Standard skeleton created on fresh install — matches the format documented
@@ -2897,7 +2916,7 @@ function guardStatusFor(code) {
 const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
-  '--since', '--quiet', '--json', '--help', '-h',
+  '--since', '--quiet', '--json', '--help', '-h', '--no-backfill',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
@@ -2917,6 +2936,9 @@ const USAGE = `Usage:
   node scan.mjs --rediscover-404             # re-verify tracked URLs that 404/410 (rides on --verify)
   node scan.mjs --include-blacklisted        # let data/blacklist.md matches through (annotated)
   node scan.mjs --since 7                    # postings from the last 7 days
+                                             # (a company's FIRST scan uses max_posting_age_days;
+                                             #  see portals.yml first_scan_backfill)
+  node scan.mjs --since 7 --no-backfill      # --since for every company, first scan included
   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
   node scan.mjs --posted-before 2026-08-01   # absolute upper bound on posting date
   node scan.mjs --json                       # emit one machine-readable receipt on stdout
@@ -3052,6 +3074,38 @@ async function main() {
   // Same bound the filter above uses, widened by max_posting_age_days when set.
   // Derived by the same helper so the hint and the filter cannot disagree.
   const earlyStopSinceMs = resolveEarlyStopMs(effectiveAfter, config.max_posting_age_days);
+
+  // First-coverage backfill (fork-local, lib/first-scan-backfill.mjs): a tracked
+  // company with no row in data/scan-backfill.tsv gets ONE pass whose --since is
+  // widened to first_scan_backfill.window_days (default max_posting_age_days),
+  // so the postings that were already open when it was added are not lost to
+  // the --since cutoff. An explicit --posted-after/--posted-before stays
+  // authoritative and turns this off for the run.
+  let backfillCfg = resolveBackfillConfig(config.first_scan_backfill, config.max_posting_age_days, {
+    cliOff: args.includes('--no-backfill'),
+  });
+  const backfillExplicitBounds = Boolean(postedAfter || postedBefore);
+  let backfillState = new Map();
+  if (backfillCfg.enabled && !backfillExplicitBounds) {
+    // An optional coverage aid must not stop stage 1: an unreadable state file
+    // turns the backfill off for this run (and nothing is appended to it).
+    try {
+      backfillState = loadBackfillState(SCAN_BACKFILL_PATH);
+    } catch (err) {
+      backfillCfg = { enabled: false, windowDays: null, off: `state file unreadable: ${err.message}` };
+    }
+  }
+  const planBackfill = makeBackfillPlanner({
+    cfg: backfillCfg,
+    sinceDays,
+    explicitBounds: backfillExplicitBounds,
+    state: backfillState,
+  });
+  // Widened pass: same helpers as the run-wide bound, so filter and early-stop agree.
+  // postedAfter/postedBefore are null here (explicitBounds disables the planner).
+  const backfillAfter = backfillCfg.enabled ? resolveEffectiveAfter(null, backfillCfg.windowDays) : null;
+  const backfillDateFilter = buildPostedDateFilter(backfillAfter, null);
+  const backfillEarlyStopMs = resolveEarlyStopMs(backfillAfter, config.max_posting_age_days);
   const salaryFilter = buildSalaryFilter(config.salary_filter);
   const trustValidator = buildTrustValidator(config.trust_filter);
   const contentFilter = buildContentFilter(config.content_filter);
@@ -3116,6 +3170,7 @@ async function main() {
 
   resolveEntries(companies);
   resolveEntries(boards, { isBoard: true });
+  for (const t of targets) t._backfill = planBackfill(t, t._provider.id, t._isBoard);
 
   const localParserCount = targets.filter(t => t._provider.id === 'local-parser').length;
   const companyCount = targets.length - boardCount;
@@ -3138,6 +3193,9 @@ async function main() {
   const seenUrls = dedupSnapshot.seen;
   const seenCompanyRoles = dedupSnapshot.seenCompanyRoles;
   const seenCompanyRoleBases = dedupSnapshot.seenCompanyRoleBases ?? new Set();
+  // scan-history rows recheck_after_days has released. A first-coverage pass
+  // treats them as seen (see the dedup check in the job loop).
+  const releasedUrls = dedupSnapshot.released ?? new Set();
 
   // 5. Fetch from each target
   // LOCAL day. This one value does two things that both care which day it is:
@@ -3171,6 +3229,7 @@ async function main() {
   const newOffers = [];
   const errors = [...resolveErrors];
   const emptyTargets = [];
+  const backfillDone = [];
 
   // Arm the failure-path row (#2643) now that the sweep is about to start and
   // every counter it reads is in scope. new_added is hardcoded 0 on a failed
@@ -3214,9 +3273,14 @@ async function main() {
     // postings on later pages go unfetched. Documented in modes/scan.md; the
     // fix belongs in workday.mjs, where closing it costs the optimisation on
     // every tenant that mixes.
+    // First-coverage backfill: this company's pass uses the wider window. On a
+    // Workday tenant that also means pagination runs on past --since (the
+    // undated "30+ Days Ago" bucket never trips the early-stop), once.
+    const widen = company._backfill?.widen === true;
+    const companyDateFilter = widen ? backfillDateFilter : postedDateFilter;
     const ctx = {
       ...makeHttpCtx(),
-      sinceMs: earlyStopSinceMs,
+      sinceMs: widen ? backfillEarlyStopMs : earlyStopSinceMs,
       includeUndated: true,
       locationHints: config.location_filter,
     };
@@ -3302,7 +3366,7 @@ async function main() {
           totalFilteredPostingAge++;
           continue;
         }
-        if (!postedDateFilter(job.postedAt)) {
+        if (!companyDateFilter(job.postedAt)) {
           totalFilteredPostedDate++;
           continue;
         }
@@ -3323,7 +3387,11 @@ async function main() {
           continue;
         }
         const dedupUrl = normalizeUrlForDedup(job.url);
-        if (seenUrls.has(dedupUrl)) {
+        // A widened (first-coverage) pass reaches postings far older than
+        // --since, including finished ones scan_history.recheck_after_days has
+        // released. Re-adding those would hand stage 2 postings it already
+        // triaged away, so they stay seen here. A normal run keeps the recheck.
+        if (seenUrls.has(dedupUrl) || (widen && releasedUrls.has(dedupUrl))) {
           totalDupes++;
           continue;
         }
@@ -3426,6 +3494,15 @@ async function main() {
           careersUrlDomain,
         });
       }
+      // Every posting went through the filters without a throw. An empty result is
+      // not proof of coverage (a broken slug also returns []), so it is retried.
+      // A crawl the provider tagged as partial (Workday retries exhausted mid-
+      // pagination / incomplete facet split, iCIMS page cap) is recorded as
+      // `truncated` and retried; see MAX_TRUNCATED_ATTEMPTS.
+      if (company._backfill && jobs.length > 0) {
+        company._backfill.truncated = isTruncatedFetch(jobs);
+        backfillDone.push(company);
+      }
     } catch (err) {
       errors.push({
         company: company.name,
@@ -3493,6 +3570,19 @@ async function main() {
     ...expiredOffers,
     ...migratedOffers.map(o => ({ ...o, url: o.previousUrl })),
   ];
+  // Only after the pipeline/history writes above: a crash before them leaves no
+  // row, so the next run backfills the company again (dedup absorbs the overlap).
+  if (!dryRun && backfillDone.length > 0) {
+    try {
+      appendBackfillState(SCAN_BACKFILL_PATH, backfillDone.map(t => ({
+        key: t._backfill.key, company: t.name, windowDays: backfillCfg.windowDays,
+        maxPages: t._backfill.maxPages, truncated: t._backfill.truncated,
+      })));
+    } catch (err) {
+      // Results are already written; losing the rows only means a repeat pass.
+      console.error(`⚠️  backfill: could not write ${SCAN_BACKFILL_PATH}: ${err.message}`);
+    }
+  }
   if (!dryRun && expiredForHistory.length > 0) {
     await appendToScanHistory(expiredForHistory, date, 'skipped_expired');
   }
@@ -3552,6 +3642,18 @@ async function main() {
   // scan that filtered by date should say so regardless of which flag set it.
   if (effectiveAfter || postedBefore) {
     console.log(`Filtered by posted date: ${totalFilteredPostedDate} removed`);
+  }
+  {
+    const planned = targets.filter(t => t._backfill);
+    console.log(formatBackfillSummary({
+      cfg: backfillCfg,
+      explicitBounds: backfillExplicitBounds,
+      widened: planned.filter(t => t._backfill.widen).map(t => t.name),
+      recordOnly: planned.filter(t => !t._backfill.widen).map(t => t.name),
+      failed: planned.filter(t => !backfillDone.includes(t)).map(t => t.name),
+      truncated: backfillDone.filter(t => t._backfill.truncated).map(t => t.name),
+      dryRun,
+    }));
   }
   if (config.salary_filter || totalFilteredSalary > 0) {
     console.log(`Filtered by salary:    ${totalFilteredSalary} removed`);

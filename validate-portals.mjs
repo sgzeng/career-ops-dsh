@@ -127,14 +127,14 @@ const KNOWN_TOP_LEVEL = new Set([
   'max_posting_age_days', 'trust_filter', 'skip_tiers', 'title_filter',
   'title_filter_full', 'content_filter', 'content_rescue', 'level_filter', 'salary_filter', 'search_keyword_groups',
   'search_queries', 'linkedin_post_queries', 'tracked_companies', 'job_boards',
-  'interamt_searches', 'hn_hiring',
+  'interamt_searches', 'hn_hiring', 'first_scan_backfill',
 ]);
 
 // Per-entry keys recognised on tracked_companies[] / job_boards[].
 const KNOWN_COMPANY_KEYS = new Set([
   'name', 'careers_url', 'api', 'provider', 'parser', 'domain', 'enabled',
   'max_pages', 'ibm', 'amazon', 'notes', 'verified',
-  'scan_method', 'scan_query', 'groups', 'search_site',
+  'scan_method', 'scan_query', 'groups', 'search_site', 'first_scan_backfill',
 ]);
 
 const KNOWN_SEARCH_QUERY_KEYS = new Set(['name', 'query', 'groups', 'site', 'enabled']);
@@ -366,6 +366,22 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
+  // Fork-local (lib/first-scan-backfill.mjs): `false`, or { enabled, window_days }.
+  // scan.mjs fails closed (backfill off) on every value rejected here.
+  if (config.first_scan_backfill !== undefined && typeof config.first_scan_backfill !== 'boolean') {
+    const fb = config.first_scan_backfill;
+    if (!isObject(fb)) {
+      add(errors, 'first_scan_backfill', 'must be true, false or an object { enabled, window_days }');
+    } else {
+      if (fb.enabled !== undefined && typeof fb.enabled !== 'boolean') {
+        add(errors, 'first_scan_backfill.enabled', 'must be a boolean when set');
+      }
+      if (fb.window_days !== undefined && !(Number.isInteger(fb.window_days) && fb.window_days > 0)) {
+        add(errors, 'first_scan_backfill.window_days', 'must be a positive integer when set');
+      }
+    }
+  }
+
   for (const key of Object.keys(config)) {
     if (!KNOWN_TOP_LEVEL.has(key)) {
       add(warnings, key, 'unknown top-level portals.yml key (typo?)');
@@ -444,6 +460,9 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
         }
         if (entry.search_site !== undefined && (typeof entry.search_site !== 'string' || entry.search_site.trim() === '')) {
           add(errors, `${base}.search_site`, 'must be a non-empty domain string when set');
+        }
+        if (entry.first_scan_backfill !== undefined && typeof entry.first_scan_backfill !== 'boolean') {
+          add(errors, `${base}.first_scan_backfill`, 'must be a boolean when set (per-entry override)');
         }
 
         for (const key of Object.keys(entry)) {
