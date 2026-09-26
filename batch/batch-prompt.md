@@ -355,7 +355,8 @@ Create a machine-readable summary from the completed A-G evaluation and global s
 ```yaml
 company: "{company}"
 role: "{role}"
-location: {verbatim JD work location as a quoted string (e.g. "San Francisco, CA / Remote (US)"), or null when the JD states nothing}
+team: {the team/org the JD names for this role as a quoted string (e.g. "Security Engineering"), or null when the JD names none}
+location: {places only as a quoted string (e.g. "San Francisco, CA / Remote (US)"), or null when the JD states nothing}
 score: {X.X}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detected}"
@@ -374,7 +375,7 @@ discard_reasons:
   - "{predicted reason if final_decision is Skip/Consider, e.g. salary_too_low, hybrid_required, tech_stack_mismatch, seniority_mismatch, geo_restriction, size_mismatch, company_culture, or other specific reason}"
 via: {agency/recruiter firm as a quoted string, or null for direct applications}
 company_confidential: {true when the end employer is unknown (company is "?"), else false}
-advertised_comp: {verbatim JD salary/range as a quoted string (e.g. "80-90k EUR"), or null when the JD states nothing}
+advertised_comp: {the JD's base-pay figures only as a quoted string (e.g. "$150,000–$200,000"), or null when the JD states nothing}
 reports_to: {the JD's stated reporting line as a quoted string (e.g. "VP of Marketing"), or null when the JD names none}
 requirement_importance:
   - requirement: "{JD requirement}"
@@ -395,8 +396,11 @@ Rules:
 - Use `[]` for `hard_stops`, `soft_gaps`, `top_strengths`, `discard_reasons`, or `requirement_importance` when empty.
 - `score` is numeric only, without `/5`.
 - `final_decision` must reflect the full evaluation, not only the CV match.
-- `location` is the JD's **own** stated work location, verbatim; `null` when the JD names none. This seeds the dashboard's Location column via `roles/roles-model.mjs` — it is a structured fallback for the `| **Remote** | … |` row in Block A, and `verify-pipeline.mjs` Check 15 flags any report that carries neither. Do not infer a location from the company HQ or the team.
-- `advertised_comp` is the JD's **own** figure, verbatim; `null` when the JD states nothing — never estimate it and never substitute researched market data (Block D research stays in Block D). Batch workers never write `data/salary-observations.tsv` — the report itself is the advertised observation (`salary-gap.mjs` reads it).
+- **Each of these keys feeds exactly one roles-dashboard column and holds only that field** — no commentary, quotes, parentheses, pay in a location, or verdicts in a team. `verify-pipeline.mjs` Check 18 errors on any value that breaks the shapes in `lib/column-contract.mjs`; put judgment and context in the report prose, never in these keys.
+- `team` is the team / org / lab the JD itself names for this role (`"Security Engineering"`, `"Frontier Red Team"`, `"Unit 42"`), name only — never the archetype or any fit judgment, never a team the role merely partners with, never inferred from the title; `null` when the JD names none. Generic job-family metadata ("Technology", "Engineering") is not a team.
+- `location` is where the JD says the job is, **places only**: `"City, ST"` (US) or `"City, Country"`, a bare country, or `"Remote"` / `"Remote (US)"`, several joined with `" / "`. No pay, no on-site/hybrid policy, no quotes, no remarks. `null` when the JD names none. The `| **Remote** | … |` row in the report header carries the same value (`—` when null). Do not infer a location from the company HQ or the team.
+- `advertised_comp` is the JD's **own** base-pay figure(s) and nothing else, written `"$218,400–$480,000"` (currency symbol on both bounds, thousands commas, en dash); a single figure `"$200,000"`; hourly `"$55.00–$70.00/hr"`; several levels or regions collapse to one overall span (lowest low – highest high). No sentence, no bonus/equity, no location. `null` when the JD states nothing — never estimate it and never substitute researched market data (Block D research stays in Block D). Batch workers never write `data/salary-observations.tsv` — the report itself is the advertised observation (`salary-gap.mjs` reads it).
+- `risk_level` is exactly `Low`, `Medium` or `High` — no range, no parenthetical.
 - `reports_to` is the reporting line the JD itself states, in the JD's own wording; `null` when the JD names none — never infer it from the title, the team size, or company research. It records the seat's altitude, which the title alone does not: an IC seat reporting to a Head of Marketing and one reporting to the CEO are different roles.
 - Do not invent missing data. If confidence is limited, set `confidence: "Low"` and explain the limitation in the human-readable sections.
 - `work_auth` reflects the Block A work-authorization tier: `no_sponsorship` only when the JD **explicitly** refuses sponsorship for a role outside the candidate's `authorized_in`; `unstated` when the JD is silent (neutral, not a blocker); `not_needed` when the role is within `authorized_in` or sponsorship isn't required; `sponsors` when the JD explicitly offers it.
@@ -435,7 +439,8 @@ Report header:
 ```yaml
 company: "{empresa}"
 role: "{rol}"
-location: {verbatim JD work location as a quoted string, or null when the JD states nothing}
+team: {the team/org the JD names for this role as a quoted string, or null when the JD names none}
+location: {places only as a quoted string, or null when the JD states nothing}
 score: {X.X}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detectado}"
@@ -454,7 +459,7 @@ discard_reasons:
   - "{predicted reason if final_decision is Skip/Consider, e.g. salary_too_low, hybrid_required, tech_stack_mismatch, seniority_mismatch, geo_restriction, size_mismatch, company_culture, or other specific reason}"
 via: {agency/recruiter firm as a quoted string, or null for direct applications}
 company_confidential: {true when the end employer is unknown (company is "?"), else false}
-advertised_comp: {verbatim JD salary/range as a quoted string (e.g. "80-90k EUR"), or null when the JD states nothing}
+advertised_comp: {the JD's base-pay figures only as a quoted string (e.g. "$150,000–$200,000"), or null when the JD states nothing}
 reports_to: {the JD's stated reporting line as a quoted string (e.g. "VP of Marketing"), or null when the JD names none}
 requirement_importance:
   - requirement: "{JD requirement}"

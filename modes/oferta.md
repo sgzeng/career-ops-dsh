@@ -671,7 +671,7 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 **Work Auth:** {✅ Sponsors | ➖ Not needed | ⚠️ Unstated | ⛔ No sponsorship}
 **PDF:** {path or pending}
 
-| **Remote** | {verbatim JD work location, e.g. "San Francisco, CA / Remote (US) — hybrid"} |
+| **Remote** | {places only, same value as Machine Summary location:, e.g. "San Francisco, CA / Remote (US)"; — when the JD names none} |
 
 ---
 
@@ -720,7 +720,9 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
 Not every JD source is a scannable ATS API or even a URL — some only ever exist as a pasted screenshot from a company on a custom/uncommon ATS with no API surface. Whatever posting-date text is visible on the source — `Posted 3 days ago`, an explicit date, etc. — transcribe it as the first line of the archived section regardless of source format (URL, pasted text, or screenshot): `Posted: {date or relative string as shown}`, or `Posted: not visible in source` when genuinely absent. Never substitute the report file's own filesystem mtime/creation time for this — it's fragile (overwritten by later edits, reset by sync-tool/git operations) and conceptually wrong (it records when the candidate processed the JD, not when the employer posted it).
 
-**Location (required, renderer-consumed):** the `| **Remote** | {location} |` row in the header and the Machine Summary `location:` key both feed the dashboard's Location column (`roles/roles-model.mjs` → `parseReport()`). Write the JD's own stated work location verbatim in both; use `null` for the key (and "Not stated on posting" for the row) only when the JD genuinely names no location. `verify-pipeline.mjs` Check 17 flags any report that has neither — a silently blank Location column is the bug this check exists to catch (see the 2026-09-03 batch).
+**Location (required, renderer-consumed):** the `| **Remote** | {location} |` row in the header and the Machine Summary `location:` key both feed the dashboard's Location column (`roles/roles-model.mjs` → `parseReport()`). Write the JD's stated work location(s) in both, **places only**: `City, ST` / `City, Country` / country / `Remote (US)`, joined with ` / ` — no pay, no on-site/hybrid policy, no quotes, no remarks (those belong in Block A prose). Use `null` for the key and `—` for the row only when the JD genuinely names no location. `verify-pipeline.mjs` Check 17 flags any report that has neither, and Check 18 errors on any value that is not places only.
+
+**Every dashboard-fed field holds only its own value (renderer-consumed, Check 18):** `team:` is the team/org the JD names for the role, name only (never the archetype or a fit verdict; `null` if the JD names none); `advertised_comp:` is the base-pay figures only (`"$150,000–$200,000"`); `**Work Auth:**` / `work_auth:`, `**Legitimacy:**` / `legitimacy_tier:` and `risk_level:` are exactly one of their listed values with nothing appended. Shapes are defined in `lib/column-contract.mjs`; judgment and context go in the report prose.
 
 ### 2. Record in tracker
 
