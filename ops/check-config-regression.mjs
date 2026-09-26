@@ -2,17 +2,20 @@
 /**
  * Filter regression check for portals.yml (fork-local, ops/).
  *
- * Runs the real title_filter, level_filter, skip_tiers and location_filter from
+ * Runs the real title_filter, skip_tiers, location_filter and level_filter from
  * portals.yml against a fixtures file using the same code scan.mjs uses
- * (title-keywords.mjs, lib/level-filter.mjs, classify-tier.mjs, scan.mjs
- * buildLocationFilter), so a config edit that silently drops a known-good role,
- * or re-admits a known-bad one, fails loudly. Called from ops/daily-scan.sh as a
- * WARN-only preflight.
+ * (title-keywords.mjs, classify-tier.mjs, scan.mjs buildLocationFilter,
+ * lib/level-filter.mjs), so a config or code edit that silently drops a
+ * known-good role, or re-admits a known-bad one, fails loudly. Called from
+ * ops/daily-scan.sh as a WARN-only preflight.
  *
  * The fixtures are the user's own targeting, so they live in the gitignored
  * data/ dir (default data/filter-regression-fixtures.json). Shape:
  *   { "titles_kept": [{ "text": "...", "why": "..." }], "titles_dropped": [...],
- *     "locations_kept": [...], "locations_dropped": [...] }
+ *     "locations_kept": [...], "locations_dropped": [...],
+ *     "levels": [{ "title": "...", "jd": "full JD text", "expected": "drop" | "keep", "why": "..." }] }
+ * level_filter judges the JD, not the title, so titles_* never apply it; a
+ * `levels` case runs the title AND its JD through level_filter's assess().
  * No fixtures file → nothing to check, exit 0.
  *
  * Usage:  node ops/check-config-regression.mjs [--portals PATH] [--fixtures PATH]
@@ -67,7 +70,7 @@ const titleFilter = buildTitleFilter(config.title_filter);
 const skipTiers = (Array.isArray(config.skip_tiers) ? config.skip_tiers : []).map((t) => String(t).toLowerCase());
 const locationFilter = buildLocationFilter(config.location_filter);
 const levelFilter = buildLevelFilter(config.level_filter);
-const titleKept = (t) => titleFilter(t) && (!levelFilter || levelFilter(t)) && !skipTiers.includes(classifyTier(t));
+const titleKept = (t) => titleFilter(t) && !skipTiers.includes(classifyTier(t));
 
 const suites = [
   ['titles_kept', titleKept, true],
@@ -85,6 +88,19 @@ for (const [key, predicate, expected] of suites) {
     if (predicate(text) !== expected) {
       failures.push(`${key}: "${text}" was ${expected ? 'DROPPED' : 'KEPT'}${item.why ? ` — ${item.why}` : ''}`);
     }
+  }
+}
+
+for (const item of fixtures.levels || []) {
+  checked++;
+  if (!levelFilter) {
+    failures.push(`levels: "${item.title}" — level_filter is disabled, cannot check`);
+    continue;
+  }
+  const verdict = levelFilter.assess(item.title, item.jd);
+  const got = verdict.drop ? 'drop' : 'keep';
+  if (got !== item.expected) {
+    failures.push(`levels: "${item.title}" was ${got.toUpperCase()}, expected ${item.expected}${verdict.reason ? ` (${verdict.reason})` : ''}${item.why ? ` — ${item.why}` : ''}`);
   }
 }
 

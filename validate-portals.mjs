@@ -281,6 +281,12 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       }
       validateKeywordList(lf.block, 'level_filter.block', errors);
       validateKeywordList(lf.exempt, 'level_filter.exempt', errors);
+      if (lf.min_years !== undefined && (typeof lf.min_years !== 'number' || !(lf.min_years > 0))) {
+        add(errors, 'level_filter.min_years', 'must be a positive number when set');
+      }
+      if (lf.fetch_jd !== undefined && typeof lf.fetch_jd !== 'boolean') {
+        add(errors, 'level_filter.fetch_jd', 'must be a boolean when set');
+      }
     }
   }
 

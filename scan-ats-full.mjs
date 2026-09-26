@@ -56,6 +56,7 @@ import workday from './providers/workday.mjs';
 import icims from './providers/icims.mjs';
 import { buildTitleFilter, buildTitleFilterOverrides, buildTitleFilterWithOverrides, buildLocationFilter, buildContentFilter, matchedTitleKeywords, loadSeenUrls, normalizeUrlForDedup, appendToPipeline, appendToScanHistory, loadBlacklist, parseSinceDays, PORTALS_PATH, PIPELINE_PATH } from './scan.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
+import { fetchJobDescription } from './lib/jd-text.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { SEED_SOURCES, toPortalEntry } from './seeds/vc-portfolios.mjs';
@@ -480,6 +481,34 @@ export function resolveTitleFilterConfig(config) {
   return config?.title_filter_full ?? config?.title_filter;
 }
 
+// Level ceiling for one posting that passed every other filter (fork-local,
+// lib/level-filter.mjs). admit() returns false when the posting is dropped; a
+// kept Staff+ posting carries a note telling stage 2 what to check. It answers
+// synchronously unless the JD must be fetched, and then returns a Promise, so
+// the caller's dedup check-then-add stays atomic in the common case. Counters
+// live on the gate so both sweep paths report into one summary.
+export function makeLevelGate(levelFilter) {
+  const gate = { filter: levelFilter, dropped: [], fetched: 0, unchecked: 0 };
+  const record = (job, level) => {
+    if (level.fetched) gate.fetched++;
+    if (level.drop) {
+      gate.dropped.push(`${job.company || '?'} | ${job.title} | ${job.url} — ${level.reason}`);
+      return false;
+    }
+    if (level.note) {
+      if (/no JD text/.test(level.note)) gate.unchecked++;
+      job.note = typeof job.note === 'string' && job.note.trim() ? `${job.note} — ${level.note}` : level.note;
+    }
+    return true;
+  };
+  gate.admit = (job) => {
+    if (!levelFilter) return true;
+    if (!levelFilter.needsFetch(job)) return record(job, levelFilter.assess(job.title, job.description));
+    return levelFilter.check(job).then((level) => record(job, level));
+  };
+  return gate;
+}
+
 // Title/location/content filter chain for one posting, used by runSeedScan().
 // The main ATS-directory loop below inlines the same three checks (it tracks
 // a droppedContent counter per stage for the run summary), but this shared,
@@ -616,6 +645,11 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
       // in this file can't quietly drift apart (#3439).
       const dedupToken = dedupTokenFor(job, provider);
       if (seenUrls.has(dedupToken)) continue;
+      // Level ceiling: synchronous unless the JD must be fetched; after a fetch,
+      // re-check dedup (a concurrent task may have taken the posting meanwhile).
+      let levelOk = opts.levelGate ? opts.levelGate.admit(job) : true;
+      if (levelOk !== true && levelOk !== false) levelOk = (await levelOk) && !seenUrls.has(dedupToken);
+      if (!levelOk) continue;
       seenUrls.add(dedupToken);
       offers.push({ ...job, source: sourceName, dateStatus: job.postedAt ? 'dated' : 'unknown' });
     }
@@ -739,13 +773,10 @@ async function main() {
   // the net for specific companies on top of whichever title filter config
   // (title_filter or title_filter_full) this run is already using.
   const titleFilterOverrides = buildTitleFilterOverrides(config?.title_filter_overrides);
-  // level_filter (lib/level-filter.mjs) caps seniority on the reverse scan too,
-  // folded into titleFilter so every title check below applies it.
-  const baseTitleFilter = buildTitleFilterWithOverrides(fullTitleFilterConfig, titleFilterOverrides);
-  const levelFilter = buildLevelFilter(config?.level_filter);
-  const titleFilter = levelFilter
-    ? (title, companySlug) => baseTitleFilter(title, companySlug) && levelFilter(title)
-    : baseTitleFilter;
+  const titleFilter = buildTitleFilterWithOverrides(fullTitleFilterConfig, titleFilterOverrides);
+  // level_filter (lib/level-filter.mjs) caps seniority on the reverse scan too:
+  // a Staff+ title is dropped only when its JD requires min_years+ or a team lead.
+  opts.levelGate = makeLevelGate(buildLevelFilter(config?.level_filter, { fetchJd: fetchJobDescription }));
   const locationFilter = buildLocationFilter(config?.location_filter);
   // Same content_filter (incl. by_title_keyword scoping) scan.mjs applies —
   // see #1846. Built once here from the same portals.yml config.
@@ -898,6 +929,11 @@ async function main() {
       if (!contentFilter(job.description, matchedTitleKeywords(job.title, fullTitleFilterConfig))) { droppedContent++; continue; }
       const dedupToken = dedupTokenFor(job, provider);
       if (seenUrls.has(dedupToken)) continue;
+      // Level ceiling: synchronous unless the JD must be fetched; after a fetch,
+      // re-check dedup (a concurrent task may have taken the posting meanwhile).
+      let levelOk = opts.levelGate ? opts.levelGate.admit(job) : true;
+      if (levelOk !== true && levelOk !== false) levelOk = (await levelOk) && !seenUrls.has(dedupToken);
+      if (!levelOk) continue;
       seenUrls.add(dedupToken); // intra-scan dedup
       newOffers.push({ ...job, source: `${sourceName}-full`, dateStatus: job.postedAt ? 'dated' : 'unknown' });
     }
@@ -1143,6 +1179,15 @@ async function main() {
     }
   }
   if (droppedContent) log(`Content-filtered:   ${droppedContent}`);
+  const gate = opts.levelGate;
+  if (gate?.filter) {
+    const extra = [
+      gate.fetched ? `${gate.fetched} JDs fetched` : '',
+      gate.unchecked ? `${gate.unchecked} kept unread (no JD text)` : '',
+    ].filter(Boolean).join(', ');
+    log(`Level-filtered:     ${gate.dropped.length} (Staff+ title AND JD requires ${gate.filter.minYears}+ yrs or team lead)${extra ? ` — ${extra}` : ''}`);
+    for (const line of gate.dropped) log(`  - ${line}`);
+  }
   log(`New matches:        ${offers.length}`);
 
   if (offers.length) {

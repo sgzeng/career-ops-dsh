@@ -71,6 +71,7 @@ import { withPipelineLock } from './pipeline-lock.mjs';
 import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter } from './title-keywords.mjs';
 import { buildContentRescue } from './lib/content-rescue.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
+import { fetchJobDescription } from './lib/jd-text.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -3058,9 +3059,10 @@ async function main() {
   // description is strong evidence. Title negatives (Manager, Sales, ...) still veto.
   const contentRescue = buildContentRescue(config.content_rescue, config.content_filter);
   const titleNotVetoed = buildTitleFilter({ negative: config.title_filter?.negative });
-  // Optional (lib/level-filter.mjs): drop titles above the candidate's level
-  // ceiling ("Staff", "Principal", ...) while exempting flat/dual titles.
-  const levelFilter = buildLevelFilter(config.level_filter);
+  // Optional (lib/level-filter.mjs): a Staff/Principal/Distinguished title is
+  // dropped only when its JD requires level_filter.min_years+ or a team lead;
+  // the JD is fetched when the listing carries none.
+  const levelFilter = buildLevelFilter(config.level_filter, { fetchJd: fetchJobDescription });
   const candidateCountry = loadCandidateCountry();
   const countryEligibilityFilter = buildCountryEligibilityFilter(config.country_eligibility_filter, candidateCountry);
   const visaFilter = buildVisaFilter(config.visa_filter);
@@ -3152,6 +3154,9 @@ async function main() {
   let totalFilteredTitle = 0;
   let totalContentRescued = 0;
   let totalFilteredLevel = 0;
+  let totalLevelUnchecked = 0;
+  let totalLevelFetched = 0;
+  const levelDropped = [];
   let totalFilteredTier = 0;
   let totalFilteredLocation = 0;
   let totalFilteredPostingAge = 0;
@@ -3283,10 +3288,6 @@ async function main() {
           const label = `content-rescue: ${rescued.keywords.join(', ')}`;
           job.note = typeof job.note === 'string' && job.note.trim() ? `${job.note} — ${label}` : label;
         }
-        if (levelFilter && !levelFilter(job.title)) {
-          totalFilteredLevel++;
-          continue;
-        }
         if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
           totalFilteredTier++;
           continue;
@@ -3380,6 +3381,30 @@ async function main() {
             status: cooldownResult.reason,
           });
           continue;
+        }
+        // Level ceiling (lib/level-filter.mjs) runs last, so a JD is fetched only
+        // for a new, not-yet-seen posting with a gated title that every other
+        // filter kept. A dropped posting is not marked seen: next run re-reads it.
+        // Synchronous unless it must fetch the JD; after a fetch the dedup sets
+        // are re-checked, since another company's task may have taken the role.
+        if (levelFilter) {
+          const fetching = levelFilter.needsFetch(job);
+          const level = fetching ? await levelFilter.check(job) : levelFilter.assess(job.title, job.description);
+          if (fetching && (seenUrls.has(dedupUrl)
+              || (key !== null && (seenCompanyRoles.has(key) || seenCompanyRoles.has(baseKey))))) {
+            totalDupes++;
+            continue;
+          }
+          if (level.fetched) totalLevelFetched++;
+          if (level.drop) {
+            totalFilteredLevel++;
+            levelDropped.push(`${job.company || company.name} | ${job.title} | ${job.url} — ${level.reason}`);
+            continue;
+          }
+          if (level.note) {
+            if (/no JD text/.test(level.note)) totalLevelUnchecked++;
+            job.note = typeof job.note === 'string' && job.note.trim() ? `${job.note} — ${level.note}` : level.note;
+          }
         }
         // Mark as seen to avoid intra-scan dupes. The index is maintained in the
         // same breath as the set it indexes, so a role first surfaced with a
@@ -3507,7 +3532,12 @@ async function main() {
     console.log(`Content-rescued:       ${totalContentRescued} title misses kept on description evidence (${rescuedNew} new)`);
   }
   if (levelFilter) {
-    console.log(`Filtered by level:     ${totalFilteredLevel} removed`);
+    const extra = [
+      totalLevelFetched ? `${totalLevelFetched} JDs fetched` : '',
+      totalLevelUnchecked ? `${totalLevelUnchecked} kept unread (no JD text)` : '',
+    ].filter(Boolean).join(', ');
+    console.log(`Filtered by level:     ${totalFilteredLevel} removed (Staff+ title AND JD requires ${levelFilter.minYears}+ yrs or team lead)${extra ? ` — ${extra}` : ''}`);
+    for (const line of levelDropped) console.log(`  - ${line}`);
   }
   if (skipTiers.length > 0) {
     console.log(`Filtered by tier:      ${totalFilteredTier} removed`);
