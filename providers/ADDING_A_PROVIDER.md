@@ -87,7 +87,10 @@ export default {
   is opt-in enrichment: an entry with `fetchDetails: true` (plus an optional
   `detailLimit` cap) makes the provider fetch per-posting detail to fill
   `description`, bounded by `detailLimit` and skipped entirely while a health
-  probe runs (currently `vdab`, `smartrecruiters`).
+  probe runs (currently `vdab`, `smartrecruiters`). `rippling` enriches by
+  default instead, because its list payload has neither a body nor a date; it
+  is still bounded (4 concurrent, 200 per board) and skipped under
+  `ctx.maxPages`.
 - When the payload exposes **more than one** candidate URL for a posting —
   typically an aggregator carrying the employer's upstream ATS/application
   link alongside its own posting page — `Job.url` is the employer's link, per
@@ -256,7 +259,7 @@ When `ctx.maxPages` is set, `verify-portals` is running a liveness probe
 (`maxPages: 1`), not a scan. Two things follow.
 
 **Cap the walk (SHOULD).** Stop after `ctx.maxPages` pages, and skip any
-per-posting `fetchDetails` / detail enrichment (`smartrecruiters`, `vdab`) —
+per-posting `fetchDetails` / detail enrichment (`smartrecruiters`, `vdab`, `rippling`) —
 the probe has no use for it. Reference `providers/workday.mjs`:
 
 ```js

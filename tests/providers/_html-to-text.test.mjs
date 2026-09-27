@@ -137,6 +137,20 @@ try {
   } else {
     fail(`cap: length=${capped.length}, tail=${JSON.stringify(capped.slice(-10))}`);
   }
+
+  // Many `<` with no `>` must not go quadratic (full JD bodies go through here).
+  // A stray `<` in visible text no longer swallows the rest of the element.
+  const t0 = Date.now();
+  htmlToText(`${'<'.repeat(100000)}x`, { cap: 200000 });
+  htmlToText('<script '.repeat(10000), { cap: 200000 });
+  const ms = Date.now() - t0;
+  const quoted = htmlToText('<p class="a>b">Hello <b>world</b></p><>');
+  const stray = htmlToText('<p>1 < 2</p>');
+  if (ms < 500 && quoted === 'Hello world <>' && stray === '1 < 2') {
+    pass('htmlToText() stays linear on 100k unclosed `<` / `<script `, keeps quoted `>` / literal `<>` handling and a stray `<`');
+  } else {
+    fail(`unclosed-< input took ${ms} ms, or output changed: ${JSON.stringify([quoted, stray])}`);
+  }
 } catch (e) {
   fail(`_html-to-text tests crashed: ${e.message}`);
 }

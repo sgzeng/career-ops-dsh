@@ -175,6 +175,133 @@ try {
   if (brandedRefused) pass('teamtailor.fetch() refuses a branded host without explicit provider:teamtailor');
   else fail('teamtailor.fetch() should refuse a branded host when not explicitly configured');
 
+  // ── description: every <item> carries the job body as HTML ──
+  const { FULL_DESCRIPTION_CAP } = await import(pathToFileURL(join(ROOT, 'providers/_html-to-text.mjs')).href);
+  const feedItem = (description) => [
+    '<rss version="2.0" xmlns:tt="https://teamtailor.com/locations"><channel><description/>',
+    '<item>',
+    '  <title>ML Engineer</title>',
+    `  ${description}`,
+    '  <link>https://careers.acme.ai/jobs/1-ml-engineer</link>',
+    '  <pubDate>Mon, 22 Jun 2026 13:45:57 +0200</pubDate>',
+    '  <tt:locations><tt:location><tt:city>Oslo</tt:city><tt:country>Norway</tt:country></tt:location></tt:locations>',
+    '</item>',
+    '</channel></rss>',
+  ].join('\n');
+  const descOf = (description) => parseTeamtailorFeed(feedItem(description), 'Acme')[0];
+
+  // Entity-encoded (the careers.lyzr.ai shape): two entity layers, XML over
+  // HTML. `&amp;amp;` is the HTML's own `&amp;` and must end as a single `&`;
+  // `&amp;quot;` sits inside a quoted attribute and must not split the tag.
+  const encoded = descOf(
+    '<description>&lt;h1&gt;&lt;strong id="docs-1"&gt;The role&lt;/strong&gt;&lt;/h1&gt;'
+    + '&lt;p title="5&amp;quot; x"&gt;Location &amp;amp; work mode: Bengaluru&lt;/p&gt;'
+    + '&lt;ul&gt;&lt;li&gt;R&amp;amp;D on LLM agents &amp;#8212; Z&amp;#xfc;rich&lt;/li&gt;&lt;/ul&gt;</description>',
+  );
+  if (encoded?.description === 'The role Location & work mode: Bengaluru R&D on LLM agents — Zürich') {
+    pass('description: entity-encoded HTML decodes through both entity layers to plain text');
+  } else {
+    fail(`entity-encoded description = ${JSON.stringify(encoded?.description)}`);
+  }
+
+  // A displayed entity must survive: the HTML text `&amp;lt;` shows a literal
+  // "&lt;". Decoding the encoded form a third time would turn it into "<".
+  const displayed = descOf('<description>&lt;p&gt;Use a &amp;amp;lt; b&lt;/p&gt;</description>');
+  if (displayed?.description === 'Use a &lt; b') {
+    pass('description: an entity-encoded description is decoded exactly twice (displayed &lt; kept)');
+  } else {
+    fail(`displayed-entity description = ${JSON.stringify(displayed?.description)}`);
+  }
+
+  // The job's other fields are untouched by a description being present.
+  if (encoded?.title === 'ML Engineer' && encoded?.url === 'https://careers.acme.ai/jobs/1-ml-engineer'
+    && encoded?.location === 'Oslo, Norway' && encoded?.postedAt === Date.parse('Mon, 22 Jun 2026 13:45:57 +0200')) {
+    pass('description: title / url / location / postedAt unchanged alongside a description');
+  } else {
+    fail(`row with description = ${JSON.stringify(encoded)}`);
+  }
+
+  // CDATA-wrapped: the section holds plain HTML, whose own entities decode once.
+  const cdata = descOf('<description><![CDATA[<p>Build <b>evals</b> for R&amp;D &#8212; 3+ years</p><br/><p>Remote (EU) ok</p>]]></description>');
+  if (cdata?.description === 'Build evals for R&D — 3+ years Remote (EU) ok') {
+    pass('description: CDATA-wrapped HTML is unwrapped and reduced to plain text');
+  } else {
+    fail(`CDATA description = ${JSON.stringify(cdata?.description)}`);
+  }
+
+  // A body split across CDATA sections (the standard way to carry `]]>`)
+  // rejoins instead of leaking the section markers.
+  const splitCdata = descOf('<description><![CDATA[<p>array[i]]]]><![CDATA[> 0</p>]]></description>');
+  if (splitCdata?.description === 'array[i]]> 0') {
+    pass('description: multi-section CDATA rejoins without leaking markers');
+  } else {
+    fail(`split-CDATA description = ${JSON.stringify(splitCdata?.description)}`);
+  }
+
+  // Missing / empty / markup-only descriptions are omitted, not emitted as ''.
+  const missing = [
+    ['no <description>', ''],
+    ['self-closing', '<description/>'],
+    ['empty', '<description></description>'],
+    ['empty CDATA', '<description><![CDATA[]]></description>'],
+    ['markup-only', '<description>&lt;p&gt;&lt;br/&gt;&lt;/p&gt; &amp;nbsp; </description>'],
+  ];
+  const wrongMissing = missing.filter(([, d]) => {
+    const row = descOf(d);
+    return !row || 'description' in row;
+  });
+  if (wrongMissing.length === 0) {
+    pass('description: missing / empty / markup-only description is omitted (job still emitted)');
+  } else {
+    fail(`description should be omitted for: ${wrongMissing.map(([label]) => label).join(', ')}`);
+  }
+
+  // Markup must not leak: script/style bodies go entirely, and an encoded or
+  // double-encoded tag cannot come out the other side as live markup, in
+  // either wire shape.
+  const hostile = [
+    ['encoded script', '<description>&lt;p&gt;Hi&lt;/p&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;style&gt;p{x:1}&lt;/style&gt;&lt;img src=x onerror="alert(2)"&gt;there</description>'],
+    ['CDATA script', '<description><![CDATA[<p>Hi</p><script>alert(1)</script><style>p{x:1}</style><img src=x onerror="alert(2)">there]]></description>'],
+    ['double-encoded script', '<description>&lt;p&gt;Hi&lt;/p&gt;&amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;there</description>'],
+  ];
+  const leaked = hostile.filter(([, d]) => {
+    const text = descOf(d)?.description ?? '';
+    return /[<>]|alert\(1\)|alert\(2\)|onerror|p\{x/.test(text) || !text.startsWith('Hi') || !text.endsWith('there');
+  });
+  if (leaked.length === 0) {
+    pass('description: no tags, scripts, styles or handler attributes leak into the text');
+  } else {
+    fail(`markup leaked for: ${leaked.map(([label]) => `${label} → ${JSON.stringify(descOf(hostile.find(([l]) => l === label)[1])?.description)}`).join('; ')}`);
+  }
+
+  // Capped like the full-text providers (greenhouse / lever).
+  const long = descOf(`<description>&lt;p&gt;${'word '.repeat(FULL_DESCRIPTION_CAP)}&lt;/p&gt;</description>`);
+  if (long?.description?.length === FULL_DESCRIPTION_CAP) {
+    pass('description: capped at FULL_DESCRIPTION_CAP');
+  } else {
+    fail(`long description length = ${long?.description?.length}, expected ${FULL_DESCRIPTION_CAP}`);
+  }
+
+  // A malformed description (unterminated CDATA, stray `<`) never costs the row.
+  const malformed = descOf('<description><![CDATA[<p>Half <b open</description>');
+  if (malformed?.title === 'ML Engineer' && !/<b\b/.test(malformed?.description ?? '')) {
+    pass('description: malformed markup does not drop the job or leak a tag opener');
+  } else {
+    fail(`malformed description row = ${JSON.stringify(malformed)}`);
+  }
+
+  // fetch() passes descriptions through end to end.
+  const fetchedWithDesc = await teamtailor.fetch(
+    { name: 'Acme', provider: 'teamtailor', careers_url: 'https://careers.acme.ai/jobs' },
+    {
+      transport: 'http',
+      fetchText: async () => feedItem('<description>&lt;p&gt;Hello &amp;amp; welcome&lt;/p&gt;</description>'),
+      fetchJson: async () => { throw new Error('fetchJson should not be called'); },
+    },
+  );
+  if (fetchedWithDesc[0]?.description === 'Hello & welcome') pass('teamtailor.fetch() returns the item description');
+  else fail(`teamtailor.fetch() description = ${JSON.stringify(fetchedWithDesc[0]?.description)}`);
+
 } catch (e) {
   fail(`teamtailor provider tests crashed: ${e.message}`);
 }

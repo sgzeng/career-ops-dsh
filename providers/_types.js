@@ -27,7 +27,12 @@
  *                               or when a board opts into vdab/smartrecruiters-style
  *                               `fetchDetails` (bounded per-job enrichment, skipped
  *                               while probing). Lever/Ashby supply it via
- *                               `descriptionPlain`; most providers omit it.
+ *                               `descriptionPlain`; Comeet (`details=true` on the
+ *                               same call) and Teamtailor (RSS `<description>`)
+ *                               for free; Rippling by bounded per-posting detail
+ *                               requests, on by default (its list has no body or
+ *                               date) and skipped while probing. Many providers
+ *                               still omit it.
  *                               Consumed by scan.mjs's content_filter; an
  *                               empty/absent value always passes the filter.
  * @property {number} [postedAt] Epoch ms when the posting was published.

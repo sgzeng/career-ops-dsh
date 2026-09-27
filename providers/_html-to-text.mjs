@@ -20,9 +20,14 @@ export const FULL_DESCRIPTION_CAP = 20000;
 // A tag ends at an unquoted `>`. Attribute values may contain angle brackets,
 // so the common `<[^>]+>` shortcut can stop midway through a tag and expose
 // the remaining attributes as description text. Requiring content between the
-// brackets preserves a literal `<>`, as the old matcher did.
-const HTML_TAG_RE = /<(?:[^>"']|"[^"]*"|'[^']*')+>/g;
-const HTML_MEDIA_RE = /<(script|style)\b(?:[^>"']|"[^"]*"|'[^']*')*>[\s\S]*?<\/\1\s*>/gi;
+// brackets preserves a literal `<>`, as the old matcher did. An unquoted `<`
+// ends the attempt: no real tag body contains one, and allowing it made the
+// regex quadratic on text with many `<` and no `>` (20k of them took 1.7 s,
+// long enough to stall a scan now that full JD bodies are stripped here).
+const HTML_TAG_RE = /<(?:[^<>"']|"[^"]*"|'[^']*')+>/g;
+// Same `<` exclusion in the opening tag: `<script ` repeated with no `>` took
+// 3.4 s for 80k chars before.
+const HTML_MEDIA_RE = /<(script|style)\b(?:[^<>"']|"[^"]*"|'[^']*')*>[\s\S]*?<\/\1\s*>/gi;
 
 /** @param {string} content */
 function stripMarkup(content) {

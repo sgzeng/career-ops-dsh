@@ -10,6 +10,13 @@
 // `api:` field (or pasted into `careers_url`). The API host is a single fixed
 // origin, so the SSRF defence pins hostname to www.comeet.co AND requires the
 // /careers-api/ path prefix (rather than a per-tenant subdomain regex).
+//
+// fetch() adds `details=true` to the configured URL: the same single request
+// then carries each position's JD sections, stripped to a plain-text
+// `description` that scan.mjs's content_filter, visa_filter, level filter and
+// content rescue read. Without it every Comeet board passed them blind.
+
+import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
 
 const COMEET_API_HOST = 'www.comeet.co';
 
@@ -64,11 +71,58 @@ function resolveApiUrl(entry) {
   return null;
 }
 
+// The configured URL with `details=true` set (replacing any existing value, so
+// the param is never duplicated); the token and every other param are kept.
+/** @param {string} apiUrl */
+function withDetails(apiUrl) {
+  const url = new URL(apiUrl);
+  url.searchParams.set('details', 'true');
+  return url.href;
+}
+
 // NaN-safe Date.parse — `|| undefined` would also coerce a valid epoch 0.
 function toEpochMs(value) {
   if (!value) return undefined;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+/**
+ * Comeet `details` sections → one plain-text description. Exported for tests.
+ *
+ * `details` is an array of { name, value (HTML), order }; live tenants carry
+ * "Description", "Responsibilities", "Requirements" and "About The Company",
+ * and a section's value is often null. Sections sort by numeric `order`
+ * (sections without one follow, in array order), each value goes through
+ * htmlToText, and the non-empty ones are joined with blank lines. The values
+ * carry no heading of their own, so every section but the generic
+ * "Description" body is prefixed with its name ("Requirements: ...").
+ * Capped at FULL_DESCRIPTION_CAP like greenhouse: the requirements section is
+ * what content_filter, visa_filter and the level filter need.
+ *
+ * @param {unknown} details
+ * @returns {string} '' when no section has usable text
+ */
+export function detailsToText(details) {
+  if (!Array.isArray(details)) return '';
+  /** @param {any} s */
+  const rank = s => (typeof s.order === 'number' && Number.isFinite(s.order) ? s.order : Infinity);
+  return details
+    .filter(s => s && typeof s === 'object')
+    .sort((a, b) => {
+      const ra = rank(a), rb = rank(b);
+      return ra === rb ? 0 : ra < rb ? -1 : 1;
+    })
+    .map(s => {
+      const text = htmlToText(s.value, FULL_DESCRIPTION_CAP);
+      const name = htmlToText(s.name);
+      if (!text) return '';
+      return name && !/^description$/i.test(name) ? `${name}: ${text}` : text;
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .slice(0, FULL_DESCRIPTION_CAP)
+    .trim();
 }
 
 /** @type {Provider} */
@@ -86,10 +140,12 @@ export default {
   async fetch(entry, ctx) {
     const apiUrl = resolveApiUrl(entry);
     if (!apiUrl) throw new Error(`comeet: cannot derive API URL for ${entry.name} (set api: to the full careers-api positions URL)`);
-    assertComeetUrl(apiUrl);
+    // withDetails only touches the query, so the host/path pinning checked
+    // here carries over to the URL actually requested.
+    const requestUrl = withDetails(assertComeetUrl(apiUrl));
     // redirect:'error' prevents SSRF via server-side redirects; combined with
     // assertComeetUrl above it guarantees the final hostname stays www.comeet.co.
-    const json = await ctx.fetchJson(apiUrl, { redirect: 'error' });
+    const json = await ctx.fetchJson(requestUrl, { redirect: 'error' });
     return parseComeetResponse(json, entry.name);
   },
 };
@@ -99,7 +155,7 @@ export default {
  *
  * Comeet returns a top-level ARRAY of position objects:
  *   [{ name, location: { name, is_remote }, url_active_page,
- *      url_comeet_hosted_page, time_updated, ... }]
+ *      url_comeet_hosted_page, time_updated, details, ... }]
  *
  * - url: prefer `url_active_page` (the tenant's live careers page), fall back to
  *   `url_comeet_hosted_page` (the Comeet-hosted page). Both are public, display-
@@ -112,10 +168,12 @@ export default {
  *   later sibling away, so those positions use their per-position
  *   `url_comeet_hosted_page` instead.
  * - location: `location.name`, appending "Remote" when `location.is_remote`.
+ * - description: from `details` (present because fetch() asks for
+ *   details=true), see detailsToText. Omitted when no section has usable text.
  *
  * @param {any} json
  * @param {string} companyName
- * @returns {Array<{title: string, url: string, company: string, location: string, postedAt?: number}>}
+ * @returns {Array<{title: string, url: string, company: string, location: string, postedAt?: number, description?: string}>}
  */
 export function parseComeetResponse(json, companyName) {
   const positions = Array.isArray(json) ? json : [];
@@ -149,6 +207,7 @@ export function parseComeetResponse(json, companyName) {
       const location = remote && !/remote/i.test(base)
         ? [base, remote].filter(Boolean).join(', ')
         : base;
+      const description = detailsToText(j.details);
 
       return {
         title: (typeof j.name === 'string' ? j.name.trim() : ''),
@@ -156,6 +215,7 @@ export function parseComeetResponse(json, companyName) {
         location,
         company: companyName,
         postedAt: toEpochMs(j.time_updated),
+        ...(description ? { description } : {}),
       };
     })
     .filter(job => job.title && job.url);

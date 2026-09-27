@@ -141,7 +141,7 @@ For companies with a public API or structured feed **that are not in `local_pars
 - `ashby`: GET REST API → `jobs[]` with `title`, `jobUrl`, `location` (fold in `secondaryLocations[]` — Ashby lists extra hiring regions there), `compensation` (`minValue`/`maxValue`/`currency`; already fetched via `?includeCompensation=true`), `publishedAt`; slug derived from `careers_url` pattern `jobs.ashbyhq.com/{slug}`
 - `bamboohr`: list `result[]` → `jobOpeningName`, `id`, `location` (city + state; append "Remote" when `isRemote`); build detail URL `https://{company}.bamboohr.com/careers/{id}/detail`; to read full JD, make a GET request to the detail URL and use `result.jobOpening` (`jobOpeningName`, `description`, `datePosted`, `minimumExperience`, `compensation`, `jobOpeningShareUrl`)
 - `lever`: root array `[]` → `text`, `hostedUrl` (fallback: `applyUrl`), `categories.location`, `descriptionPlain` (the list API ships the JD body — feeds `content_filter` and the #1597 cross-listing fingerprint)
-- `teamtailor`: RSS items → `title`, `link`, `location` (from the `tt:` block — `tt:city` / `tt:country`)
+- `teamtailor`: RSS items → `title`, `link`, `location` (from the `tt:` block — `tt:city` / `tt:country`), `description` (the item's `<description>` HTML as plain text)
 - `workday`: `jobPostings[]`/`jobPostings` (based on tenant) → `title`, `externalPath` or URL built from the host, `locationsText` (fallback: derive from the URL path)
 - `breezy`: top-level array `[]` → `name`, `url` (absolute), `location.name` (or city/state/country + `is_remote`), `published_date`
 

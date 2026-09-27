@@ -1,4 +1,5 @@
 import { decodeEntities } from './_html-entities.mjs';
+import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
@@ -8,7 +9,8 @@ import { decodeEntities } from './_html-entities.mjs';
 // `https://<slug>.teamtailor.com/jobs.rss`. The feed is public and no-auth, so
 // it is parsed in-process with the same tiny tag extractor as
 // providers/nodesk.mjs / providers/personio.mjs rather than adding an XML
-// dependency.
+// dependency. Each item carries the full job body in <description>, so
+// `description` is populated with no per-job request.
 //
 // Auto-detects `https://<slug>.teamtailor.com/...` careers URLs. Many tenants
 // front the same feed on a branded domain (e.g. careers.acme.com also serves
@@ -101,11 +103,35 @@ function extractText(inner) {
   return decodeEntities(inner).trim();
 }
 
-// Extract the text of the first <tag>...</tag> in a block. Returns '' when
+// Raw inner markup of the first <tag>...</tag> in a block, or null when
 // absent. Tag names may contain a namespace colon (e.g. tt:city).
-function tagText(block, tag) {
+function tagInner(block, tag) {
   const m = block.match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, 'i'));
-  return m ? extractText(m[1]) : '';
+  return m ? m[1] : null;
+}
+
+// Extract the text of the first <tag>...</tag> in a block. Returns '' when
+// absent.
+function tagText(block, tag) {
+  const inner = tagInner(block, tag);
+  return inner === null ? '' : extractText(inner);
+}
+
+// The item's <description> — the full job body as HTML — reduced to plain
+// text. Tenants ship it either entity-encoded (`&lt;p&gt;R&amp;amp;D`, the
+// shape careers.lyzr.ai serves) or CDATA-wrapped. The encoded form is two
+// entity layers (XML over HTML), which is exactly what htmlToText's two
+// decode+strip passes unwind, so the raw inner goes in as-is: routing it
+// through extractText first would add a third decode. CDATA sections are
+// unwrapped in place (a body split across several sections to escape `]]>`
+// rejoins correctly) and leave plain HTML, which htmlToText also handles.
+// FULL_DESCRIPTION_CAP, as greenhouse/lever use: content_filter, visa_filter
+// and content rescue read the requirements section, which sits past 4000
+// chars on longer JDs.
+function descriptionText(item) {
+  const inner = tagInner(item, 'description');
+  if (!inner) return '';
+  return htmlToText(inner.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1'), FULL_DESCRIPTION_CAP);
 }
 
 // NaN-safe Date.parse — `|| undefined` would also coerce a valid epoch 0.
@@ -143,13 +169,15 @@ function resolveLocation(item) {
  * Parse a Teamtailor public RSS jobs feed. Exported for unit tests.
  *
  * Shape: `<rss><channel><item>...</item>...</channel></rss>`. Each item
- * exposes `<title>`, `<link>`, `<pubDate>`, an optional `<remoteStatus>`, and
- * a `tt:` locations block (`<tt:city>`, `<tt:country>`). The company is not in
- * the item, so the tracked_companies `name` is used.
+ * exposes `<title>`, `<link>`, `<pubDate>`, `<description>` (the job body as
+ * HTML), an optional `<remoteStatus>`, and a `tt:` locations block
+ * (`<tt:city>`, `<tt:country>`). The company is not in the item, so the
+ * tracked_companies `name` is used. `description` is omitted when the item
+ * has none or it reduces to no text.
  *
  * @param {string} xml - raw RSS feed body
  * @param {string} [defaultCompany] - company label for every posting
- * @returns {Array<{title: string, url: string, company: string, location: string, postedAt?: number}>}
+ * @returns {Array<{title: string, url: string, company: string, location: string, postedAt?: number, description?: string}>}
  */
 export function parseTeamtailorFeed(xml, defaultCompany = 'Teamtailor') {
   if (typeof xml !== 'string') return [];
@@ -172,6 +200,8 @@ export function parseTeamtailorFeed(xml, defaultCompany = 'Teamtailor') {
       url,
     };
     if (postedAt !== undefined) job.postedAt = postedAt;
+    const description = descriptionText(item);
+    if (description) job.description = description;
     jobs.push(job);
   }
 
