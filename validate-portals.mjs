@@ -125,7 +125,7 @@ const TITLE_FILTER_FIELDS = ['positive', 'negative', 'seniority_boost'];
 const KNOWN_TOP_LEVEL = new Set([
   'scan_history', 'location_filter', 'visa_filter', 'country_eligibility_filter',
   'max_posting_age_days', 'trust_filter', 'skip_tiers', 'title_filter',
-  'title_filter_full', 'title_filter_overrides', 'tracked_title_overrides', 'content_filter', 'content_rescue', 'level_filter', 'salary_filter', 'search_keyword_groups',
+  'title_filter_full', 'title_filter_overrides', 'title_nets', 'content_filter', 'content_rescue', 'level_filter', 'salary_filter', 'search_keyword_groups',
   'search_queries', 'linkedin_post_queries', 'tracked_companies', 'job_boards',
   'interamt_searches', 'hn_hiring', 'first_scan_backfill',
 ]);
@@ -134,7 +134,7 @@ const KNOWN_TOP_LEVEL = new Set([
 const KNOWN_COMPANY_KEYS = new Set([
   'name', 'careers_url', 'api', 'provider', 'parser', 'domain', 'enabled',
   'max_pages', 'ibm', 'amazon', 'notes', 'verified',
-  'scan_method', 'scan_query', 'groups', 'search_site', 'first_scan_backfill',
+  'scan_method', 'scan_query', 'groups', 'search_site', 'first_scan_backfill', 'title_net',
 ]);
 
 const KNOWN_SEARCH_QUERY_KEYS = new Set(['name', 'query', 'groups', 'site', 'enabled']);
@@ -244,10 +244,16 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       if (cr.enabled !== undefined && typeof cr.enabled !== 'boolean') {
         add(errors, 'content_rescue.enabled', 'must be a boolean when set');
       }
-      for (const key of ['min_distinct', 'min_distinct_no_thesis', 'boilerplate_df_pct', 'min_company_jobs', 'min_description_chars']) {
+      for (const key of ['min_distinct', 'min_distinct_no_thesis', 'boilerplate_df_pct', 'sentence_df_pct', 'min_company_jobs', 'min_description_chars']) {
         if (cr[key] !== undefined && !(typeof cr[key] === 'number' && Number.isFinite(cr[key]) && cr[key] >= 0)) {
           add(errors, `content_rescue.${key}`, 'must be a non-negative number when set');
         }
+      }
+      // lib/content-rescue.mjs treats any other value as "sentence"; a typo such
+      // as "keywords" would silently switch the stripping rule.
+      const mode = typeof cr.boilerplate === 'string' ? cr.boilerplate.trim().toLowerCase() : cr.boilerplate;
+      if (cr.boilerplate !== undefined && mode !== 'sentence' && mode !== 'keyword') {
+        add(warnings, 'content_rescue.boilerplate', `${JSON.stringify(cr.boilerplate)} is not "sentence" or "keyword" — treated as "sentence"`);
       }
       validateKeywordList(cr.thesis_words, 'content_rescue.thesis_words', errors);
       validateKeywordList(cr.keywords, 'content_rescue.keywords', errors);
@@ -379,6 +385,9 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       if (fb.window_days !== undefined && !(Number.isInteger(fb.window_days) && fb.window_days > 0)) {
         add(errors, 'first_scan_backfill.window_days', 'must be a positive integer when set');
       }
+      if (fb.rerun_on_wider_window !== undefined && typeof fb.rerun_on_wider_window !== 'boolean') {
+        add(errors, 'first_scan_backfill.rerun_on_wider_window', 'must be a boolean when set');
+      }
     }
   }
 
@@ -388,30 +397,20 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
-  // tracked_title_overrides (scan.mjs, fork-local): `companies` are matched to
-  // tracked_companies names exactly (case-insensitive), so a name that matches
-  // no entry — a typo, or an entry renamed later — silently broadens nothing.
-  if (config.tracked_title_overrides !== undefined) {
-    const tto = config.tracked_title_overrides;
-    if (!Array.isArray(tto)) {
-      add(errors, 'tracked_title_overrides', 'must be an array of { companies, positive_extra }');
+  // title_nets (scan.mjs, fork-local): net name -> extra title_filter positives,
+  // applied to tracked_companies entries tagged `title_net: <name>` (checked per
+  // entry below — an undefined net name would silently broaden nothing).
+  const titleNets = isObject(config.title_nets) ? config.title_nets : {};
+  if (config.title_nets !== undefined) {
+    if (!isObject(config.title_nets)) {
+      add(errors, 'title_nets', 'must be a mapping of net name -> list of title keywords');
     } else {
-      const tracked = new Set((Array.isArray(config.tracked_companies) ? config.tracked_companies : [])
-        .filter(e => isObject(e) && typeof e.name === 'string')
-        .map(e => e.name.trim().toLowerCase()));
-      for (const [idx, ov] of tto.entries()) {
-        const base = `tracked_title_overrides[${idx}]`;
-        if (!isObject(ov)) { add(errors, base, 'must be an object'); continue; }
-        if (!Array.isArray(ov.companies) || ov.companies.length === 0) {
-          add(errors, `${base}.companies`, 'must be a non-empty list of tracked_companies names');
+      for (const [name, list] of Object.entries(config.title_nets)) {
+        if (!Array.isArray(list) || list.length === 0) {
+          add(errors, `title_nets.${name}`, 'must be a non-empty list of title keywords');
         } else {
-          for (const name of ov.companies) {
-            if (typeof name !== 'string' || !tracked.has(name.trim().toLowerCase())) {
-              add(warnings, `${base}.companies`, `"${name}" matches no tracked_companies name — it broadens nothing`);
-            }
-          }
+          validateKeywordList(list, `title_nets.${name}`, errors);
         }
-        validateKeywordList(ov.positive_extra, `${base}.positive_extra`, errors);
       }
     }
   }
@@ -458,6 +457,13 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       }
 
       validateParser(entry.parser, `${base}.parser`, errors);
+
+      if (entry.title_net !== undefined && noun !== 'company') {
+        add(errors, `${base}.title_net`, 'title_net applies to tracked_companies only (an aggregator board would widen the net for every employer on it)');
+      } else if (entry.title_net !== undefined
+        && (typeof entry.title_net !== 'string' || !Object.hasOwn(titleNets, entry.title_net))) {
+        add(errors, `${base}.title_net`, `"${entry.title_net}" is not a title_nets name (defined: ${Object.keys(titleNets).join(', ') || 'none'})`);
+      }
 
       // Fork-local stage-2 WebSearch fields (companies only, as before the
       // tracked_companies/job_boards merge into this shared validator).

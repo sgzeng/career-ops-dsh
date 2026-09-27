@@ -2,18 +2,25 @@
 /**
  * Filter regression check for portals.yml (fork-local, ops/).
  *
- * Runs the real title_filter, skip_tiers, location_filter and level_filter from
- * portals.yml against a fixtures file using the same code scan.mjs uses
- * (title-keywords.mjs, classify-tier.mjs, scan.mjs buildLocationFilter,
- * lib/level-filter.mjs), so a config or code edit that silently drops a
- * known-good role, or re-admits a known-bad one, fails loudly. Called from
- * ops/daily-scan.sh as a WARN-only preflight.
+ * Runs the real title_filter + title_nets, skip_tiers, location_filter and
+ * level_filter from portals.yml against a fixtures file using the same code
+ * scan.mjs uses (scan.mjs buildScanTitleFilter + buildLocationFilter,
+ * classify-tier.mjs, lib/level-filter.mjs), so a config or code edit that
+ * silently drops a known-good role, or re-admits a known-bad one, fails loudly.
+ * Called from ops/daily-scan.sh as a WARN-only preflight.
  *
  * The fixtures are the user's own targeting, so they live in the gitignored
  * data/ dir (default data/filter-regression-fixtures.json). Shape:
- *   { "titles_kept": [{ "text": "...", "why": "..." }], "titles_dropped": [...],
+ *   { "titles_kept": [{ "text": "...", "title_net": "security", "why": "..." }], "titles_dropped": [...],
  *     "locations_kept": [...], "locations_dropped": [...],
  *     "levels": [{ "title": "...", "jd": "full JD text", "expected": "drop" | "keep", "why": "..." }] }
+ * A titles_* case with `title_net` is judged as at a tracked company tagged with
+ * that net (scan.mjs's titleFilter(title, entry.title_net)); a name missing from
+ * title_nets fails the case. Without it, the plain title_filter decides. A
+ * titles_* case may also name its `company`: the case then fails unless that
+ * tracked_companies entry exists and carries exactly that title_net, so dropping
+ * a company's tag breaks the fixture instead of passing it silently. title_net
+ * and company mean nothing for locations_* cases and fail them.
  * level_filter judges the JD, not the title, so titles_* never apply it; a
  * `levels` case runs the title AND its JD through level_filter's assess().
  * No fixtures file → nothing to check, exit 0.
@@ -51,9 +58,8 @@ if (!existsSync(values.fixtures)) {
 process.chdir(ROOT);
 const load = (rel) => import(pathToFileURL(join(ROOT, rel)).href);
 const yaml = await import('js-yaml');
-const { buildTitleFilter } = await load('title-keywords.mjs');
 const { classifyTier } = await load('classify-tier.mjs');
-const { buildLocationFilter } = await load('scan.mjs');
+const { buildLocationFilter, buildScanTitleFilter } = await load('scan.mjs');
 const { buildLevelFilter } = await load('lib/level-filter.mjs');
 
 let config;
@@ -66,27 +72,55 @@ try {
   process.exit(2);
 }
 
-const titleFilter = buildTitleFilter(config.title_filter);
+// scan.mjs's title gate; with no net argument it is exactly buildTitleFilter(title_filter).
+const titleFilter = buildScanTitleFilter(config);
+const titleNets = config.title_nets && typeof config.title_nets === 'object' && !Array.isArray(config.title_nets)
+  ? config.title_nets
+  : {};
 const skipTiers = (Array.isArray(config.skip_tiers) ? config.skip_tiers : []).map((t) => String(t).toLowerCase());
 const locationFilter = buildLocationFilter(config.location_filter);
 const levelFilter = buildLevelFilter(config.level_filter);
-const titleKept = (t) => titleFilter(t) && !skipTiers.includes(classifyTier(t));
+const titleKept = (t, net) => titleFilter(t, net) && !skipTiers.includes(classifyTier(t));
 
+const trackedByName = new Map((Array.isArray(config.tracked_companies) ? config.tracked_companies : [])
+  .filter((e) => e && typeof e === 'object' && typeof e.name === 'string')
+  .map((e) => [e.name.trim().toLowerCase(), e]));
+// [key, predicate, expected, takes title_net/company]
 const suites = [
-  ['titles_kept', titleKept, true],
-  ['titles_dropped', titleKept, false],
-  ['locations_kept', (l) => locationFilter(l), true],
-  ['locations_dropped', (l) => locationFilter(l), false],
+  ['titles_kept', titleKept, true, true],
+  ['titles_dropped', titleKept, false, true],
+  ['locations_kept', (l) => locationFilter(l), true, false],
+  ['locations_dropped', (l) => locationFilter(l), false, false],
 ];
 
 let checked = 0;
 const failures = [];
-for (const [key, predicate, expected] of suites) {
+for (const [key, predicate, expected, netAware] of suites) {
   for (const item of fixtures[key] || []) {
     const text = typeof item === 'string' ? item : item.text;
+    const net = item.title_net;
+    const company = item.company;
+    const label = net === undefined ? `"${text}"` : `"${text}" [title_net: ${JSON.stringify(net)}]`;
     checked++;
-    if (predicate(text) !== expected) {
-      failures.push(`${key}: "${text}" was ${expected ? 'DROPPED' : 'KEPT'}${item.why ? ` — ${item.why}` : ''}`);
+    if (!netAware && (net !== undefined || company !== undefined)) {
+      failures.push(`${key}: ${label} — title_net / company apply to titles_* cases only`);
+      continue;
+    }
+    if (company !== undefined) {
+      const entry = typeof company === 'string' ? trackedByName.get(company.trim().toLowerCase()) : undefined;
+      if (!entry || entry.title_net !== net) {
+        failures.push(`${key}: ${label} — company ${JSON.stringify(company)} ${entry ? `is tagged title_net: ${JSON.stringify(entry.title_net ?? null)}` : 'is not a tracked_companies entry'}`);
+        continue;
+      }
+    }
+    // An unknown net would silently read as "no net": a titles_dropped case
+    // would still hold. Same rule as validate-portals' entry.title_net check.
+    if (net !== undefined && (typeof net !== 'string' || !Object.hasOwn(titleNets, net))) {
+      failures.push(`${key}: ${label} names no title_nets entry (defined: ${Object.keys(titleNets).join(', ') || 'none'})`);
+      continue;
+    }
+    if (predicate(text, net) !== expected) {
+      failures.push(`${key}: ${label} was ${expected ? 'DROPPED' : 'KEPT'}${item.why ? ` — ${item.why}` : ''}`);
     }
   }
 }

@@ -16,7 +16,7 @@ import {
   resolveBackfillConfig, backfillKey, makeBackfillPlanner, loadBackfillState, appendBackfillState,
   formatBackfillSummary, BACKFILL_HEADER, isTruncatedFetch, resolveBackfillPath, MAX_TRUNCATED_ATTEMPTS,
 } from '../lib/first-scan-backfill.mjs';
-import { resolveEffectiveAfter, buildPostedDateFilter, resolveEarlyStopMs, collectSeenUrls } from '../scan.mjs';
+import { resolveEffectiveAfter, buildPostedDateFilter, resolveEarlyStopMs, collectSeenUrls, backfillMaxAgeDays, buildPostingAgeFilter } from '../scan.mjs';
 import workday from '../providers/workday.mjs';
 import * as yaml from 'js-yaml';
 
@@ -24,18 +24,38 @@ console.log('\nscan.mjs — first-coverage backfill');
 
 const DAY = 86_400_000;
 
-// 1. Config: default on with max_posting_age_days, opt-outs, cap, no-window.
+// 1. Config: default on with max_posting_age_days, opt-outs, no-window. Since
+//    2026-09-27 window_days may exceed max_posting_age_days (no cap), and
+//    rerun_on_wider_window is opt-in (only a literal true).
 {
   const c = (raw, max, o) => resolveBackfillConfig(raw, max, o);
   const ok = c(undefined, 45).enabled && c(undefined, 45).windowDays === 45
     && c({ window_days: 30 }, 45).windowDays === 30
-    && c({ window_days: 90 }, 45).windowDays === 45 // capped by the age filter
+    && c({ window_days: 120 }, 45).windowDays === 120 // wider than the age filter: allowed
     && c({ window_days: 30 }, undefined).windowDays === 30
+    && c({ window_days: 120 }, 45).rerunOnWiderWindow === false
+    && c({ window_days: 120, rerun_on_wider_window: true }, 45).rerunOnWiderWindow === true
+    && c({ window_days: 120, rerun_on_wider_window: 'yes' }, 45).rerunOnWiderWindow === false
     && !c(false, 45).enabled && !c({ enabled: false }, 45).enabled
     && c(undefined, 45, { cliOff: true }).off === '--no-backfill'
     && !c(undefined, undefined).enabled && /no window/.test(c(undefined, undefined).off);
-  ok ? pass('config: on by default with max_posting_age_days, capped by it, off via config/--no-backfill/no window')
+  ok ? pass('config: on by default with max_posting_age_days, window may exceed it, rerun opt-in, off via config/--no-backfill/no window')
     : fail('resolveBackfillConfig returned an unexpected shape');
+}
+
+// 1b. scan.mjs widens a first-coverage company's age filter to the window.
+{
+  const now = Date.parse('2026-09-27T00:00:00Z');
+  const aged = (days) => now - days * DAY;
+  const wide = buildPostingAgeFilter(backfillMaxAgeDays(45, 120), now);
+  const ok = backfillMaxAgeDays(45, 120) === 120
+    && backfillMaxAgeDays(45, 30) === 45            // a narrower window never tightens the age filter
+    && backfillMaxAgeDays(45, null) === 45          // backfill off
+    && backfillMaxAgeDays(undefined, 120) === undefined // no age filter configured: none to widen
+    && wide(aged(85)) && !wide(aged(121))
+    && !buildPostingAgeFilter(45, now)(aged(85));   // everyone else keeps 45
+  ok ? pass('age filter: a widened company uses max(max_posting_age_days, window_days); others keep max_posting_age_days')
+    : fail('backfillMaxAgeDays / widened age filter misbehaved');
 }
 
 // 1b. Config fails CLOSED: js-yaml reads `off`/`no` as strings and an empty key
@@ -120,7 +140,9 @@ const DAY = 86_400_000;
 }
 
 // 3b. Coverage rules: truncated rows retry up to MAX_TRUNCATED_ATTEMPTS; a row
-//     taken with a smaller window or max_pages than today's does not cover.
+//     taken with a smaller max_pages than today's does not cover; a smaller
+//     window covers unless rerun_on_wider_window (raising window_days is for
+//     companies added from now on, not a re-crawl of every covered board).
 {
   const cfg = resolveBackfillConfig(undefined, 45);
   const e = { name: 'Netflix', careers_url: 'https://netflix.eightfold.ai/careers' };
@@ -132,14 +154,16 @@ const DAY = 86_400_000;
     && planWith(Array(MAX_TRUNCATED_ATTEMPTS - 1).fill(trunc)) !== null
     && planWith(Array(MAX_TRUNCATED_ATTEMPTS).fill(trunc)) === null      // clamped board: give up, not daily re-crawl
     && planWith([trunc, row()]) === null
-    && planWith([row({ windowDays: 30 })]) !== null                       // window raised 30 → 45
-    && planWith([row({ windowDays: 30 })], e, resolveBackfillConfig({ window_days: 30 }, 45)) === null
+    && planWith([row({ windowDays: 30 })]) === null                       // window raised 30 → 45: still covered
+    && planWith([row({ windowDays: 45 })], e, resolveBackfillConfig({ window_days: 120 }, 45)) === null
+    && planWith([row({ windowDays: 45 })], e, resolveBackfillConfig({ window_days: 120, rerun_on_wider_window: true }, 45)) !== null
+    && planWith([row({ windowDays: 120 })], e, resolveBackfillConfig({ window_days: 120, rerun_on_wider_window: true }, 45)) === null
     && planWith([row()], { ...e, max_pages: 50 })?.maxPages === 50        // max_pages raised: re-run
     && planWith([row({ maxPages: 1 })], { ...e, max_pages: 50 }) !== null
     && planWith([row({ maxPages: 50 })], { ...e, max_pages: 50 }) === null
     && planWith([row({ maxPages: 50 })], { ...e, max_pages: 10 }) === null
     && planWith([row({ windowDays: null })]) === null;                     // legacy 4-column row
-  ok ? pass(`coverage: truncated crawls retried (covered after ${MAX_TRUNCATED_ATTEMPTS}), a smaller recorded window/max_pages re-runs the pass`)
+  ok ? pass(`coverage: truncated crawls retried (covered after ${MAX_TRUNCATED_ATTEMPTS}), a smaller max_pages re-runs, a smaller window only with rerun_on_wider_window`)
     : fail('coverage rules returned an unexpected plan');
 }
 
@@ -344,6 +368,61 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     fail(`e2e backfill scan failed: ${err.message}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 8a2. window_days wider than max_posting_age_days (2026-09-27): a NEW company's
+//      first pass reaches past the age filter (d60 is 60 days old, window 90,
+//      max age 45); a company already covered with a 45-day row is NOT re-run.
+{
+  const dir = sandbox();
+  try {
+    portals(dir, { top: 'first_scan_backfill:\n  window_days: 90\n' });
+    const first = scan(dir, ['--since', '14']);
+    const row = loadBackfillState(statePath(dir)).get('parser:node tests/fixtures/backfill-board.mjs')?.[0];
+    (same(added(dir), ['Security Engineer d2', 'Security Engineer d20', 'Security Engineer d40', 'Security Engineer d60'])
+      && row && row.windowDays === 90 && lastRun(dir).filtered_posting_age === '0'
+      && /Backfill: +1 company scanned with a 90-day window \(first coverage\)$/m.test(first))
+      ? pass('e2e window_days 90 > max_posting_age_days 45: a new company\'s first pass keeps the 60-day posting')
+      : fail(`wide first run: added=${JSON.stringify(added(dir))} row=${JSON.stringify(row)} out=${first.split('\n').filter(l => /Backfill/.test(l)).join('')}`);
+  } catch (err) {
+    fail(`e2e wide-window first run failed: ${err.message}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // A run with no --since (bare `node scan.mjs`, as /career-ops scan runs it) or
+  // with --since past max_posting_age_days still sees only 45 days, so it must
+  // widen as well; recording it as covered would spend the wide pass at 45.
+  for (const args of [[], ['--since', '130']]) {
+    const d = sandbox();
+    try {
+      portals(d, { top: 'first_scan_backfill:\n  window_days: 90\n' });
+      const out = scan(d, args);
+      const r = loadBackfillState(statePath(d)).get('parser:node tests/fixtures/backfill-board.mjs')?.[0];
+      (added(d).includes('Security Engineer d60') && r?.windowDays === 90
+        && /Backfill: +1 company scanned with a 90-day window \(first coverage\)$/m.test(out))
+        ? pass(`e2e window_days 90 with ${args.length ? args.join(' ') : 'no --since'}: first pass still widens past max_posting_age_days`)
+        : fail(`wide pass with ${JSON.stringify(args)}: added=${JSON.stringify(added(d))} row=${JSON.stringify(r)} out=${out.split('\n').filter(l => /Backfill/.test(l)).join('')}`);
+    } catch (err) {
+      fail(`e2e wide pass with ${JSON.stringify(args)} failed: ${err.message}`);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  }
+
+  const dir2 = sandbox();
+  try {
+    portals(dir2, { top: 'first_scan_backfill:\n  window_days: 90\n' });
+    appendBackfillState(statePath(dir2), [{ key: 'parser:node tests/fixtures/backfill-board.mjs', company: 'Backfill Co', windowDays: 45 }]);
+    const out = scan(dir2, ['--since', '14']);
+    (same(added(dir2), ['Security Engineer d2']) && /none pending/.test(out))
+      ? pass('e2e raising window_days to 90 does not re-crawl a company already covered at 45 (rerun_on_wider_window off)')
+      : fail(`covered company re-run: added=${JSON.stringify(added(dir2))} out=${out.split('\n').filter(l => /Backfill/.test(l)).join('')}`);
+  } catch (err) {
+    fail(`e2e covered-company wide window failed: ${err.message}`);
+  } finally {
+    rmSync(dir2, { recursive: true, force: true });
   }
 }
 

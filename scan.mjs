@@ -243,19 +243,24 @@ export function buildTitleFilterOverrides(overrides) {
   return map;
 }
 
-// scan.mjs's title gate: title_filter plus `tracked_title_overrides` (same
-// shape as title_filter_overrides). Fork-local, 2026-09-26. Its `companies` are
-// tracked_companies entry names, so a security-only startup can list generic
-// titles ("AI Research Engineer", "Member of Technical Staff") that would flood
-// the scan if added to title_filter.positive for every company. It is a
-// separate key because scan-ats-full.mjs applies title_filter_overrides to
-// YC/a16z seed companies by display name, and a namesake there ("Neo", "Kai")
-// must not inherit the broadened net. Called as titleFilter(job.title,
-// company.name). With no overrides it is exactly buildTitleFilter(title_filter).
+// scan.mjs's title gate: title_filter plus named title nets. Fork-local,
+// 2026-09-26. portals.yml `title_nets` maps a net name to extra positive
+// keywords, and a tracked_companies entry opts in with `title_net: <name>`. At a
+// security-only company a generic title ("AI Research Engineer", "Member of
+// Technical Staff") is a security job; added to title_filter.positive it would
+// flood the scan from every generalist board. The tag lives on the entry, so it
+// survives renames and needs no second list of names. This is not
+// title_filter_overrides: scan-ats-full.mjs applies that key to YC/a16z seed
+// companies by display name, where a namesake ("Neo", "Kai") would inherit the
+// net. Called as titleFilter(job.title, company.title_net); global negatives
+// still veto. With no nets it is exactly buildTitleFilter(title_filter).
 export function buildScanTitleFilter(config) {
+  const nets = config?.title_nets && typeof config.title_nets === 'object' && !Array.isArray(config.title_nets)
+    ? config.title_nets
+    : {};
   return buildTitleFilterWithOverrides(
     config?.title_filter,
-    buildTitleFilterOverrides(config?.tracked_title_overrides),
+    buildTitleFilterOverrides(Object.entries(nets).map(([name, positive_extra]) => ({ companies: [name], positive_extra }))),
   );
 }
 
@@ -688,6 +693,22 @@ export function resolveEffectiveAfter(postedAfter, sinceDays, now = Date.now()) 
     ? cutoff.toISOString().slice(0, 10)
     : null;
   return [postedAfter, sinceIso].filter(Boolean).reduce((a, b) => (a > b ? a : b), null);
+}
+
+/**
+ * max_posting_age_days for a company in its first-coverage pass: the backfill
+ * window when that is wider (first_scan_backfill.window_days may exceed
+ * max_posting_age_days), else max_posting_age_days. An absent/invalid
+ * max_posting_age_days stays absent — no age filter to widen.
+ *
+ * @param {*} maxAgeDays - config.max_posting_age_days (may be absent/invalid).
+ * @param {number|null} windowDays - resolved backfill window, or null when off.
+ * @returns {*} the age bound to build the widened company's filter from.
+ */
+export function backfillMaxAgeDays(maxAgeDays, windowDays) {
+  const max = Number(maxAgeDays);
+  if (!Number.isInteger(max) || max <= 0) return maxAgeDays;
+  return Number.isInteger(windowDays) && windowDays > max ? windowDays : max;
 }
 
 /**
@@ -2952,7 +2973,7 @@ const USAGE = `Usage:
   node scan.mjs --rediscover-404             # re-verify tracked URLs that 404/410 (rides on --verify)
   node scan.mjs --include-blacklisted        # let data/blacklist.md matches through (annotated)
   node scan.mjs --since 7                    # postings from the last 7 days
-                                             # (a company's FIRST scan uses max_posting_age_days;
+                                             # (a company's FIRST scan uses first_scan_backfill.window_days;
                                              #  see portals.yml first_scan_backfill)
   node scan.mjs --since 7 --no-backfill      # --since for every company, first scan included
   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
@@ -3121,7 +3142,11 @@ async function main() {
   // postedAfter/postedBefore are null here (explicitBounds disables the planner).
   const backfillAfter = backfillCfg.enabled ? resolveEffectiveAfter(null, backfillCfg.windowDays) : null;
   const backfillDateFilter = buildPostedDateFilter(backfillAfter, null);
-  const backfillEarlyStopMs = resolveEarlyStopMs(backfillAfter, config.max_posting_age_days);
+  // window_days may exceed max_posting_age_days; the widened company's age
+  // filter (and early-stop floor) then follows the window for that one pass.
+  const backfillAgeDays = backfillMaxAgeDays(config.max_posting_age_days, backfillCfg.windowDays);
+  const backfillPostingAgeFilter = buildPostingAgeFilter(backfillAgeDays);
+  const backfillEarlyStopMs = resolveEarlyStopMs(backfillAfter, backfillAgeDays);
   const salaryFilter = buildSalaryFilter(config.salary_filter);
   const trustValidator = buildTrustValidator(config.trust_filter);
   const contentFilter = buildContentFilter(config.content_filter);
@@ -3294,6 +3319,7 @@ async function main() {
     // undated "30+ Days Ago" bucket never trips the early-stop), once.
     const widen = company._backfill?.widen === true;
     const companyDateFilter = widen ? backfillDateFilter : postedDateFilter;
+    const companyAgeFilter = widen ? backfillPostingAgeFilter : postingAgeFilter;
     const ctx = {
       ...makeHttpCtx(),
       sinceMs: widen ? backfillEarlyStopMs : earlyStopSinceMs,
@@ -3357,7 +3383,8 @@ async function main() {
           }
         }
 
-        if (!titleFilter(job.title, company.name)) {
+        // title_nets are for tracked companies only; an aggregator board never gets one.
+        if (!titleFilter(job.title, company._isBoard ? undefined : company.title_net)) {
           const rescued = rescue && titleNotVetoed(job.title) ? rescue.check(job) : null;
           if (!rescued) {
             totalFilteredTitle++;
@@ -3378,7 +3405,7 @@ async function main() {
           totalFilteredLocation++;
           continue;
         }
-        if (!postingAgeFilter(job.postedAt)) {
+        if (!companyAgeFilter(job.postedAt)) {
           totalFilteredPostingAge++;
           continue;
         }
