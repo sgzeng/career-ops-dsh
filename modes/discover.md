@@ -25,8 +25,13 @@ reusable tool that feeds the scanner.
 
 ## Inputs
 
-- A YAML file `companies: [{name, slug?, website?, workday?}]` passed via
-  `--in`, and/or bare company names as positional CLI args. The `workday` field
+- A YAML file `companies: [{name, slug?, website?, workday?, title_net?}]` passed via
+  `--in`, and/or bare company names as positional CLI args. A top-level
+  `title_net: <name>` sets a default for every company in the file; an entry's
+  own `title_net: <name>` (or `false`) overrides it, and a superseded
+  `scan_method: websearch` placeholder's tag outranks the file default. The
+  written portals.yml entry carries the resulting `title_net:` (portals.yml →
+  `title_nets`). The `workday` field
   is either a full careers URL string or a `{tenant, site, instance?}` object:
 
   ```yaml

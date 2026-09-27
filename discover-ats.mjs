@@ -19,8 +19,11 @@
  * JS-rendered portals, non-standard slugs, or Workday without a hint — are
  * flagged for manual follow-up instead of being silently dropped.
  *
- * Input: a YAML file `companies: [{name, slug?, website?}]` (via --in), and/or
- * bare company names as positional CLI args.
+ * Input: a YAML file `companies: [{name, slug?, website?, title_net?}]` (via
+ * --in), and/or bare company names as positional CLI args. A top-level
+ * `title_net: <name>` in the file tags every entry it adds with that portals.yml
+ * title net; an entry's own `title_net` (a name, or `false`) overrides it, and a
+ * superseded websearch twin's tag outranks the file default (inheritEntryTags).
  *
  * Run: node discover-ats.mjs --in companies.yml            (preview — writes nothing)
  *      node discover-ats.mjs --in companies.yml --write    (opt in: append to portals.yml)
@@ -144,12 +147,14 @@ breezy, pinpoint, rippling, join (all resolve from a name/slug) and workday
 Default: all of them, probed in that order, first match wins.
 
 Input YAML shape:
+  title_net: security       # optional; tag every entry added from this file
   companies:
     - name: Adyen
     - name: Monzo
       slug: monzo-bank      # optional explicit slug (needed for camelCase Ashby boards)
     - name: Mollie
       website: mollie.com   # optional; surfaced for unresolved companies
+      title_net: false      # optional; this entry's own net, or false to opt out
     # Workday — give a full careers URL ...
     - name: Nvidia
       workday: https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite
@@ -173,21 +178,32 @@ export function deriveSlug(name) {
     .replace(/^-|-$/g, '');
 }
 
+// A title_net as a seed writes it: a net name, or `false` for "no net".
+// undefined for anything else (absent, null, or a wrong-typed value).
+const readTitleNet = (v) => (typeof v === 'string' && v.trim() ? v.trim() : (v === false ? false : undefined));
+
 /**
  * Parse the company list from an input YAML string and/or bare CLI names.
  * Never throws on malformed YAML — returns a warning instead. Drops entries
  * with no usable name; dedupes by lowercased name (input file wins over CLI).
  *
+ * Title nets: a top-level `title_net: <name>` is the file's default for every
+ * entry in it; an entry's own `title_net: <name>` replaces it, and
+ * `title_net: false` opts that entry out. The entry's own value lands in
+ * `title_net` (a name or false) and the file default in `default_title_net`,
+ * kept apart because a superseded websearch twin's tag outranks the default but
+ * not the entry (inheritEntryTags). CLI names never take the file default.
+ *
  * @param {string} rawYaml   Contents of the --in file, or '' when none given.
  * @param {string[]} [cliNames]  Bare positional company names.
- * @returns {{companies: {name:string, slug?:string, website?:string, workday?:string|object}[], warnings: string[]}}
+ * @returns {{companies: {name:string, slug?:string, website?:string, workday?:string|object, title_net?:string|false, default_title_net?:string}[], warnings: string[]}}
  */
 export function parseCompanyInput(rawYaml, cliNames = []) {
   const warnings = [];
-  /** @type {Map<string, {name:string, slug?:string, website?:string, workday?:string|object}>} */
+  /** @type {Map<string, {name:string, slug?:string, website?:string, workday?:string|object, title_net?:string|false, default_title_net?:string}>} */
   const byName = new Map();
 
-  const add = (raw, origin) => {
+  const add = (raw, origin, defaultNet) => {
     if (!raw || typeof raw !== 'object') {
       if (raw !== undefined && raw !== null) warnings.push(`${origin}: dropped non-object entry`);
       return;
@@ -199,7 +215,7 @@ export function parseCompanyInput(rawYaml, cliNames = []) {
     }
     const key = name.toLowerCase();
     if (byName.has(key)) return; // first occurrence wins
-    /** @type {{name:string, slug?:string, website?:string, workday?:string|object}} */
+    /** @type {{name:string, slug?:string, website?:string, workday?:string|object, title_net?:string|false, default_title_net?:string}} */
     const entry = { name };
     if (typeof raw.slug === 'string' && raw.slug.trim()) entry.slug = raw.slug.trim();
     if (typeof raw.website === 'string' && raw.website.trim()) entry.website = raw.website.trim();
@@ -210,6 +226,16 @@ export function parseCompanyInput(rawYaml, cliNames = []) {
     else if (raw.workday && typeof raw.workday === 'object') entry.workday = raw.workday;
     else if (raw.workday !== undefined && raw.workday !== null && raw.workday !== '') {
       warnings.push(`${origin}: ignored "workday" hint for "${name}" — expected a URL string or {tenant, site} object`);
+    }
+    // The entry's own net wins over the file default. A present-but-unusable
+    // value warns (same as the workday hint above) and falls back to the default.
+    const ownNet = readTitleNet(raw.title_net);
+    if (ownNet !== undefined) entry.title_net = ownNet;
+    else {
+      if (raw.title_net !== undefined && raw.title_net !== null) {
+        warnings.push(`${origin}: ignored "title_net" for "${name}" — expected a title net name or false`);
+      }
+      if (defaultNet) entry.default_title_net = defaultNet;
     }
     byName.set(key, entry);
   };
@@ -227,9 +253,16 @@ export function parseCompanyInput(rawYaml, cliNames = []) {
     if (doc && !list) {
       warnings.push('input: expected a top-level `companies:` list (or a bare YAML list)');
     }
+    // File-level default net. Only the `companies:` mapping form has room for
+    // it; `false` there is the same as leaving it out.
+    let defaultNet;
+    if (doc && !Array.isArray(doc) && doc.title_net !== undefined && doc.title_net !== null) {
+      defaultNet = readTitleNet(doc.title_net);
+      if (defaultNet === undefined) warnings.push('input: ignored top-level `title_net` — expected a title net name or false');
+    }
     for (const item of list || []) {
       // Allow bare strings in the list too: `- Adyen`.
-      add(typeof item === 'string' ? { name: item } : item, 'input');
+      add(typeof item === 'string' ? { name: item } : item, 'input', defaultNet);
     }
   }
 
@@ -408,8 +441,12 @@ export function yamlScalar(value) {
  * Workday gets an explicit `provider: workday` line — its detect() keys off the
  * myworkdayjobs.com host, but pinning it is unambiguous and matches how
  * provider-specific entries are written elsewhere in portals.yml.
+ * `first_scan_backfill` (a boolean) and `title_net` (a net name) are emitted
+ * only when the match carries them, just before `enabled:` where portals.yml
+ * writes its tags. Pass a resolved match through inheritEntryTags first: this
+ * renders what it is given and never applies a seed default itself.
  *
- * @param {{name:string, careers_url:string, api?:string, provider?:string, notes?:string}} match
+ * @param {{name:string, careers_url:string, api?:string, provider?:string, first_scan_backfill?:boolean, title_net?:string, notes?:string}} match
  * @returns {string}
  */
 export function renderPortalEntry(match) {
@@ -417,9 +454,44 @@ export function renderPortalEntry(match) {
   lines.push(`    careers_url: ${match.careers_url}`);
   if (match.api) lines.push(`    api: ${match.api}`);
   if (match.provider) lines.push(`    provider: ${match.provider}`);
+  if (typeof match.first_scan_backfill === 'boolean') lines.push(`    first_scan_backfill: ${match.first_scan_backfill}`);
+  if (typeof match.title_net === 'string' && match.title_net) lines.push(`    title_net: ${yamlScalar(match.title_net)}`);
   lines.push(`    enabled: true`);
   if (match.notes) lines.push(`    notes: ${yamlScalar(match.notes)}`);
   return '\n' + lines.join('\n') + '\n';
+}
+
+/**
+ * Settle the tags a resolved match hands its rendered entry.
+ *
+ * `title_net`, highest first: the seed entry's own value (a name, or false to
+ * opt out) > the superseded websearch twin's tag > the seed file's default. The
+ * twin outranks the default because it was tagged by hand for this one company
+ * while the default covers a whole file; the entry's own value was written for
+ * this company too, in the seed being run now. The twin's `first_scan_backfill`
+ * is carried when set. Without this, promoting a tagged placeholder (Wiz,
+ * SentinelOne) comments its `title_net: security` out with the rest of it and
+ * splices in an untagged stage-1 entry that silently misses the net.
+ *
+ * Returns a copy with `title_net` set to the winner (or removed) and
+ * `default_title_net` dropped; `match` is not modified. A match with no seed
+ * tags and no tagged twin renders exactly as it did before.
+ *
+ * @param {{title_net?:string|false, default_title_net?:string}} match
+ * @param {{title_net?:unknown, first_scan_backfill?:unknown}|null} [twin]
+ * @returns {any}
+ */
+export function inheritEntryTags(match, twin = null) {
+  const { default_title_net: fileDefault, ...out } = match;
+  const twinNet = typeof twin?.title_net === 'string' && twin.title_net.trim() ? twin.title_net.trim() : undefined;
+  const net = match.title_net !== undefined ? match.title_net : (twinNet ?? fileDefault);
+  if (typeof net === 'string' && net) out.title_net = net;
+  else delete out.title_net;
+  // Only an opt-in is carried: a promoted entry is an ATS company, for which an
+  // absent value already means on, and carrying `false` would skip the one
+  // first-coverage pass the new board exists to get.
+  if (twin?.first_scan_backfill === true) out.first_scan_backfill = true;
+  return out;
 }
 
 /** Normalize a careers_url/api for dedupe comparison: lowercase, strip trailing slash. */
@@ -540,6 +612,43 @@ export function retireWebsearchTwins(fileText, names) {
   return { text, retired };
 }
 
+/**
+ * Plan what a run adds to portals.yml: dedupe `resolved` against the tracker,
+ * render each fresh match, and name the websearch placeholders it supersedes.
+ *
+ * A `scan_method: websearch` entry is a placeholder for a company whose slug
+ * wasn't probed yet — not a real board. Dedupe against the REAL entries only,
+ * so a company that finally resolves is promoted instead of being skipped as a
+ * "duplicate" of its own placeholder. The placeholders it supersedes are then
+ * commented out on --write (#2891), so their tags ride into the replacing entry
+ * here (inheritEntryTags) — the preview shows exactly what --write splices in.
+ *
+ * @param {any[]} resolved
+ * @param {any[]} existingEntries  Parsed portals.yml tracked_companies (or []).
+ * @returns {{fresh:any[], duplicates:any[], entries:any[], snippets:string[], supersededNames:string[]}}
+ */
+export function planPortalEntries(resolved, existingEntries) {
+  const all = Array.isArray(existingEntries) ? existingEntries : [];
+  const isWebsearch = (e) => e && String(e.scan_method).toLowerCase() === 'websearch';
+  // One placeholder per lowercased name supplies the inherited tags: the first
+  // one carrying a title_net, else the first. retireWebsearchTwins comments out
+  // every same-name placeholder, so a tag on a later one must not be lost.
+  const twins = new Map();
+  for (const e of all) {
+    if (!isWebsearch(e) || typeof e.name !== 'string') continue;
+    const key = e.name.trim().toLowerCase();
+    const prev = twins.get(key);
+    const tagged = (x) => typeof x?.title_net === 'string' && x.title_net.trim() !== '';
+    if (!prev || (!tagged(prev) && tagged(e))) twins.set(key, e);
+  }
+  const { fresh, duplicates } = dedupeAgainstPortals(resolved, all.filter((e) => !isWebsearch(e)));
+  const entries = fresh.map((m) => inheritEntryTags(m, twins.get(String(m.name || '').trim().toLowerCase()) || null));
+  const supersededNames = fresh
+    .map((m) => String(m.name || '').trim())
+    .filter((n) => twins.has(n.toLowerCase()));
+  return { fresh, duplicates, entries, snippets: entries.map(renderPortalEntry), supersededNames };
+}
+
 // ── Network functions (separated from pure logic, like vc-portfolios.mjs) ──
 
 /**
@@ -553,7 +662,10 @@ export async function probeVendor(company, candidate, ctx) {
     return { status: 'error', jobCount: 0, error: 'no API URL derivable' };
   }
   try {
-    const jobs = await cfg.provider.fetch(entry, ctx);
+    // One page is enough to tell match from empty (the same cap resolveWorkday
+    // uses). Providers that enrich per posting (rippling's detail requests) skip
+    // that under maxPages, so a probe costs one request, not one per job.
+    const jobs = await cfg.provider.fetch(entry, { ...ctx, maxPages: 1 });
     const jobCount = Array.isArray(jobs) ? jobs.length : 0;
     return { status: jobCount > 0 ? 'match' : 'empty', jobCount };
   } catch (err) {
@@ -653,6 +765,15 @@ export async function resolveWorkday(company, coords, ctx) {
     : { status: 'error', tried, detail: lastError, refusedRedirect: lastRefusedRedirect };
 }
 
+// The seed's title_net fields ride along on a resolved record, and only when the
+// seed set them, so a record without one is unchanged. inheritEntryTags settles
+// them against a superseded websearch twin at render time.
+function withSeedTags(resolved, company) {
+  if (company.title_net !== undefined) resolved.title_net = company.title_net;
+  if (company.default_title_net !== undefined) resolved.default_title_net = company.default_title_net;
+  return resolved;
+}
+
 /**
  * Resolve one company: probe slug vendors in VENDOR_ORDER (first with ≥1 job
  * wins), then — if unresolved and Workday coordinates are present/requested —
@@ -678,7 +799,7 @@ export async function resolveCompany(company, { vendors = VENDOR_ORDER, ctx, inc
         jobCount: result.jobCount,
       };
       if (cfg.api) resolved.api = cfg.api(candidate.slug);
-      return { resolved };
+      return { resolved: withSeedTags(resolved, company) };
     }
     if (result.status === 'empty' && candidate.vendor === 'smartrecruiters') {
       // SmartRecruiters' public postings API answers 200 with totalFound:0
@@ -712,7 +833,7 @@ export async function resolveCompany(company, { vendors = VENDOR_ORDER, ctx, inc
   if (coords) {
     triedVendors.push('workday');
     const wd = await resolveWorkday(company, coords, ctx);
-    if (wd.resolved) return { resolved: wd.resolved };
+    if (wd.resolved) return { resolved: withSeedTags(wd.resolved, company) };
     if (wd.status === 'empty') {
       // Use the host resolveWorkday actually confirmed empty, not always wd1.
       emptyBoards.push({ vendor: 'workday', careers_url: wd.careers_url });
@@ -1041,6 +1162,21 @@ function runSelfTest() {
   const wdEntry = renderPortalEntry({ name: 'Nvidia', careers_url: 'https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite', provider: 'workday' });
   check(wdEntry.includes('    provider: workday') && !wdEntry.includes('api:'), 'renderPortalEntry emits provider: workday, no api line');
 
+  // title_net: file default, entry override / opt-out, websearch twin carry-over
+  const tn = parseCompanyInput('title_net: security\ncompanies:\n  - name: A\n  - name: B\n    title_net: other\n  - name: C\n    title_net: false\n', ['D']);
+  check(
+    tn.companies[0].default_title_net === 'security' && tn.companies[1].title_net === 'other'
+      && tn.companies[2].title_net === false && !('default_title_net' in tn.companies[3]),
+    'parseCompanyInput reads file default, entry override, opt-out; CLI names take no default',
+  );
+  const tnDefault = renderPortalEntry(inheritEntryTags({ name: 'W', careers_url: 'u', default_title_net: 'security' }));
+  check(tnDefault.includes('    title_net: security\n    enabled: true'), 'file default renders title_net just before enabled');
+  const twinTags = inheritEntryTags({ name: 'W', careers_url: 'u', default_title_net: 'x' }, { title_net: 'security', first_scan_backfill: true });
+  check(twinTags.title_net === 'security' && twinTags.first_scan_backfill === true, 'websearch twin tags outrank the file default');
+  check(inheritEntryTags({ name: 'W', careers_url: 'u', title_net: false }, { title_net: 'security' }).title_net === undefined, 'entry opt-out outranks the twin');
+  const untagged = { name: 'Adyen', careers_url: 'u' };
+  check(renderPortalEntry(inheritEntryTags(untagged, { scan_method: 'websearch' })) === renderPortalEntry(untagged), 'no net anywhere → render unchanged');
+
   console.log(`\n  discover-ats self-test: ${pass} passed, ${fail} failed\n`);
   process.exit(fail > 0 ? 1 : 0);
 }
@@ -1153,32 +1289,27 @@ async function main() {
 
   // Dedupe resolved matches against the existing tracker.
   let existingEntries = [];
+  let titleNets = null;
   if (existsSync(PORTALS_PATH)) {
     try {
       const parsed = yaml.load(readFileSync(PORTALS_PATH, 'utf-8'));
       existingEntries = Array.isArray(parsed?.tracked_companies) ? parsed.tracked_companies : [];
+      titleNets = parsed?.title_nets && typeof parsed.title_nets === 'object' ? parsed.title_nets : {};
     } catch (err) {
       warnings.push(`portals.yml: could not parse for dedupe — ${err.message}`);
     }
   }
-  // A `scan_method: websearch` entry is a placeholder for a company whose slug
-  // wasn't probed yet — not a real board. Dedupe against the REAL entries only,
-  // so a company that finally resolves is promoted instead of being skipped as a
-  // "duplicate" of its own placeholder. The placeholders it supersedes are then
-  // commented out on --write (#2891).
-  const websearchNames = new Set(
-    existingEntries
-      .filter((e) => e && typeof e.name === 'string' && String(e.scan_method).toLowerCase() === 'websearch')
-      .map((e) => e.name.trim().toLowerCase()),
-  );
-  const realEntries = existingEntries.filter(
-    (e) => !(e && String(e.scan_method).toLowerCase() === 'websearch'),
-  );
-  const { fresh, duplicates } = dedupeAgainstPortals(resolved, realEntries);
-  const snippets = fresh.map(renderPortalEntry);
-  const supersededNames = fresh
-    .map((m) => String(m.name || '').trim())
-    .filter((n) => websearchNames.has(n.toLowerCase()));
+  // Websearch placeholders are excluded from dedupe, and the ones a match
+  // supersedes hand it their tags (#2891; see planPortalEntries).
+  const { fresh, duplicates, entries, snippets, supersededNames } = planPortalEntries(resolved, existingEntries);
+  // A net portals.yml doesn't define is inert in scan.mjs and an error in
+  // validate-portals.mjs. Say so while the seed is still the obvious fix.
+  const unknownNets = titleNets
+    ? [...new Set(entries.map((e) => e.title_net).filter((n) => n && !Object.hasOwn(titleNets, n)))]
+    : [];
+  if (unknownNets.length) {
+    warnings.push(`title_net ${unknownNets.map((n) => `"${n}"`).join(', ')} names no portals.yml title_nets entry — scan.mjs ignores it; fix the seed or define the net`);
+  }
 
   // Data-contract rule: portals.yml is a USER-LAYER file and is NEVER written
   // unless the user explicitly opts in with --write. The default is preview —
@@ -1225,6 +1356,9 @@ async function main() {
   }
 
   if (opts.summary) {
+    // --summary prints no warnings block, and daily-scan.sh runs --write --summary
+    // unattended: a mistyped seed title_net would otherwise drop the net silently.
+    for (const w of warnings.filter((x) => /title_net/.test(x))) console.error(`⚠️  ${w}`);
     printSummary({ resolved, unresolved, duplicates, superseded: supersededNames, retired: retiredTwins, written });
   } else {
     const out = { metadata, resolved, unresolved };

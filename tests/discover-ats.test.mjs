@@ -10,6 +10,9 @@
  * - dedupeAgainstPortals (name/url/api hits, trailing-slash norm, self-dedup)
  * - insertIntoTrackedCompanies (splice correctness, byte-preservation, empty
  *   block, missing header, idempotency)
+ * - title_net tags (seed-file default, entry override / opt-out, websearch twin
+ *   carry-over via planPortalEntries, unchanged output with no net, and the
+ *   spliced portals.yml re-parsed with js-yaml)
  * - CLI behavior (--self-test, default preview never writes, --write opt-in,
  *   unknown --vendors, --help) via execFileSync — no live network.
  *
@@ -33,6 +36,9 @@ import {
   buildWorkdayCandidates,
   resolveCompany,
   resolveWorkday,
+  retireWebsearchTwins,
+  inheritEntryTags,
+  planPortalEntries,
 } from '../discover-ats.mjs';
 import * as yaml from 'js-yaml';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'fs';
@@ -593,6 +599,180 @@ ok('malformed workday hint alone → still the Workday-hint message',
 const wrongType = parseCompanyInput('companies:\n  - name: X\n    workday: 42\n', []);
 ok('wrong-typed workday hint → warning emitted', wrongType.warnings.some(w => /workday/i.test(w)));
 ok('wrong-typed workday hint → field dropped', !('workday' in wrongType.companies[0]));
+
+// ============================================================================
+// 6c. title_net tags — seed default, entry override/opt-out, websearch twin
+// ============================================================================
+console.log('\n--- 6c. title_net tags ---');
+
+// Records come from resolveCompany against a stubbed Greenhouse board, then go
+// through planPortalEntries — the same path main() takes, minus the network.
+const ghMatchCtx = {
+  fetchJson: async (url) => {
+    if (/\/offices\/?$/.test(url)) return { offices: [] };
+    const slug = url.match(/boards\/([^/]+)\/jobs/)[1];
+    return { jobs: [{ id: 1, title: 'Engineer', absolute_url: `https://job-boards.greenhouse.io/${slug}/jobs/1`, location: { name: 'Remote' } }] };
+  },
+  fetchText: async () => { throw new Error('unused'); },
+};
+const resolveAll = (companies) => Promise.all(companies.map(async (c) =>
+  (await resolveCompany(c, { vendors: ['gh'], includeWorkday: false, ctx: ghMatchCtx })).resolved));
+const snippetFor = (plan, name) => plan.snippets[plan.fresh.findIndex(m => m.name === name)];
+
+// --- parsing -----------------------------------------------------------------
+const tnSeed = parseCompanyInput([
+  'title_net: security',
+  'companies:',
+  '  - name: Cymulate',
+  '  - name: Elastic',
+  '    title_net: false',
+  '  - name: Tenable',
+  '    title_net: vr',
+].join('\n'), ['Ramp']);
+const tnBy = Object.fromEntries(tnSeed.companies.map(c => [c.name, c]));
+eq('file default → carried as default_title_net', tnBy.Cymulate.default_title_net, 'security');
+ok('file default → no entry-level title_net', !('title_net' in tnBy.Cymulate));
+eq('entry opt-out → title_net false', tnBy.Elastic.title_net, false);
+ok('entry opt-out → file default not attached', !('default_title_net' in tnBy.Elastic));
+eq('entry override → its own net', tnBy.Tenable.title_net, 'vr');
+ok('entry override → file default not attached', !('default_title_net' in tnBy.Tenable));
+ok('CLI name → never takes the file default', !('default_title_net' in tnBy.Ramp) && !('title_net' in tnBy.Ramp));
+eq('valid title_net input → no warnings', tnSeed.warnings, []);
+
+const tnBadEntry = parseCompanyInput('title_net: security\ncompanies:\n  - name: X\n    title_net: 42\n', []);
+ok('wrong-typed entry title_net → warning', tnBadEntry.warnings.some(w => /title_net/.test(w) && /"X"/.test(w)));
+eq('wrong-typed entry title_net → falls back to the file default', tnBadEntry.companies[0].default_title_net, 'security');
+const tnBadTop = parseCompanyInput('title_net: [security]\ncompanies:\n  - name: X\n', []);
+ok('wrong-typed top-level title_net → warning', tnBadTop.warnings.some(w => /top-level `title_net`/.test(w)));
+ok('wrong-typed top-level title_net → no default applied', !('default_title_net' in tnBadTop.companies[0]));
+const tnTopFalse = parseCompanyInput('title_net: false\ncompanies:\n  - name: X\n', []);
+ok('top-level title_net: false → no default, no warning', !('default_title_net' in tnTopFalse.companies[0]) && tnTopFalse.warnings.length === 0);
+
+// --- resolve + render (no websearch twin) -------------------------------------
+const tnResolved = await resolveAll(tnSeed.companies);
+const tnRBy = Object.fromEntries(tnResolved.map(r => [r.name, r]));
+eq('resolved record carries the seed default', tnRBy.Cymulate.default_title_net, 'security');
+eq('resolved record carries the entry override', tnRBy.Tenable.title_net, 'vr');
+eq('resolved record without a seed tag keeps its original shape',
+  Object.keys(tnRBy.Ramp), ['name', 'vendor', 'slug', 'careers_url', 'jobCount', 'api']);
+
+const tnPlan = planPortalEntries(tnResolved, []);
+ok('file default → title_net line, 4-space indent, just before enabled',
+  snippetFor(tnPlan, 'Cymulate').includes('\n    title_net: security\n    enabled: true\n'));
+ok('entry override → its own net rendered', snippetFor(tnPlan, 'Tenable').includes('\n    title_net: vr\n'));
+ok('entry opt-out → no title_net line', !snippetFor(tnPlan, 'Elastic').includes('title_net'));
+ok('CLI name → no title_net line', !snippetFor(tnPlan, 'Ramp').includes('title_net'));
+ok('rendered entries never leak default_title_net', tnPlan.snippets.every(s => !s.includes('default_title_net')));
+
+// A net name YAML would misread is quoted like any other scalar.
+const quotedNet = renderPortalEntry({ name: 'Q', careers_url: 'https://jobs.lever.co/q', title_net: 'sec: ai' });
+eq('net name with a colon is quoted and round-trips', yaml.load(`tracked_companies:${quotedNet}`).tracked_companies[0].title_net, 'sec: ai');
+
+// --- websearch twin carry-over (the Wiz / SentinelOne case) -------------------
+// Both are tagged websearch placeholders in portals.yml and bare names in the
+// Black Hat seed. Promoting one comments the placeholder out — its title_net
+// line included — so the tag has to ride into the stage-1 entry that replaces it.
+const twinPortals = [
+  'title_nets:',
+  '  security:',
+  '    - "Research Engineer"',
+  '',
+  'tracked_companies:',
+  '  - name: Real Co',
+  '    careers_url: https://jobs.lever.co/real',
+  '    enabled: true',
+  '',
+  '  - name: SentinelOne',
+  '    careers_url: https://www.sentinelone.com/careers/',
+  '    scan_method: websearch',
+  '    title_net: security',
+  '    enabled: true',
+  '',
+  '  - name: Wiz',
+  '    careers_url: https://www.wiz.io/careers',
+  '    scan_method: websearch',
+  '    notes: "Wiz Research / Atlas. Now inside Google."',
+  '    title_net: security',
+  '    first_scan_backfill: true',
+  '    enabled: true',
+  '',
+  '  - name: CrowdStrike',
+  '    careers_url: https://crowdstrike.com/careers',
+  '    scan_method: websearch',
+  '    title_net: security',
+  '    enabled: true',
+  '',
+  'job_boards:',
+  '  - name: Foo',
+  '',
+].join('\n');
+const twinSeed = parseCompanyInput('companies:\n  - name: Wiz\n  - name: SentinelOne\n  - name: Newco\n', []);
+const twinPlan = planPortalEntries(await resolveAll(twinSeed.companies), yaml.load(twinPortals).tracked_companies);
+eq('twins → both placeholders superseded', twinPlan.supersededNames, ['Wiz', 'SentinelOne']);
+ok('twin carry-over → Wiz entry gets title_net', snippetFor(twinPlan, 'Wiz').includes('\n    title_net: security\n    enabled: true\n'));
+ok('twin carry-over → Wiz entry gets first_scan_backfill', snippetFor(twinPlan, 'Wiz').includes('\n    first_scan_backfill: true\n'));
+ok('twin carry-over → SentinelOne entry gets title_net', snippetFor(twinPlan, 'SentinelOne').includes('\n    title_net: security\n'));
+ok('twin without first_scan_backfill → none invented', !snippetFor(twinPlan, 'SentinelOne').includes('first_scan_backfill'));
+ok('no twin, no seed tag → no title_net', !snippetFor(twinPlan, 'Newco').includes('title_net'));
+
+// The --write path end to end: retire the twins, splice the entries, re-parse.
+const twinWritten = insertIntoTrackedCompanies(
+  retireWebsearchTwins(twinPortals, twinPlan.supersededNames).text, twinPlan.snippets);
+let twinDoc = null;
+try { twinDoc = yaml.load(twinWritten); } catch { /* asserted below */ }
+ok('spliced portals.yml parses with js-yaml', !!twinDoc && Array.isArray(twinDoc.tracked_companies));
+const twinEntries = (twinDoc?.tracked_companies || []).filter(e => e?.name === 'Wiz');
+eq('exactly one live Wiz entry (the placeholder is commented out)', twinEntries.length, 1);
+const liveWiz = twinEntries[0] || {};
+eq('live Wiz entry is the resolved board', liveWiz.careers_url, 'https://job-boards.greenhouse.io/wiz');
+ok('live Wiz entry is not a websearch placeholder', liveWiz.scan_method === undefined);
+eq('live Wiz entry → title_net security', liveWiz.title_net, 'security');
+eq('live Wiz entry → first_scan_backfill true', liveWiz.first_scan_backfill, true);
+const parsedBy = Object.fromEntries((twinDoc?.tracked_companies || []).map(e => [e.name, e]));
+eq('live SentinelOne entry → title_net security', parsedBy.SentinelOne?.title_net, 'security');
+ok('Newco entry → no title_net', parsedBy.Newco && !('title_net' in parsedBy.Newco));
+ok('unsuperseded placeholder keeps its own tag', parsedBy.CrowdStrike?.scan_method === 'websearch' && parsedBy.CrowdStrike?.title_net === 'security');
+ok('Real Co untouched, still untagged', parsedBy['Real Co'] && !('title_net' in parsedBy['Real Co']));
+ok('every rendered title_net names a defined net (validate-portals contract)',
+  (twinDoc?.tracked_companies || []).every(e => e.title_net === undefined || Object.hasOwn(twinDoc.title_nets, e.title_net)));
+
+// --- precedence: seed entry > websearch twin > seed file default --------------
+const tagTwin = { name: 'Acme', scan_method: 'websearch', title_net: 'security' };
+const acme = { name: 'Acme', careers_url: 'https://jobs.lever.co/acme' };
+eq('twin outranks the seed default', inheritEntryTags({ ...acme, default_title_net: 'other' }, tagTwin).title_net, 'security');
+eq("seed entry's own net outranks the twin", inheritEntryTags({ ...acme, title_net: 'vr' }, tagTwin).title_net, 'vr');
+ok('seed entry opt-out outranks the twin', !('title_net' in inheritEntryTags({ ...acme, title_net: false }, tagTwin)));
+eq('untagged twin → seed default applies',
+  inheritEntryTags({ ...acme, default_title_net: 'other' }, { name: 'Acme', scan_method: 'websearch' }).title_net, 'other');
+eq('twin first_scan_backfill: false is NOT carried (would skip the promoted board\'s first coverage)',
+  inheritEntryTags(acme, { ...tagTwin, first_scan_backfill: false }).first_scan_backfill, undefined);
+const acmeIn = { ...acme, default_title_net: 'other' };
+inheritEntryTags(acmeIn, tagTwin);
+eq('inheritEntryTags does not modify its input', acmeIn, { ...acme, default_title_net: 'other' });
+
+// --- no net anywhere → byte-identical output -----------------------------------
+// Golden bytes: the entry shape discover-ats wrote before title_net existed.
+eq('no-net GH entry renders the exact pre-title_net bytes',
+  renderPortalEntry({ name: 'Adyen', careers_url: 'https://job-boards.greenhouse.io/adyen', api: 'https://boards-api.greenhouse.io/v1/boards/adyen/jobs', vendor: 'greenhouse', slug: 'adyen', jobCount: 3 }),
+  '\n  - name: Adyen\n    careers_url: https://job-boards.greenhouse.io/adyen\n    api: https://boards-api.greenhouse.io/v1/boards/adyen/jobs\n    enabled: true\n');
+// planPortalEntries against untagged placeholders must equal the old main()
+// path — fresh.map(renderPortalEntry) — byte for byte.
+const plainPortals = twinPortals.replace(/\n {4}(title_net|first_scan_backfill): [^\n]+/g, '');
+const plainSeed = parseCompanyInput('companies:\n  - name: Wiz\n  - name: SentinelOne\n  - name: Newco\n', []);
+// Two same-name placeholders: the later tagged one supplies the net (both are
+// commented out on promotion, so the tag must not be lost to the first).
+const dupTwinPlan = planPortalEntries(await resolveAll([{ name: 'Wiz' }]), [
+  { name: 'Wiz', careers_url: 'https://www.wiz.io/careers', scan_method: 'websearch', enabled: true },
+  { name: 'Wiz', careers_url: 'https://www.wiz.io/careers/', scan_method: 'websearch', title_net: 'security', enabled: true },
+]);
+ok('same-name placeholders: a later tagged one beats an earlier untagged one',
+  snippetFor(dupTwinPlan, 'Wiz').includes('\n    title_net: security\n'));
+
+const plainPlan = planPortalEntries(await resolveAll(plainSeed.companies), yaml.load(plainPortals).tracked_companies);
+eq('no net → snippets identical to the pre-title_net render', plainPlan.snippets, plainPlan.fresh.map(m => renderPortalEntry(m)));
+eq('no net → the same twins are still superseded', plainPlan.supersededNames, ['Wiz', 'SentinelOne']);
+ok('no net → no title_net or first_scan_backfill line anywhere',
+  plainPlan.snippets.every(s => !/title_net|first_scan_backfill/.test(s)));
 
 // ============================================================================
 // 7. CLI behavior (execFileSync — no live network)

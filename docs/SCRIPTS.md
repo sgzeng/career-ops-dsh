@@ -226,7 +226,7 @@ The script fetches each enabled board through the same `providers/` modules `sca
 | `small` | answers, but under `--small-threshold` (default 5). Not an error: a quiet board and a wrong board look identical from here, which is why the samples are printed |
 | `ok` | answers with a healthy number of postings |
 
-**Honest limit:** no heuristic reliably detects "right company, wrong entity" — a parent-company board is well-formed and full of real jobs. The tool surfaces count + samples compactly enough for a human or an agent to judge, and with `--baseline` flags the collapse that usually follows an ATS migration (a migrated board drops toward zero rather than 404ing). Treat `small` and a large negative drift as prompts to look, not as verdicts.
+**Honest limit:** no heuristic reliably detects "right company, wrong entity" — a parent-company board is well-formed and full of real jobs. The tool surfaces count + samples compactly enough for a human or an agent to judge, and with `--baseline` flags the collapse that usually follows an ATS migration (a migrated board drops toward zero rather than 404ing). Treat `small` and a large negative drift as prompts to look, not as verdicts. The audit reads page 1 of each board (`ctx.maxPages`); before 2026-09-27 that cap was silently dropped and boards were crawled in full, so a `--json` baseline saved before then reports false drops on paginated boards (Workday, SmartRecruiters, Eightfold, Phenom) — regenerate it.
 
 ```bash
 node audit-portals.mjs                       # audit every enabled company
