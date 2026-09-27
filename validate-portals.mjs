@@ -125,7 +125,7 @@ const TITLE_FILTER_FIELDS = ['positive', 'negative', 'seniority_boost'];
 const KNOWN_TOP_LEVEL = new Set([
   'scan_history', 'location_filter', 'visa_filter', 'country_eligibility_filter',
   'max_posting_age_days', 'trust_filter', 'skip_tiers', 'title_filter',
-  'title_filter_full', 'content_filter', 'content_rescue', 'level_filter', 'salary_filter', 'search_keyword_groups',
+  'title_filter_full', 'title_filter_overrides', 'tracked_title_overrides', 'content_filter', 'content_rescue', 'level_filter', 'salary_filter', 'search_keyword_groups',
   'search_queries', 'linkedin_post_queries', 'tracked_companies', 'job_boards',
   'interamt_searches', 'hn_hiring', 'first_scan_backfill',
 ]);
@@ -385,6 +385,34 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
   for (const key of Object.keys(config)) {
     if (!KNOWN_TOP_LEVEL.has(key)) {
       add(warnings, key, 'unknown top-level portals.yml key (typo?)');
+    }
+  }
+
+  // tracked_title_overrides (scan.mjs, fork-local): `companies` are matched to
+  // tracked_companies names exactly (case-insensitive), so a name that matches
+  // no entry — a typo, or an entry renamed later — silently broadens nothing.
+  if (config.tracked_title_overrides !== undefined) {
+    const tto = config.tracked_title_overrides;
+    if (!Array.isArray(tto)) {
+      add(errors, 'tracked_title_overrides', 'must be an array of { companies, positive_extra }');
+    } else {
+      const tracked = new Set((Array.isArray(config.tracked_companies) ? config.tracked_companies : [])
+        .filter(e => isObject(e) && typeof e.name === 'string')
+        .map(e => e.name.trim().toLowerCase()));
+      for (const [idx, ov] of tto.entries()) {
+        const base = `tracked_title_overrides[${idx}]`;
+        if (!isObject(ov)) { add(errors, base, 'must be an object'); continue; }
+        if (!Array.isArray(ov.companies) || ov.companies.length === 0) {
+          add(errors, `${base}.companies`, 'must be a non-empty list of tracked_companies names');
+        } else {
+          for (const name of ov.companies) {
+            if (typeof name !== 'string' || !tracked.has(name.trim().toLowerCase())) {
+              add(warnings, `${base}.companies`, `"${name}" matches no tracked_companies name — it broadens nothing`);
+            }
+          }
+        }
+        validateKeywordList(ov.positive_extra, `${base}.positive_extra`, errors);
+      }
     }
   }
 

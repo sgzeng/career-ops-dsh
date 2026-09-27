@@ -243,6 +243,22 @@ export function buildTitleFilterOverrides(overrides) {
   return map;
 }
 
+// scan.mjs's title gate: title_filter plus `tracked_title_overrides` (same
+// shape as title_filter_overrides). Fork-local, 2026-09-26. Its `companies` are
+// tracked_companies entry names, so a security-only startup can list generic
+// titles ("AI Research Engineer", "Member of Technical Staff") that would flood
+// the scan if added to title_filter.positive for every company. It is a
+// separate key because scan-ats-full.mjs applies title_filter_overrides to
+// YC/a16z seed companies by display name, and a namesake there ("Neo", "Kai")
+// must not inherit the broadened net. Called as titleFilter(job.title,
+// company.name). With no overrides it is exactly buildTitleFilter(title_filter).
+export function buildScanTitleFilter(config) {
+  return buildTitleFilterWithOverrides(
+    config?.title_filter,
+    buildTitleFilterOverrides(config?.tracked_title_overrides),
+  );
+}
+
 // Wraps buildTitleFilter() with per-company overrides from
 // buildTitleFilterOverrides(). Returns (title, companySlug) => boolean:
 //   - if the global title_filter already matches, pass (companySlug unused)
@@ -3055,7 +3071,7 @@ async function main() {
   const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
   const companies = Array.isArray(config.tracked_companies) ? config.tracked_companies : [];
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
-  const titleFilter = buildTitleFilter(config.title_filter);
+  const titleFilter = buildScanTitleFilter(config);
 
   // Seniority tier classifier integration
   let classifyTier = null;
@@ -3341,7 +3357,7 @@ async function main() {
           }
         }
 
-        if (!titleFilter(job.title)) {
+        if (!titleFilter(job.title, company.name)) {
           const rescued = rescue && titleNotVetoed(job.title) ? rescue.check(job) : null;
           if (!rescued) {
             totalFilteredTitle++;
