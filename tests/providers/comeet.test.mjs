@@ -123,6 +123,26 @@ try {
   if (noDup[0]?.location === 'Remote, EMEA') pass('parseComeetResponse does not double-append Remote');
   else fail(`expected "Remote, EMEA", got ${JSON.stringify(noDup[0]?.location)}`);
 
+  // A url_active_page shared by several positions is the generic careers index
+  // (Noma Security, 2026-09: 16/28 positions → "https://noma.security/careers/").
+  // Those positions must fall back to their per-position hosted page, or URL
+  // dedup keeps only the first; a unique url_active_page is still preferred.
+  const shared = parseComeetResponse([
+    { name: 'Solutions Architect', url_active_page: 'https://noma.security/careers/', url_comeet_hosted_page: 'https://www.comeet.com/jobs/noma_security/3A.005/solutions-architect/0E.27B', location: { name: 'USA [Remote]', is_remote: true } },
+    { name: 'Enablement Leader', url_active_page: 'https://noma.security/careers/', url_comeet_hosted_page: 'https://www.comeet.com/jobs/noma_security/3A.005/enablement-leader/9F.27C', location: { name: 'USA [Remote]', is_remote: true } },
+    { name: 'Senior Security Researcher', url_active_page: 'https://noma.security/careers/co/tel-aviv/5D.A5A/senior-security-researcher/all/', url_comeet_hosted_page: 'https://www.comeet.com/jobs/noma_security/3A.005/senior-security-researcher/5D.A5A', location: { name: 'Tel Aviv' } },
+    { name: 'No hosted page', url_active_page: 'https://noma.security/careers/', location: { name: 'Tel Aviv' } },
+  ], 'Noma Security');
+  const sharedUrls = shared.map(j => j.url);
+  if (sharedUrls[0] === 'https://www.comeet.com/jobs/noma_security/3A.005/solutions-architect/0E.27B'
+    && sharedUrls[1] === 'https://www.comeet.com/jobs/noma_security/3A.005/enablement-leader/9F.27C'
+    && sharedUrls[2] === 'https://noma.security/careers/co/tel-aviv/5D.A5A/senior-security-researcher/all/'
+    && sharedUrls[3] === 'https://noma.security/careers/') {
+    pass('parseComeetResponse uses the hosted page when url_active_page is shared, keeps a unique active page');
+  } else {
+    fail(`shared active page urls = ${JSON.stringify(sharedUrls)}`);
+  }
+
   // malformed members (null / non-object / whitespace-only name) must neither
   // throw nor slip through: a row needs a non-empty trimmed title AND a url.
   const dirty = [

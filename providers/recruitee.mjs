@@ -10,6 +10,8 @@
 import { htmlToText } from './_html-to-text.mjs';
 
 const RECRUITEE_HOST_RE = /^[a-z0-9][a-z0-9-]*\.recruitee\.com$/;
+// A `location` string that names no place — treated as absent (see parseRecruiteeResponse).
+const PLACEHOLDER_LOCATION_RE = /^remote(?:\s+job)?$/i;
 
 function assertRecruiteeUrl(url) {
   let parsed;
@@ -72,7 +74,12 @@ export default {
  *   Requirement: a well-formed `https:` URL; a non-HTTPS or malformed URL is
  *   dropped (empty string returned per the Job contract).
  * - location: prefer the explicit `location` field; else assemble from
- *   city/country, appending "Remote" when `remote` is true.
+ *   city/country, appending "Remote" when `remote` is true. A `location` that
+ *   names no place ("Remote job") counts as absent: Aikido's remote offers in
+ *   France, Saudi Arabia, Singapore … all read just "Remote job", which passed
+ *   a US location filter on its bare "Remote" allow entry. Further entries of a
+ *   multi-location offer's `locations[]` are appended ("; Chicago, United
+ *   States"), so a Ghent role also open in Chicago is not dropped as Belgian.
  * - description: Recruitee's list payload embeds each offer's full HTML body
  *   for free (same request — verified against a live board), so it is
  *   stripped to plain text here and feeds scan.mjs's content_filter /
@@ -89,7 +96,21 @@ export function parseRecruiteeResponse(json, companyName) {
     const city = j.city || '';
     const country = j.country || '';
     const remote = j.remote ? 'Remote' : '';
-    const location = j.location || [city, country, remote].filter(Boolean).join(', ');
+    const explicit = typeof j.location === 'string' ? j.location.trim() : '';
+    const primary = explicit && !PLACEHOLDER_LOCATION_RE.test(explicit)
+      ? explicit
+      : [city, country, remote].filter(Boolean).join(', ');
+    const seen = [primary.toLowerCase()];
+    const extra = [];
+    for (const l of Array.isArray(j.locations) ? j.locations : []) {
+      if (!l || typeof l !== 'object') continue;
+      const place = [l.city, l.country].filter(v => typeof v === 'string' && v.trim()).join(', ');
+      const key = (typeof l.city === 'string' && l.city.trim() ? l.city : place).toLowerCase();
+      if (!place || seen.some(s => s.includes(key))) continue;
+      seen.push(place.toLowerCase());
+      extra.push(place);
+    }
+    const location = [primary, ...extra].filter(Boolean).join('; ');
     const description = htmlToText(j.description);
 
     // Resolve offer URL. Recruitee tenants commonly publish postings on their

@@ -57,6 +57,27 @@ try {
     fail(`row 2 location = ${JSON.stringify(jobs[2]?.location)}`);
   }
 
+  // Aikido Security (2026-09): remote offers carry location "Remote job" whatever
+  // the country, and multi-location offers list extra cities in locations[].
+  const aikido = parseRecruiteeResponse({
+    offers: [
+      { title: 'AI Engineer', url: 'https://aikidosecurity.recruitee.com/o/a', location: 'Remote job', city: 'Paris', country: 'France', remote: true },
+      { title: 'Solutions Engineer', url: 'https://aikidosecurity.recruitee.com/o/b', location: 'Remote job', city: 'Atlanta', country: 'United States', remote: true },
+      { title: 'Analyst Relations Lead', url: 'https://aikidosecurity.recruitee.com/o/c', location: 'Ghent, Oost-Vlaanderen, Belgium', city: 'Ghent', country: 'Belgium', remote: false,
+        locations: [{ city: 'Ghent', country: 'Belgium' }, { city: 'Chicago', country: 'United States' }, null, { city: 'San Francisco', country: 'United States' }] },
+    ],
+  }, 'Aikido Security');
+  if (aikido[0]?.location === 'Paris, France, Remote' && aikido[1]?.location === 'Atlanta, United States, Remote') {
+    pass('parseRecruiteeResponse replaces the "Remote job" placeholder with city/country/Remote');
+  } else {
+    fail(`placeholder locations = ${JSON.stringify(aikido.slice(0, 2).map(j => j.location))}`);
+  }
+  if (aikido[2]?.location === 'Ghent, Oost-Vlaanderen, Belgium; Chicago, United States; San Francisco, United States') {
+    pass('parseRecruiteeResponse appends further locations[] entries, skipping the primary city');
+  } else {
+    fail(`multi-location = ${JSON.stringify(aikido[2]?.location)}`);
+  }
+
   if (parseRecruiteeResponse({}, 'X').length === 0) pass('empty {} → empty result');
   else fail('empty {} should yield empty result');
 

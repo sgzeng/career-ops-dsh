@@ -106,6 +106,11 @@ export default {
  *   only URLs (recorded in the pipeline/history, never server-fetched here), so
  *   they are NOT host-locked. Require a well-formed https: URL; a position whose
  *   URL is missing/non-https/malformed is dropped (url is the dedup key).
+ *   A `url_active_page` shared by several positions is a generic careers-index
+ *   link, not a posting page (Noma Security: 16 of 28 positions carry
+ *   "https://noma.security/careers/"). Used as the url it would dedup every
+ *   later sibling away, so those positions use their per-position
+ *   `url_comeet_hosted_page` instead.
  * - location: `location.name`, appending "Remote" when `location.is_remote`.
  *
  * @param {any} json
@@ -114,13 +119,20 @@ export default {
  */
 export function parseComeetResponse(json, companyName) {
   const positions = Array.isArray(json) ? json : [];
+  const activePageCount = new Map();
+  for (const row of positions) {
+    const page = row && typeof row === 'object' ? row.url_active_page : '';
+    if (typeof page === 'string' && page) activePageCount.set(page, (activePageCount.get(page) || 0) + 1);
+  }
   return positions
     .map(row => {
       // Coerce each row to a safe object so null / non-object members can't throw.
       const j = (row && typeof row === 'object') ? row : {};
       // Resolve a display-only https URL; drop the position if none is usable.
       let url = '';
-      const rawUrl = j.url_active_page || j.url_comeet_hosted_page || '';
+      const sharedActivePage = activePageCount.get(j.url_active_page) > 1;
+      const rawUrl = (sharedActivePage && j.url_comeet_hosted_page)
+        || j.url_active_page || j.url_comeet_hosted_page || '';
       if (typeof rawUrl === 'string' && rawUrl) {
         try {
           const parsed = new URL(rawUrl);
