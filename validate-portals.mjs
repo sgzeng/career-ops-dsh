@@ -136,6 +136,7 @@ const KNOWN_COMPANY_KEYS = new Set([
   'max_pages', 'ibm', 'amazon', 'notes', 'verified',
   'scan_method', 'scan_query', 'groups', 'search_site', 'first_scan_backfill', 'title_net',
   'company_eid', // providers/jobvite.mjs: explicit company eid (no network lookup)
+  'adp', // providers/adp.mjs: { cid, ccId } for a branded careers_url with provider: adp
 ]);
 
 const KNOWN_SEARCH_QUERY_KEYS = new Set(['name', 'query', 'groups', 'site', 'enabled']);

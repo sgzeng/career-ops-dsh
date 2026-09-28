@@ -28,8 +28,8 @@
  *                               `fetchDetails` (bounded per-job enrichment, skipped
  *                               while probing). Lever/Ashby supply it via
  *                               `descriptionPlain`; Comeet (`details=true` on the
- *                               same call) and Teamtailor (RSS `<description>`)
- *                               for free; Rippling by bounded per-posting detail
+ *                               same call), Teamtailor and Kula (RSS `<description>`)
+ *                               for free; Rippling, ADP, JazzHR and Dover by bounded per-posting detail
  *                               requests, on by default (its list has no body or
  *                               date) and skipped while probing. Many providers
  *                               still omit it.

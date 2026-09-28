@@ -976,6 +976,11 @@ search_queries:
 #   personio        <slug>.jobs.personio.(de|com)
 #   pinpoint        <slug>.pinpointhq.com
 #   rippling        ats.rippling.com/<slug>/jobs
+#   adp             workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=<cid>&ccId=<ccId>
+#                   (or keep a branded careers_url + provider: adp + adp: { cid, ccId })
+#   dover           app.dover.com/jobs/<slug>
+#   kula            careers.kula.ai/<slug>  (reads the tenant RSS feed /<slug>/feed)
+#   jazzhr          <tenant>.applytojob.com[/apply]
 #   jibeapply       <slug>.jibeapply.com/jobs  (or provider: jibeapply + api: for a branded host's own /jobs path)
 #   jobvite         jobs.jobvite.com/<slug>  (add company_eid: to skip the board lookup — see the stanza below)
 #   tencent         careers.tencent.com  (zh-CN board; each keywords: entry queried server-side, results deduped)
@@ -1055,6 +1060,22 @@ search_queries:
 #
 # - name: Example Rippling Co
 #   careers_url: https://ats.rippling.com/exampleco/jobs  # any ats.rippling.com/<slug>
+#   enabled: true
+#
+# - name: Example ADP Co
+#   careers_url: https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=00000000-0000-0000-0000-000000000000&ccId=19000101_000001&lang=en_US
+#   enabled: true          # cid (GUID) + ccId come from the company's embedded careers widget
+#
+# - name: Example Dover Co
+#   careers_url: https://app.dover.com/jobs/exampleco     # any app.dover.com/jobs/<slug>
+#   enabled: true
+#
+# - name: Example Kula Co
+#   careers_url: https://careers.kula.ai/exampleco        # any careers.kula.ai/<slug>
+#   enabled: true
+#
+# - name: Example JazzHR Co
+#   careers_url: https://exampleco.applytojob.com/apply   # any *.applytojob.com host
 #   enabled: true
 #
 # - name: Example JibeApply Co
