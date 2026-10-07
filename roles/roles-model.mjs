@@ -21,6 +21,7 @@ import { resolveColumns, parseTrackerRow } from '../tracker-parse.mjs';
 import { normalizeUrlForDedup } from '../scan.mjs';
 import { parseReportMeta } from '../report-format.mjs';
 import { WORK_AUTH_LABEL, workAuthFromHeader } from '../lib/column-contract.mjs';
+import { parseContacts } from '../contacts.mjs';
 
 // ── Tab model ────────────────────────────────────────────────────────
 // UI tab id → canonical states.yml labels it shows (case-sensitive, matches
@@ -159,6 +160,7 @@ function loadScanHistory(text) {
  * @param {string} [opts.reportsDir] - defaults to reports/
  * @param {string} [opts.pipelinePath] - defaults to data/pipeline.md
  * @param {string} [opts.scanHistoryPath] - defaults to data/scan-history.tsv
+ * @param {string} [opts.contactsPath] - defaults to data/contacts.tsv
  * @returns {{rows: object[], generatedAt: string}}
  */
 export function buildRoleModel(opts = {}) {
@@ -167,10 +169,26 @@ export function buildRoleModel(opts = {}) {
   const REPORTS = opts.reportsDir || path.join(root, 'reports');
   const PIPELINE = opts.pipelinePath || path.join(root, 'data/pipeline.md');
   const SCAN_HISTORY = opts.scanHistoryPath || path.join(root, 'data/scan-history.tsv');
+  const CONTACTS = opts.contactsPath || path.join(root, 'data/contacts.tsv');
 
   const scanHistory = existsSync(SCAN_HISTORY)
     ? loadScanHistory(readFileSync(SCAN_HISTORY, 'utf-8'))
     : new Map();
+
+  // Hiring-manager contacts, joined to tracker rows by the tracker# column.
+  // Notes segments `page: <url>` (non-LinkedIn profile) and `confidence: <lvl>`
+  // are surfaced; a `peer` contact stands in only when no hiring manager is known.
+  const hmByTracker = new Map();
+  if (existsSync(CONTACTS)) {
+    for (const c of parseContacts(readFileSync(CONTACTS, 'utf-8')).contacts) {
+      if (!c.tracker || !['hiring-manager', 'peer'].includes(c.type)) continue;
+      const key = String(c.tracker);
+      if (c.type === 'peer' && hmByTracker.get(key)?.kind === 'hiring-manager') continue;
+      const page = (c.notes.match(/\bpage:\s*(https?:\/\/[^\s;]+)/i) || [])[1] || null;
+      const confidence = (c.notes.match(/\bconfidence:\s*(high|medium|low)\b/i) || [])[1]?.toLowerCase() || null;
+      hmByTracker.set(key, { name: c.name, title: c.title || null, linkedin: c.linkedin || null, page, kind: c.type, confidence });
+    }
+  }
 
   const rows = [];
 
@@ -242,6 +260,8 @@ export function buildRoleModel(opts = {}) {
         discard_reasons: meta.discard_reasons || [],
         next_action: meta.next_action || null,
         reports_to: meta.reports_to || null,
+        hm: hmByTracker.get(String(r.num))?.name || null,
+        hm_info: hmByTracker.get(String(r.num)) || null,
         risk_summary: meta.risk_summary || null,
         notes: r.notes,
         report: r.report && r.report !== '—' ? r.report : null,
@@ -292,6 +312,8 @@ export function buildRoleModel(opts = {}) {
         discard_reasons: [],
         next_action: null,
         reports_to: null,
+        hm: null,
+        hm_info: null,
         risk_summary: null,
         notes: '',
         report: null,

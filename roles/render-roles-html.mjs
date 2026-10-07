@@ -102,6 +102,7 @@ const COLS = [
   { id: 'legitimacy', label: 'Legitimacy', w: 130, min: 44 },
   { id: 'workauth', label: 'Work auth', w: 120, min: 44 },
   { id: 'risk', label: 'Risk', w: 90, min: 42 },
+  { id: 'hm', label: 'Hiring manager', w: 170, min: 90, grow: true },
   { id: 'source', label: 'Source', w: 100, min: 46 },
   { id: 'posted', label: 'Posted', w: 100, min: 52 },
   { id: 'seen', label: 'Seen', w: 90, min: 44 },
@@ -127,6 +128,7 @@ const COL_DOC = {
   score:     { what: 'pct 投影到 career-ops 的 1–5 分（round(pct/20,1)）。', src: '由 pct 换算。', why: 'stats / dashboard 等原生工具用的口径。' },
   legitimacy:{ what: '招聘启事的可信度分级。', src: '评估报告 Block G（Posting Legitimacy）的 legitimacy_tier。', why: '过滤影子岗 / 钓鱼帖。' },
   workauth:  { what: 'JD 对签证 / sponsorship 的表态：Sponsors / Unstated / No sponsorship / Not needed。', src: '报告 Machine Summary 的 work_auth 枚举值。', why: WORK_AUTH ? `你的情况：${WORK_AUTH}（config/profile.yml → location）。` : '对照你的工作许可（config/profile.yml → location）。' },
+  hm:        { what: '推测的 hiring manager：名字 + 置信度 + LinkedIn / 个人主页链接；只找到团队成员时标 peer（没查到就是 —）。', src: 'data/contacts.tsv 里 type=hiring-manager、tracker# 对应这一行的联系人；判断依据写在报告的 ## Hiring Manager 段。', why: '投递后直接联系 / warm intro。' },
   risk:      { what: '综合风险级别。', src: '报告 Risk Summary 的 risk_level。' },
   source:    { what: '哪个扫描器 / 渠道发现的（greenhouse-api / ashby-api / lever-api / yc-seed / websearch …）。', src: 'data/scan-history.tsv 的 portal 列。' },
   posted:    { what: '岗位发布日期。', src: 'data/scan-history.tsv 的 posted_at。', why: '新鲜度。' },
@@ -811,6 +813,17 @@ function cellFor(key, r, t){
     case 'legitimacy': return esc(r.legitimacy_tier||'—');
     case 'workauth': return esc(r.work_auth||'—');
     case 'risk': return esc(r.risk_level||'—');
+    case 'hm': {
+      const h = r.hm_info;
+      if (!h) return '—';
+      const links = [];
+      if (h.linkedin) links.push('<a class="apply-link" href="'+esc(h.linkedin)+'" target="_blank" rel="noopener">LinkedIn ↗</a>');
+      if (h.page) links.push('<a class="apply-link" href="'+esc(h.page)+'" target="_blank" rel="noopener">Page ↗</a>');
+      const tags = [h.kind === 'peer' ? 'peer' : '', h.confidence ? h.confidence : ''].filter(Boolean).join(' · ');
+      return '<div class="role" title="'+esc(h.title||'')+'">'+esc(h.name)+'</div>'
+        + (tags ? '<div class="mono-cell">'+esc(tags)+'</div>' : '')
+        + (links.length ? '<div>'+links.join(' ')+'</div>' : '');
+    }
     case 'source': return '<span class="mono-cell">'+esc(r.source||'—')+'</span>';
     case 'posted': return '<span class="mono-cell">'+esc(r.posted_at||'—')+'</span>';
     case 'seen': return '<span class="mono-cell">'+(r.age==null?'—':(r.age===0?'today':r.age+'d ago'))+'</span>';
