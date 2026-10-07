@@ -57,6 +57,14 @@ const esc = (s) => String(s ?? '')
 
 const { rows: data, generatedAt } = buildRoleModel({ root: ROOT });
 
+// JSON for an inline <script>. Row values are third-party text (report fields that
+// quote the posting, scanned job titles, tracker notes): a bare `</script>` or
+// `<!--` in one would end the data block early and break the whole page, and
+// U+2028/2029 are line terminators in older JS engines. `\u003c` etc. parse back
+// to the identical string, so the page sees exactly the same data.
+const jsonForScript = (v) => JSON.stringify(v)
+  .replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+
 // Live tabs first (most useful for a "what should I look at" view), evaluated
 // ranked by match%, everything else newest-first.
 const TAB_ORDER = ['new', 'evaluated', 'submitted', 'pending', 'offered', 'rejected', 'archived', 'deleted'];
@@ -447,7 +455,7 @@ const html = `<!doctype html>
 </div>
 
 <script>
-const D = ${JSON.stringify(data)};
+const D = ${jsonForScript(data)};
 const COLS = ${JSON.stringify(COLS)};
 const COL_DOC = ${JSON.stringify(COL_DOC)};
 const TAB_ORDER = ${JSON.stringify(TAB_ORDER)};

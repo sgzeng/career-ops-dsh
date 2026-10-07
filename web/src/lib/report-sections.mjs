@@ -106,9 +106,115 @@ export function isVerdictHeading(heading) {
   return /^verdict$/i.test(cleanHeading(heading));
 }
 
+/** Public methodology apply/don't-apply line (career-ops.org + ReportView). */
+export const APPLY_LINE = 4.0;
+
+/**
+ * @param {unknown} score
+ * @returns {string | null} "Recommended" | "Below the apply line" | null
+ */
+export function applyLineLabel(score) {
+  if (score == null || score === "") return null;
+  const n = typeof score === "number" ? score : Number(String(score).match(/(\d+(?:\.\d+)?)/)?.[1]);
+  if (!Number.isFinite(n)) return null;
+  return n >= APPLY_LINE ? "Recommended" : "Below the apply line";
+}
+
+/**
+ * Apply is the primary CTA only when the methodology says apply. Below 4.0 or
+ * a caution/suspicious legitimacy tier, keep the control but drop brand fill
+ * so it does not out-shout the verdict (#4206).
+ *
+ * @param {{ score?: unknown, legitimacy?: unknown }} opts
+ * @returns {boolean}
+ */
+export function applyCtaQuiet(opts) {
+  if (applyLineLabel(opts?.score) === "Below the apply line") return true;
+  const s = String(opts?.legitimacy ?? "").toLowerCase();
+  if (s.includes("caution") || s.includes("precau") || s.includes("caut")) return true;
+  if (s.includes("suspic") || s.includes("sospech") || s.includes("scam") || s.includes("fake")) return true;
+  return false;
+}
+
+/**
+ * Block B (CV Match / gaps) is the only lettered section that stays open.
+ * Interview Plan is letter F in current oferta.md — never treat F as lead.
+ * @param {{ letter?: string | null, heading?: string }} section
+ * @returns {boolean}
+ */
+export function isLeadSection(section) {
+  if (section?.letter === "B") return true;
+  return /\b(cv match|match with cv)\b/i.test(cleanHeading(section?.heading ?? ""));
+}
+
+/**
+ * First non-table paragraph — the one-line "why this score" for the verdict card.
+ * @param {string} md
+ * @returns {string}
+ */
+export function firstProseParagraph(md) {
+  const withoutTables = String(md ?? "")
+    .split("\n")
+    .map((l) => (/^\s*\|/.test(l) ? "" : l))
+    .join("\n");
+  return (
+    withoutTables
+      .split(/\n{2,}/)
+      .map((p) => p.replace(/^#+\s+/, "").trim())
+      .find((p) => p && !/^[-*]{3,}$/.test(p) && !/^\*\*[^*]+:\*\*/.test(p)) ?? ""
+  );
+}
+
+/**
+ * Score-why paragraph for the verdict card. Prefers a real Verdict block, then
+ * the body intro, then the header lede (oferta.md puts the one-liner above ---).
+ * @param {{ report?: string, intro?: string, verdictContent?: string }} opts
+ * @returns {string}
+ */
+export function verdictReason(opts) {
+  const fromVerdict = firstProseParagraph(opts?.verdictContent ?? "");
+  if (fromVerdict) return fromVerdict;
+  const fromIntro = firstProseParagraph(opts?.intro ?? "");
+  if (fromIntro) return fromIntro;
+  const header = String(opts?.report ?? "").split(/^---\s*$/m)[0] ?? "";
+  const stripped = header
+    .replace(/^#\s+.*$/m, "")
+    .replace(/^\s*\*\*[^*]+:\*\*.*$/gm, "")
+    .trim();
+  return firstProseParagraph(stripped);
+}
+
+/**
+ * Line span `[start, end)` of a BATCH-layout archived job description, or null.
+ *
+ * batch/batch-prompt.md pastes the JD, scraped third-party text, bare between the
+ * header and the Machine Summary. It can quote any markdown heading (`## Verdict`,
+ * `## Machine Summary`, `## A) Role Summary`); splitting on those would conjure
+ * fake sections, and a fake Verdict hijacks the verdict card. The JD ends at the
+ * real Machine Summary, i.e. the LAST `## Machine Summary` heading after it (same
+ * rule as report-format.mjs `archivedJdRange` in the core, on lines).
+ *
+ * A report whose Machine Summary comes BEFORE its JD (oferta.md, the older
+ * reports) returns null: its sections split exactly as they always did.
+ * @param {string[]} lines
+ * @returns {[number, number] | null}
+ */
+function batchJdSpan(lines) {
+  const jd = lines.findIndex((l) => /^##\s+Job Description\b/i.test(l));
+  if (jd < 0) return null;
+  const summaries = [];
+  lines.forEach((l, i) => {
+    if (/^##\s*Machine Summary\s*$/i.test(l)) summaries.push(i);
+  });
+  if (summaries.length && summaries[0] < jd) return null;
+  const real = summaries.filter((i) => i > jd);
+  return real.length ? [jd, real[real.length - 1]] : null;
+}
+
 /**
  * Split a report body on `## ` headings. Everything before the first one is
- * the intro.
+ * the intro. A batch-layout archived JD is one opaque section: headings inside it
+ * do not open sections of their own.
  * @param {string} body
  * @returns {{ intro: string, sections: Section[] }}
  */
@@ -119,8 +225,12 @@ export function splitSections(body) {
   const sections = [];
   /** @type {{ heading: string, letter: string | null, lines: string[] } | null} */
   let cur = null;
-  for (const line of body.split("\n")) {
-    const h = line.match(/^##\s+(.*)$/);
+  const all = body.split("\n");
+  const jdSpan = batchJdSpan(all);
+  for (let i = 0; i < all.length; i++) {
+    const line = all[i];
+    const insideJd = jdSpan !== null && i > jdSpan[0] && i < jdSpan[1];
+    const h = insideJd ? null : line.match(/^##\s+(.*)$/);
     if (h) {
       if (cur) sections.push({ heading: cur.heading, letter: cur.letter, content: cur.lines.join("\n").trim() });
       const heading = h[1].trim();

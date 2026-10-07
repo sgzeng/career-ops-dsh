@@ -1,52 +1,62 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
-// Rippling provider — hits the public per-tenant ATS board API.
+// Rippling provider — hits the tenant's public v2 board JSON API.
 // Auto-detects from a careers_url like `https://ats.rippling.com/<slug>/jobs`
-// (the `<slug>` is the first path segment). Rippling's board API is public and
-// zero-auth:
-//   https://api.rippling.com/platform/api/ats/v1/board/<slug>/jobs
-// Response shape: a JSON ARRAY of
-//   { uuid, name, department: { id, label }, url, workLocation: { id, label } }
-// A posting open in several places appears once PER LOCATION, same uuid.
+// (the `<slug>` is the first path segment).
+//
+// Board API (same origin as the careers pages — no separate API host):
+//   GET https://ats.rippling.com/api/v2/board/<slug>/jobs?page=<n>&pageSize=<n>
+// Response: `{ items: [...], page, pageSize, totalItems, totalPages }`, each
+// item `{ id, name, url, department: { name }, locations: [{ name, ... }], language }`.
+// A posting open in several places appears once PER LOCATION, same id.
+//
+// The client itself caps pageSize at 1000; requesting that size returns a
+// tenant's whole board in one request for any realistically-sized company —
+// Rippling's own board, the largest tenant seen, runs 606 postings, still
+// one page under that cap. Still paginated below with its own page-count
+// ceiling — never trusting the source's own `totalPages` alone — for the
+// rare tenant whose board exceeds one page.
 //
 // The list carries no description and no date, so every Rippling posting used
 // to reach scan.mjs undated and description-less. The per-posting detail
-// document has both:
-//   https://api.rippling.com/platform/api/ats/v1/board/<slug>/jobs/<uuid>
+// document has both, on the same origin:
+//   GET https://ats.rippling.com/api/v2/board/<slug>/jobs/<id>
 //   → { uuid, name, description: { role, company } (HTML), createdOn,
 //       workLocations, payRangeDetails: [{ currency, frequency, rangeStart,
 //       rangeEnd, location }], employmentType, jsonLd, ... }
-// fetch() pulls it once per distinct uuid, DETAIL_BATCH at a time, at most
+// (the same document the legacy api.rippling.com/platform/api/ats/v1 detail
+// endpoint serves; `uuid` there equals the list item's `id`.)
+// fetch() pulls it once per distinct id, DETAIL_BATCH at a time, at most
 // MAX_DETAIL_REQUESTS per board. Unlike smartrecruiters/vdab this is not an
 // opt-in, because a posting with no date or text is invisible to --since and
 // content_filter. Cost scales with the board: one GET per distinct posting
-// (measured: Kai 20 postings ~1.1–1.5 s, Comp AI / just-appraised-jobs ~0.3–0.4 s;
-// Rippling's own board, 330 postings, ~9 s). A board past the cap is enriched
-// in list order — roughly alphabetical by title on the live boards — so its
-// remaining postings stay undated and description-less, and the cap line on
-// stderr says how many.
+// (measured on the legacy host: Kai 20 postings ~1.1–1.5 s, Comp AI /
+// just-appraised-jobs ~0.3–0.4 s; Rippling's own board, 330 postings, ~9 s).
+// A board past the cap is enriched in list order — roughly alphabetical by
+// title on the live boards — so its remaining postings stay undated and
+// description-less, and the cap line on stderr says how many.
 // Enrichment only — a detail that fails or is malformed leaves the list-level
 // posting exactly as it was, and the whole step is skipped while a caller is
 // probing (ctx.maxPages set, as verify-portals does).
 //
-// The careers host (`ats.rippling.com`) and the API host (`api.rippling.com`)
-// are both fixed; the per-tenant slug and the posting uuid are the only
-// variable parts. Both are constrained to safe tokens before interpolation so
-// they cannot inject extra path segments, a query, or traversal into the API URL.
+// The careers/API host (`ats.rippling.com`) is fixed; the per-tenant slug and
+// the posting id are the only variable parts. Both are constrained to safe
+// tokens before interpolation so they cannot inject extra path segments, a
+// query, or traversal into the API URL.
 
+import { fetchJsonWithRetry, sleep } from './_http.mjs';
 import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
 
 const CAREERS_HOST = 'ats.rippling.com';
-const API_HOST = 'api.rippling.com';
-const API_BASE = `https://${API_HOST}/platform/api/ats/v1/board`;
+const API_BASE = `https://${CAREERS_HOST}/api/v2/board`;
 const SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 const UUID_RE = /^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$/;
 
 // Detail GETs in flight at once — same small-batch politeness as
 // smartrecruiters/vdab, so a board cannot burst the shared API host.
 const DETAIL_BATCH = 4;
-// Detail GETs one board may spend (one per distinct uuid, no retries). Same
+// Detail GETs one board may spend (one per distinct id, no retries). Same
 // ceiling as workday's placeholder enrichment; loud when it truncates, because
 // a silent cap reads as "every posting was enriched" when it wasn't.
 const MAX_DETAIL_REQUESTS = 200;
@@ -59,6 +69,30 @@ const MAX_FUTURE_MS = 366 * 24 * 60 * 60 * 1000;
 // payRangeDetails[].frequency → annual multiplier (ashby.mjs's table, in
 // Rippling's vocabulary). An unknown frequency drops that range, never guesses.
 const FREQUENCY_MULTIPLIERS = { YEAR: 1, MONTH: 12, WEEK: 52, DAY: 260, HOUR: 2080 };
+
+// Largest pageSize the client itself ever requests (see header comment).
+const PAGE_SIZE = 1000;
+
+// Page count ceiling, independent of what `totalPages` reports — a growing
+// or tampered response must not turn one portals.yml line into an unbounded
+// request loop. DEFAULT_MAX_PAGES * PAGE_SIZE = 10,000 postings is already
+// implausible for one company; MAX_PAGES_CAP leaves headroom for an explicit
+// override without going unbounded.
+const DEFAULT_MAX_PAGES = 10;
+const MAX_PAGES_CAP = 50;
+
+// Delay between successive pages of one tenant's own pagination loop — the
+// common single-page board never pays it.
+const INTER_PAGE_DELAY_MS = 200;
+
+const RETRY_POLICY = { retries: 2 };
+
+// Why the walk over one tenant's pages stopped.
+const STOP_REASON = {
+  COMPLETE: 'complete',
+  CAP: 'cap',
+  FETCH_ERROR: 'fetch-error',
+};
 
 /**
  * Resolve the tenant slug (e.g. `just-appraised-jobs`) from a careers_url.
@@ -81,14 +115,22 @@ function resolveSlug(entry) {
   return segment;
 }
 
-/** Build the board API URL for a validated slug. */
-function apiUrlForSlug(slug) {
-  return `${API_BASE}/${encodeURIComponent(slug)}/jobs`;
+/** Build one page's board API URL for a validated slug. */
+function apiUrlForSlug(slug, page) {
+  // slug is config-derived (portals.yml careers_url), already restricted to
+  // SLUG_RE's charset — plain encodeURIComponent here is defense-in-depth,
+  // not a host-controlled response field that would need a surrogate-safe
+  // encoder with a drop-the-posting fallback.
+  const encodedSlug = encodeURIComponent(slug);
+  const apiUrl = new URL(`${API_BASE}/${encodedSlug}/jobs`);
+  apiUrl.searchParams.set('page', String(page));
+  apiUrl.searchParams.set('pageSize', String(PAGE_SIZE));
+  return apiUrl.href;
 }
 
-/** Build the posting-detail API URL for a validated slug + uuid. */
-function detailUrlFor(slug, uuid) {
-  return `${apiUrlForSlug(slug)}/${encodeURIComponent(uuid)}`;
+/** Build the posting-detail API URL for a validated slug + posting id (UUID_RE-checked). */
+function detailUrlFor(slug, id) {
+  return `${API_BASE}/${encodeURIComponent(slug)}/jobs/${encodeURIComponent(id)}`;
 }
 
 /** @param {string} url */
@@ -100,78 +142,18 @@ function assertRipplingApiUrl(url) {
     throw new Error(`rippling: invalid URL: ${url}`);
   }
   if (parsed.protocol !== 'https:') throw new Error(`rippling: URL must use HTTPS: ${url}`);
-  if (parsed.hostname !== API_HOST) {
-    throw new Error(`rippling: untrusted hostname "${parsed.hostname}" — must be ${API_HOST}`);
+  if (parsed.hostname !== CAREERS_HOST) {
+    throw new Error(`rippling: untrusted hostname "${parsed.hostname}" — must be ${CAREERS_HOST}`);
   }
   return url;
 }
 
-/** @type {Provider} */
-export default {
-  id: 'rippling',
-
-  detect(entry) {
-    const slug = resolveSlug(entry);
-    return slug ? { url: apiUrlForSlug(slug) } : null;
-  },
-
-  async fetch(entry, ctx) {
-    const slug = resolveSlug(entry);
-    if (!slug) throw new Error(`rippling: cannot derive API URL for ${entry.name}`);
-    const apiUrl = apiUrlForSlug(slug);
-    assertRipplingApiUrl(apiUrl);
-    // redirect:'error' prevents SSRF via server-side redirects
-    const json = await ctx.fetchJson(apiUrl, { redirect: 'error' });
-    const rows = parseRipplingRows(json, entry.name);
-
-    // Detail enrichment answers "what does this job say", not "is this
-    // endpoint alive" — skip it entirely while probing (same rule as
-    // smartrecruiters/vdab/workday), so the probe stays at one request.
-    const probing = Number.isInteger(ctx?.maxPages) && ctx.maxPages > 0;
-    if (probing) return rows.map((r) => r.job);
-
-    // One GET per distinct uuid: the list repeats a posting once per location
-    // row, and every row of it gets the same detail.
-    const uuids = [...new Set(rows.map((r) => r.uuid).filter(Boolean))];
-    const pending = uuids.slice(0, MAX_DETAIL_REQUESTS);
-    /** @type {Map<string, any>} */
-    const details = new Map();
-    let failed = 0;
-    for (let i = 0; i < pending.length; i += DETAIL_BATCH) {
-      const batch = pending.slice(i, i + DETAIL_BATCH);
-      await Promise.all(batch.map(async (uuid) => {
-        try {
-          const detailUrl = detailUrlFor(slug, uuid);
-          assertRipplingApiUrl(detailUrl);
-          const detail = await ctx.fetchJson(detailUrl, { redirect: 'error' });
-          // A document for some other posting (or not a document at all) is
-          // malformed — merging it would put another job's text on this one.
-          if (!isPlainObject(detail) || (detail.uuid != null && detail.uuid !== uuid)) {
-            failed++;
-            return;
-          }
-          details.set(uuid, detail);
-        } catch {
-          // Detail fetch is an enrichment only. Keep the listing result.
-          failed++;
-        }
-      }));
-    }
-
-    if (failed > 0 || uuids.length > pending.length) {
-      const unreadable = failed > 0 ? `, ${failed} detail document(s) unreadable` : '';
-      const capped = uuids.length > pending.length
-        ? `, ${uuids.length - pending.length} left undetailed by the ${MAX_DETAIL_REQUESTS}-request cap`
-        : '';
-      console.error(`ℹ️  rippling: ${entry.name} enriched ${details.size} of ${uuids.length} posting(s)${unreadable}${capped}`);
-    }
-
-    return rows.map((r) => {
-      const detail = r.uuid ? details.get(r.uuid) : undefined;
-      return detail ? mergeRipplingDetail(r.job, detail) : r.job;
-    });
-  },
-};
+/** Resolve the page cap: a positive integer `max_pages` on the entry, capped. */
+function resolveMaxPages(entry) {
+  const v = entry?.max_pages;
+  if (Number.isInteger(v) && v > 0) return Math.min(v, MAX_PAGES_CAP);
+  return DEFAULT_MAX_PAGES;
+}
 
 /** @param {unknown} v @returns {v is Record<string, any>} */
 function isPlainObject(v) {
@@ -301,18 +283,24 @@ export function mergeRipplingDetail(job, detail) {
 }
 
 /**
- * List rows as `{ job, uuid }` — parseRipplingResponse plus the posting uuid
- * fetch() needs for the detail GET. `uuid` is '' when absent or not a clean
- * UUID, which leaves that posting un-enriched rather than dropped.
+ * One page of the v2 envelope as `{ rows, rawCount }` — parseRipplingPage plus
+ * the posting id fetch() needs for the detail GET. `id` is '' when absent or
+ * not a clean UUID, which leaves that posting un-enriched rather than dropped.
+ * Throws on a non-`{items[]}` envelope (empty-vs-broken split: `items: []` is a
+ * genuinely empty board, anything else unexpected is an error).
  * @param {any} json
  * @param {string} companyName
- * @returns {Array<{job: {title: string, url: string, company: string, location: string}, uuid: string}>}
+ * @returns {{rows: Array<{job: {title: string, url: string, company: string, location: string}, id: string}>, rawCount: number}}
  */
 function parseRipplingRows(json, companyName) {
-  if (!Array.isArray(json)) return [];
-  /** @type {Array<{job: {title: string, url: string, company: string, location: string}, uuid: string}>} */
+  if (!json || typeof json !== 'object' || !Array.isArray(json.items)) {
+    const got = json && typeof json === 'object' ? Object.keys(json).join(', ') : typeof json;
+    throw new Error(`rippling: unexpected response — expected items[], got: [${got}]`);
+  }
+  const rawCount = json.items.length;
+  /** @type {Array<{job: {title: string, url: string, company: string, location: string}, id: string}>} */
   const rows = [];
-  for (const j of json) {
+  for (const j of json.items) {
     const title = typeof j?.name === 'string' ? j.name.trim() : '';
     if (!title) continue;
 
@@ -331,43 +319,160 @@ function parseRipplingRows(json, companyName) {
     }
     if (!url) continue;
 
-    const wl = j?.workLocation;
-    const location =
-      wl && typeof wl === 'object' && typeof wl.label === 'string'
-        ? wl.label.trim()
-        : typeof wl === 'string'
-          ? wl.trim()
-          : '';
+    const locs = Array.isArray(j?.locations) ? j.locations : [];
+    const location = locs
+      .map((l) => (l && typeof l.name === 'string' ? l.name.trim() : ''))
+      .filter(Boolean)
+      .join(' · ');
 
-    const uuid = typeof j?.uuid === 'string' && UUID_RE.test(j.uuid) ? j.uuid : '';
-    rows.push({ job: { title, url, location, company: companyName }, uuid });
+    const id = typeof j?.id === 'string' && UUID_RE.test(j.id) ? j.id : '';
+    rows.push({ job: { title, url, location, company: companyName }, id });
   }
-  return rows;
+  return { rows, rawCount };
 }
 
 /**
- * Parse a Rippling board API response. Exported for unit tests.
+ * Parse one page of the Rippling v2 board API response. Exported for unit
+ * tests.
  *
- * The response is a top-level JSON ARRAY of postings. Field mapping → the
- * normalized Job shape:
+ * Field mapping → the normalized Job shape:
  *   - title:    `name`, trimmed (postings without one are dropped).
  *   - url:      `url` — an absolute `https:` posting URL host-locked to
- *               `ats.rippling.com` (Rippling always serves postings there, so an
- *               off-host or non-https URL is untrusted and the posting is dropped).
- *               It is the dedup key and is display-only (written to the
- *               pipeline/history, never server-fetched here).
+ *               `ats.rippling.com` (Rippling always serves postings there, so
+ *               an off-host or non-https URL is untrusted and the posting is
+ *               dropped). It is the dedup key and is display-only (written to
+ *               the pipeline/history, never server-fetched here).
  *   - company:  the portal entry name (the feed is per-tenant and carries no
  *               company field, same as recruitee).
- *   - location: `workLocation.label` (e.g. "Remote (United States)"); falls back
- *               to a bare string `workLocation`, else "".
+ *   - location: every `locations[].name`, joined with ` · ` (a posting can
+ *               list more than one place); "" when the array is empty/absent.
  *
  * List-level only: description/postedAt/salary come from the per-posting
  * detail document, merged by fetch() via mergeRipplingDetail.
  *
  * @param {any} json
  * @param {string} companyName
- * @returns {Array<{title: string, url: string, company: string, location: string}>}
+ * @returns {{jobs: Array<{title: string, url: string, company: string, location: string}>, rawCount: number}}
  */
-export function parseRipplingResponse(json, companyName) {
-  return parseRipplingRows(json, companyName).map((r) => r.job);
+export function parseRipplingPage(json, companyName) {
+  const { rows, rawCount } = parseRipplingRows(json, companyName);
+  return { jobs: rows.map((r) => r.job), rawCount };
 }
+
+/** @type {Provider} */
+export default {
+  id: 'rippling',
+
+  detect(entry) {
+    const slug = resolveSlug(entry);
+    return slug ? { url: apiUrlForSlug(slug, 0) } : null;
+  },
+
+  /**
+   * @param {{ name?: string, careers_url?: string, max_pages?: number }} entry
+   * @param {{ fetchJson: (url: string, opts?: object) => Promise<any>, maxPages?: number, sleep?: (ms: number) => Promise<void> }} ctx
+   */
+  async fetch(entry, ctx) {
+    const slug = resolveSlug(entry);
+    if (!slug) throw new Error(`rippling: cannot derive API URL for ${entry.name}`);
+
+    const maxPages = resolveMaxPages(entry);
+    const ctxMaxPages = Number(ctx?.maxPages);
+    const ctxCap = ctxMaxPages > 0 ? ctxMaxPages : Infinity;
+    const pagesToFetch = Math.min(maxPages, ctxCap);
+    // Health probe (verify-portals) sets ctx.maxPages: 1 — don't wrap or
+    // swallow its ProbePageBudgetReached rejection, propagate it unwrapped.
+    const probing = ctxCap !== Infinity;
+
+    /** @type {Array<{job: {title: string, url: string, company: string, location: string}, id: string}>} */
+    const rows = [];
+    let stopReason = STOP_REASON.COMPLETE;
+    let page = 0;
+    for (; page < pagesToFetch; page++) {
+      if (page > 0) await sleep(INTER_PAGE_DELAY_MS, ctx);
+      const url = apiUrlForSlug(slug, page);
+      assertRipplingApiUrl(url);
+
+      let json;
+      try {
+        json = await fetchJsonWithRetry(ctx, url, { redirect: 'error' }, RETRY_POLICY);
+      } catch (err) {
+        // A failure on page 0 means the board itself is unreachable — propagate
+        // (scan.mjs records the entry as errored) instead of reporting a dead
+        // board as a healthy empty one. Only a LATER page's failure, after page
+        // 0 proved the board alive, truncates gracefully.
+        if (probing || page === 0) throw err;
+        const attempts = err?.attempts ?? RETRY_POLICY.retries + 1;
+        console.error(`⚠️  rippling: ${entry.name} truncated at page ${page + 1} of ${pagesToFetch} after ${attempts} attempts (${rows.length} jobs): ${err.message}`);
+        stopReason = STOP_REASON.FETCH_ERROR;
+        break;
+      }
+
+      const { rows: pageRows, rawCount } = parseRipplingRows(json, entry.name);
+      rows.push(...pageRows);
+
+      // Natural end: the source's own raw row count for this page (before
+      // malformed-row filtering) is short of PAGE_SIZE. Break WITHOUT
+      // incrementing page — a short page that happens to land on the last
+      // allowed page must still read as a natural end below, not as the
+      // ceiling having truncated a healthy board.
+      if (rawCount < PAGE_SIZE) break;
+    }
+
+    // Only a healthy walk that ran out of its OWN entry.max_pages /
+    // DEFAULT_MAX_PAGES budget counts as capped — never a probe's ctx.maxPages
+    // cap and never a fetch-error stop: this warning means the ceiling
+    // truncated a healthy board, not that the board broke.
+    if (stopReason === STOP_REASON.COMPLETE && page === pagesToFetch && pagesToFetch === maxPages) {
+      stopReason = STOP_REASON.CAP;
+      console.error(`⚠️  rippling: ${entry.name} truncated at max_pages=${maxPages} (${rows.length} jobs) — raise max_pages on this entry for more`);
+    }
+
+    // Detail enrichment answers "what does this job say", not "is this
+    // endpoint alive" — skip it entirely while probing (same rule as
+    // smartrecruiters/vdab/workday), so the probe stays at one request.
+    if (probing) return rows.map((r) => r.job);
+
+    // One GET per distinct id: the list repeats a posting once per location
+    // row, and every row of it gets the same detail.
+    const ids = [...new Set(rows.map((r) => r.id).filter(Boolean))];
+    const pending = ids.slice(0, MAX_DETAIL_REQUESTS);
+    /** @type {Map<string, any>} */
+    const details = new Map();
+    let failed = 0;
+    for (let i = 0; i < pending.length; i += DETAIL_BATCH) {
+      const batch = pending.slice(i, i + DETAIL_BATCH);
+      await Promise.all(batch.map(async (id) => {
+        try {
+          const detailUrl = detailUrlFor(slug, id);
+          assertRipplingApiUrl(detailUrl);
+          // redirect:'error' prevents SSRF via server-side redirects
+          const detail = await ctx.fetchJson(detailUrl, { redirect: 'error' });
+          // A document for some other posting (or not a document at all) is
+          // malformed — merging it would put another job's text on this one.
+          if (!isPlainObject(detail) || (detail.uuid != null && detail.uuid !== id)) {
+            failed++;
+            return;
+          }
+          details.set(id, detail);
+        } catch {
+          // Detail fetch is an enrichment only. Keep the listing result.
+          failed++;
+        }
+      }));
+    }
+
+    if (failed > 0 || ids.length > pending.length) {
+      const unreadable = failed > 0 ? `, ${failed} detail document(s) unreadable` : '';
+      const capped = ids.length > pending.length
+        ? `, ${ids.length - pending.length} left undetailed by the ${MAX_DETAIL_REQUESTS}-request cap`
+        : '';
+      console.error(`ℹ️  rippling: ${entry.name} enriched ${details.size} of ${ids.length} posting(s)${unreadable}${capped}`);
+    }
+
+    return rows.map((r) => {
+      const detail = r.id ? details.get(r.id) : undefined;
+      return detail ? mergeRipplingDetail(r.job, detail) : r.job;
+    });
+  },
+};

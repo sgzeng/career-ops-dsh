@@ -109,7 +109,7 @@ try {
     assert.ok(teamProblem('report #9028'));
   });
 
-  ok('verify-pipeline Check 18 errors on junk and passes clean data', () => {
+  ok('verify-pipeline Check 19 errors on junk and passes clean data', () => {
     const reports = join(tmp, 'reports');
     mkdirSync(reports, { recursive: true });
     const tracker = join(tmp, 'applications.md');
@@ -129,7 +129,7 @@ try {
     const bad = run();
     assert.equal(bad.code, 1, 'junk must fail the run');
     for (const needle of ['team:', 'location:', '| **Remote** | row', 'advertised_comp:', 'Role']) {
-      assert.ok(bad.out.includes(needle), `no Check 18 error for ${needle}\n${bad.out}`);
+      assert.ok(bad.out.includes(needle), `no Check 19 error for ${needle}\n${bad.out}`);
     }
 
     writeFileSync(join(reports, '1-acme-2026-09-25.md'), report('"Product Security"', 'San Jose, CA', '"$150,000–$200,000"'));

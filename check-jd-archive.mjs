@@ -83,6 +83,7 @@ import { getCareerOpsRoot } from './path-resolver.mjs';
 import { resolveColumns, parseTrackerRow, extractTrackerReportNumbers } from './tracker-parse.mjs';
 import { loadCanonicalStates, resolveCanonicalState, resolveTrackerPath } from './tracker-utils.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { matchMachineSummary } from './report-format.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
@@ -153,6 +154,13 @@ export function parseReportFilename(filename) {
 const JD_HEADING_RE = /^##\s+Job Description\b.*$/im;
 const NEXT_REPORT_SECTION_RE =
   /^##\s+(?:Machine Summary|Keywords extracted|[A-Z]\)|Block\s[A-Z]\b|Risk Summary|Cover Letter Draft|Post-evaluation|Liveness gate|Blacklist gate|Bounded Research Budget|Step 0\b)/im;
+
+// Sections that can legitimately FOLLOW the JD when the Machine Summary precedes
+// it (old fork layout / interactive layout: JD written last). The preceding
+// sections (Machine Summary, A)-G), Block X, Risk Summary) cannot follow it, so
+// a line that looks like one inside the JD text is JD text, not a section end.
+const TRAILING_REPORT_SECTION_RE =
+  /^##\s+(?:Keywords extracted|Cover Letter Draft|Post-evaluation|Liveness gate|Blacklist gate|Bounded Research Budget|Step 0\b)/im;
 
 // The unfilled modes/oferta.md template placeholder ("(the posting's full
 // text, pasted verbatim — see requirement below)") is 66 characters — longer
@@ -231,6 +239,17 @@ const NON_CONTENT_MARKERS = [
     reason: 'looks like a "please enable JavaScript" shell, not a posting',
     re: /(please enable javascript|this site requires javascript|<noscript)/i,
   },
+  {
+    category: 'bot-challenge',
+    // Matched on established challenge PHRASES, deliberately not the bare
+    // word "captcha" — a real posting can legitimately mention CAPTCHA as a
+    // technology (a security-engineering role's requirements, say), and that
+    // single word alone is not distinctive enough to tell the two apart.
+    // These phrases are how the actual interstitial page renders, not a
+    // topic a JD would describe.
+    reason: 'looks like a bot-verification/challenge page, not a posting',
+    re: /(checking your browser before accessing|verify(?:ing)? (?:that )?you are (?:a )?human|please stand by,? while we (?:are )?check(?:ing)? your browser|cloudflare ray id|captcha verification required to continue)/i,
+  },
 ];
 
 // Returns the first matching marker ({category, reason}) or null. Exported
@@ -258,8 +277,29 @@ export function extractStrippedJdSection(content) {
   const m = JD_HEADING_RE.exec(text);
   if (!m) return null;
   const rest = text.slice(m.index + m[0].length);
-  const nextHeadingOffset = rest.search(NEXT_REPORT_SECTION_RE);
-  const section = nextHeadingOffset === -1 ? rest : rest.slice(0, nextHeadingOffset);
+  // Batch layout (batch/batch-prompt.md): the JD is pasted bare BEFORE the
+  // Machine Summary, so the section ends exactly at the real Machine Summary
+  // heading. The known-heading allowlist below is only a fallback for the other
+  // layouts: applied to a bare scraped JD it would cut the archive short at any
+  // line that looks like a report heading ("## A) ...", a fake "## Machine
+  // Summary") and report a real archive as empty.
+  const ms = matchMachineSummary(text, /##\s*Machine Summary\s*\n+```/i);
+  const msOffset = ms && ms.index >= m.index + m[0].length ? ms.index - (m.index + m[0].length) : -1;
+  const msBeforeJd = ms !== null && ms.index < m.index;
+  const nextHeadingOffset = msOffset >= 0
+    ? msOffset
+    : rest.search(msBeforeJd ? TRAILING_REPORT_SECTION_RE : NEXT_REPORT_SECTION_RE);
+  let section = nextHeadingOffset === -1 ? rest : rest.slice(0, nextHeadingOffset);
+  if (msOffset >= 0) {
+    // The batch template puts a `---` rule between the JD and the Machine Summary.
+    // It is the layout's separator, not posting text: left in, it stops a
+    // pointer-only section ("See jds/... for the full archive") and the unfilled
+    // template placeholder from being recognized as such, so both would be
+    // credited as archived text without a capture ever being resolved.
+    const trimmed = section.trimEnd();
+    const nl = trimmed.lastIndexOf('\n');
+    if (/^[ \t]*-{3,}[ \t]*$/.test(trimmed.slice(nl + 1))) section = nl === -1 ? '' : trimmed.slice(0, nl);
+  }
   // Loop the comment-strip to a fixed point rather than a single pass: a
   // single `.replace()` can leave a reconstructible `<!--...-->` behind when
   // the input has overlapping/nested comment-marker fragments (removing an

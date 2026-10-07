@@ -26,6 +26,127 @@ export const REMOTE_ROW_RE = /\|\s*\*\*Remote\*\*\s*\|\s*([^|]+?)\s*\|/;
 // swap only the middle cell (group 2) and keep `pre`/`post` byte-identical.
 const REMOTE_ROW_REPLACE_RE = /(\|\s*\*\*Remote\*\*\s*\|\s*)([^|]+?)(\s*\|)/;
 
+// ── Report layouts and the archived JD ───────────────────────────────
+// Three on-disk layouts coexist in one reports/ directory:
+//   old fork    header, ## Machine Summary, A-G..., then the JD LAST as
+//               `## Job Description (scraped DATE)` (text-fenced, Source: line)
+//   interactive header, ## Machine Summary, A-G..., ## Keyword Coverage, then the
+//               JD LAST as `## Job Description (archived verbatim)` (modes/oferta.md)
+//   batch       header, `---`, `## Job Description (archived verbatim)` with the raw
+//               scraped text pasted BARE, `---`, `## Machine Summary`, A-G...
+//               (batch/batch-prompt.md)
+// The JD is arbitrary scraped text: it can hold `**Score:**`, `**URL:**`, table
+// rows, yaml fences, a complete fake `## Machine Summary`, an odd number of
+// ``` fences, CRLF ... In the batch layout it sits BEFORE the Machine Summary,
+// so a whole-file "first match" reads the JD instead of the report. Every
+// consumer therefore goes through the helpers below, which treat the JD as an
+// opaque span (never trusting fences or headings inside it) and locate the real
+// Machine Summary by position relative to it.
+
+// First line of the archived JD section. Same literal English prefix
+// check-jd-archive.mjs matches (the heading is an exact-string contract).
+export const JD_HEADING_RE = /^##[ \t]+Job Description\b/im;
+
+// Report sections that follow the JD in the batch layout; fallback JD end when
+// no Machine Summary fence can be found (never needed for a well-formed report).
+const NEXT_REPORT_SECTION_RE =
+  /^##[ \t]+(?:Machine Summary|Keywords extracted|[A-Z]\)|Risk Summary|Score Evidence|Extracted Keywords)/im;
+
+// Candidate finder only: heading, whitespace, a fence opener. It must stay a SUPERSET
+// of what a consumer's own fence regex accepts (those require `\n+` before the
+// fence); the sticky pass below enforces the exact shape at each candidate. Do not
+// write it as `\s*\n+` - on a long run of newlines after a "## Machine Summary" line
+// that fails by backtracking quadratically (80,000 newlines took ~18 s per parse).
+const LOOSE_MS_HEAD_SRC = '##\\s*Machine Summary\\s*```';
+const stickyCache = new WeakMap();
+function stickyOf(re) {
+  let st = stickyCache.get(re);
+  if (!st) {
+    st = new RegExp(re.source, re.flags.replace(/[gy]/g, '') + 'y');
+    stickyCache.set(re, st);
+  }
+  return st;
+}
+
+/**
+ * Locate the REAL `## Machine Summary` fence. Drop-in for `text.match(FENCE_RE)`:
+ * returns the same match array (`[0]` whole, `[1..]` groups, `.index`) or null.
+ *
+ * Every candidate heading is tried independently (so an unclosed fake fence in
+ * the JD cannot swallow the real heading), then:
+ *   - the JD heading comes BEFORE the first candidate  → batch layout: the real
+ *     Machine Summary is the LAST candidate (anything earlier is JD text);
+ *   - otherwise (old/interactive layout, JD last)       → the FIRST candidate.
+ * For a report with no JD section, or a JD that follows the Machine Summary,
+ * this is exactly `text.match(re)`.
+ *
+ * @param {string} text
+ * @param {RegExp} [re]  the consumer's own fence regex (must start with the
+ *   `##\s*Machine Summary\s*\n+```` prefix); defaults to MACHINE_SUMMARY_FENCE_RE.
+ */
+export function matchMachineSummary(text, re = MACHINE_SUMMARY_FENCE_RE) {
+  const s = String(text ?? '');
+  const loose = new RegExp(LOOSE_MS_HEAD_SRC, re.flags.includes('i') ? 'gi' : 'g');
+  const st = stickyOf(re);
+  const found = [];
+  let h;
+  while ((h = loose.exec(s)) !== null) {
+    st.lastIndex = h.index;
+    const m = st.exec(s);
+    if (m) found.push(m);
+  }
+  if (!found.length) return null;
+  const j = s.search(JD_HEADING_RE);
+  return j >= 0 && found[0].index > j ? found[found.length - 1] : found[0];
+}
+
+const ANY_MS_FENCE_RE = /##\s*Machine Summary\s*\n+```(?:ya?ml|json)?\s*\n([\s\S]*?)\n```/i;
+
+/**
+ * The archived JD section as a [start, end) span of `text`, or null when the
+ * report has none. Batch layout: from the JD heading up to the real Machine
+ * Summary heading. Otherwise (JD last): from the JD heading to the end of file.
+ */
+export function archivedJdRange(text) {
+  const s = String(text ?? '');
+  const start = s.search(JD_HEADING_RE);
+  if (start < 0) return null;
+  const ms = matchMachineSummary(s, ANY_MS_FENCE_RE);
+  if (ms && ms.index > start) return [start, ms.index];
+  if (ms) return [start, s.length];
+  // No Machine Summary at all: end at the first known report section, else EOF.
+  const rest = s.slice(start).replace(JD_HEADING_RE, (m) => ' '.repeat(m.length));
+  const next = rest.search(NEXT_REPORT_SECTION_RE);
+  return [start, next < 0 ? s.length : start + next];
+}
+
+/**
+ * The report with its archived JD cut out. Everything that reads a header field,
+ * a table row or the Machine Summary from a report should read this, not the raw
+ * text. Identical to the input when the report has no JD section.
+ */
+export function stripArchivedJd(text) {
+  const s = String(text ?? '');
+  const r = archivedJdRange(s);
+  return r ? s.slice(0, r[0]) + s.slice(r[1]) : s;
+}
+
+/**
+ * First match of `re` (non-global) that lies outside the archived JD, with the
+ * same shape as `text.match(re)` but `.index` relative to the full `text`.
+ */
+export function matchOutsideJd(text, re) {
+  const s = String(text ?? '');
+  const r = archivedJdRange(s);
+  const g = new RegExp(re.source, re.flags.replace(/[gy]/g, '') + 'g');
+  let m;
+  while ((m = g.exec(s)) !== null) {
+    if (!r || m.index < r[0] || m.index >= r[1]) return m;
+    if (m[0] === '') g.lastIndex++;
+  }
+  return null;
+}
+
 /**
  * Parse an evaluation report's text into the flat metadata object the roles
  * view renders. Never throws; unknown/absent keys are simply omitted.
@@ -36,6 +157,9 @@ const REMOTE_ROW_REPLACE_RE = /(\|\s*\*\*Remote\*\*\s*\|\s*)([^|]+?)(\s*\|)/;
 export function parseReportMeta(text) {
   const out = {};
   if (!text) return out;
+  // The archived JD is arbitrary scraped text (and sits before the Machine
+  // Summary in the batch layout): never read a header field or table row from it.
+  text = stripArchivedJd(text);
 
   const url = text.match(/^\*\*URL:\*\*\s*(\S+)/m);
   if (url && /^https?:\/\//.test(url[1])) out.url = url[1];
@@ -52,7 +176,7 @@ export function parseReportMeta(text) {
   const remoteRow = text.match(REMOTE_ROW_RE);
   if (remoteRow) out.loc = remoteRow[1].trim();
 
-  const ms = text.match(MACHINE_SUMMARY_FENCE_RE);
+  const ms = matchMachineSummary(text, MACHINE_SUMMARY_FENCE_RE);
   if (ms) {
     const y = ms[1];
     // A YAML double-quoted string escapes inner quotes as \" — drop the outer
@@ -128,16 +252,30 @@ export function parseReportMeta(text) {
  * @returns {string}
  */
 export function setMachineSummaryScalar(text, key, literal) {
-  // Scoped to the fence body: the archived JD at the end of a report can carry
-  // its own "location:" / "team:" lines, which must never be rewritten.
-  const fence = text.match(/(##\s*Machine Summary\s*\n+```(?:ya?ml)?\n)([\s\S]*?)(\n```)/);
+  return editMachineSummaryBody(text, (body) => {
+    const re = new RegExp(`^(${key}:[ \\t]*).*$`, 'm');
+    return re.test(body)
+      ? body.replace(re, (_m, pre) => pre + literal)
+      : `${key}: ${literal}\n${body}`;
+  });
+}
+
+/**
+ * Apply `fn(body) -> newBody` to the body of the REAL `## Machine Summary` fence
+ * only (never to a lookalike inside the archived JD, which can carry its own
+ * "location:" / "team:" / "top_strengths:" lines). Splices by position, so an
+ * identical string elsewhere in the file is never touched. Returns the text
+ * unchanged when there is no Machine Summary.
+ *
+ * @param {string} text
+ * @param {(body: string) => string} fn
+ * @returns {string}
+ */
+export function editMachineSummaryBody(text, fn) {
+  const fence = matchMachineSummary(text, /(##\s*Machine Summary\s*\n+```(?:ya?ml)?\n)([\s\S]*?)(\n```)/);
   if (!fence) return text;
   const [whole, open, body, close] = fence;
-  const re = new RegExp(`^(${key}:[ \\t]*).*$`, 'm');
-  const nextBody = re.test(body)
-    ? body.replace(re, (_m, pre) => pre + literal)
-    : `${key}: ${literal}\n${body}`;
-  return text.replace(whole, () => open + nextBody + close);
+  return text.slice(0, fence.index) + open + fn(body) + close + text.slice(fence.index + whole.length);
 }
 
 /**
@@ -150,9 +288,12 @@ export function setMachineSummaryScalar(text, key, literal) {
  * @returns {{text: string, changed: boolean}}
  */
 export function setRemoteRow(text, nextValue) {
-  if (!REMOTE_ROW_REPLACE_RE.test(text)) return { text, changed: false };
+  // Outside the archived JD only: the batch layout has no header Remote row, so
+  // the first `| **Remote** |` in the file can be a line of scraped JD text.
+  const m = matchOutsideJd(text, REMOTE_ROW_REPLACE_RE);
+  if (!m) return { text, changed: false };
   return {
-    text: text.replace(REMOTE_ROW_REPLACE_RE, (_m, pre, _cur, post) => pre + nextValue + post),
+    text: text.slice(0, m.index) + m[1] + nextValue + m[3] + text.slice(m.index + m[0].length),
     changed: true,
   };
 }

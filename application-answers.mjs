@@ -3,6 +3,8 @@
 import { readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { localToday } from './lib/local-today.mjs';
+import { archivedJdRange } from './report-format.mjs';
 
 export const APPLICATION_ANSWERS_HEADING = '## Application Answers';
 
@@ -42,7 +44,12 @@ function normalizeState(state) {
 }
 
 function normalizeDate(date) {
-  return inline(date || new Date().toISOString().slice(0, 10));
+  // The LOCAL calendar day when the caller supplies none. This date is written
+  // into the report's Application Answers section as the day the user answered
+  // the form, and it sits beside tracker rows dated with localToday() by
+  // set-status.mjs -- a UTC day put an evening answer a day ahead of the
+  // application it belongs to.
+  return inline(date || localToday());
 }
 
 function quoteBlock(value) {
@@ -267,6 +274,26 @@ function parseFileEntries(block, onSkip) {
 }
 
 /**
+ * The report text with a BATCH-layout archived JD blanked out, same length.
+ *
+ * The JD is scraped third-party text, and batch/batch-prompt.md pastes it bare
+ * BEFORE the Machine Summary and every block, so a heading in it
+ * (`## Application Answers`, `## H) ...`) would otherwise be the first one the
+ * heading searches below find, ahead of the report's own. Blanking keeps every
+ * index valid for slicing the real text. A JD that is the LAST section (the older
+ * layouts) is left alone: there the report's own headings come first, and a
+ * section appended after it (`## Application Answers` itself) must stay findable.
+ *
+ * @param {string} report newline-normalized report markdown
+ * @returns {string}
+ */
+function withBatchJdBlanked(report) {
+  const range = archivedJdRange(report);
+  if (!range || range[1] >= report.length) return report;
+  return report.slice(0, range[0]) + report.slice(range[0], range[1]).replace(/[^\n]/g, ' ') + report.slice(range[1]);
+}
+
+/**
  * Read a rendered `## Application Answers` section back into a snapshot.
  *
  * Returns the same shape `normalizeApplicationAnswersSnapshot` produces, so the
@@ -284,11 +311,12 @@ export function parseApplicationAnswersSection(reportText, { strict = false } = 
   const skipped = [];
   const onSkip = strict ? (line) => skipped.push(line.trim()) : undefined;
   const report = String(reportText ?? '').replace(/\r\n/g, '\n');
-  const heading = /^## Application Answers\s*$/m.exec(report);
+  const hay = withBatchJdBlanked(report);
+  const heading = /^## Application Answers\s*$/m.exec(hay);
   if (!heading) return null;
 
   const afterHeading = heading.index + heading[0].length;
-  const nextHeading = /^## .+$/m.exec(report.slice(afterHeading));
+  const nextHeading = /^## .+$/m.exec(hay.slice(afterHeading));
   const body = report.slice(
     afterHeading,
     nextHeading ? afterHeading + nextHeading.index : report.length,
@@ -317,7 +345,79 @@ export function parseApplicationAnswersSection(reportText, { strict = false } = 
 }
 
 /**
- * Read the evaluation mode's `## H) Draft Application Answers` block.
+ * The `(draft)` authoring marker, and the discriminator that replaced
+ * `/^##\s+H\)\s*Draft Application Answers\s*$/m`.
+ *
+ * NEITHER the letter NOR the name identifies this block. Both move with the
+ * locale: of the 19 evaluation modes, 3 write the English name under `H)`
+ * (canonical, `ar`, `ja`), 5 write a translated name under `H)`
+ * (`es ru tr zh zh-TW`), and 11 write a translated name under `G)`
+ * (`da de fr hi id it ko nl pl pt ua`). Matching one exact heading found the
+ * block in 3 of 19, so in sixteen languages `modes/apply.md` silently
+ * regenerated every answer the evaluation had already drafted and paid for.
+ *
+ * A trailing parenthetical marker is the signal instead, which is the
+ * convention `web/src/lib/report-sections.mjs` already established for the
+ * verdict callout: `(lead)` / `(verdict)` are stripped for display precisely
+ * because they are deliberate authoring signals that read the same in every
+ * language. `(draft)` is the same shape for the same reason; the evaluation
+ * modes write it on this block (#4272).
+ *
+ * The English name is still accepted on its own, under any letter, for the
+ * reports users already have on disk: those were written before any mode
+ * emitted the marker, and they are the corpus `apply` reads from today.
+ * A translated heading in an OLD report stays unreadable: no discriminator
+ * can recover it without guessing, and guessing here re-submits a mispaired
+ * answer to an employer. New evaluations in every language carry the marker.
+ */
+const DRAFT_ANSWERS_MARKER_RE = /\(draft\)\s*$/i;
+const DRAFT_ANSWERS_NAME_RE = /^draft application answers$/i;
+// Same grammar as report-sections.mjs' HEADING_PREFIX: a bare letter needs a
+// real delimiter, or ordinary prose loses its first word.
+const HEADING_PREFIX_RE = /^\s*(?:Block\s+([A-Z])(?:[).:]\s*|\s+(?:[—–-]+\s*)?)|([A-Z])[).:]\s*)/i;
+// The draft-answers block's own marker. Deliberately tighter than
+// HEADING_PREFIX_RE, which also accepts `H:` and `Block H`: every mode that
+// defines this block writes `## H)`, so the wider grammar would only let an
+// unrelated `H:` section be read as draft answers (#4400 review).
+const DRAFT_ANSWERS_LETTER_RE = /^H\)\s*(.*)$/i;
+
+/**
+ * Locate the draft-answers heading: the first `## ` heading carrying the
+ * `(draft)` marker, or failing that the first one whose name, with the author
+ * letter and any marker stripped, is the canonical English one.
+ * @param {string} report Report markdown, newlines already normalized.
+ * @returns {{index:number, 0:string} | null} A match-like object, or null.
+ */
+function findDraftAnswersHeading(report) {
+  /** @type {RegExpMatchArray[]} */
+  // Horizontal whitespace only. `\s+` also matches the newline, so a bare `##`
+  // line consumed it and captured the NEXT line as the heading text. With the
+  // letter rule below, `##` followed by `H) Internal Notes` then read that
+  // section's bold text as draft answers (#4400 review).
+  const headings = [...report.matchAll(/^##[ \t]+(.+?)\s*$/gm)];
+  const marked = headings.find(h => DRAFT_ANSWERS_MARKER_RE.test(h[1]));
+  if (marked) return marked;
+  const named = headings.find(h => DRAFT_ANSWERS_NAME_RE.test(
+    h[1].replace(DRAFT_ANSWERS_MARKER_RE, '').replace(HEADING_PREFIX_RE, '').trim(),
+  ));
+  if (named) return named;
+  // Last resort, and the only path that reads a TRANSLATED heading (#4400).
+  // Neither rule above fires on one today: no mode emits the `(draft)` marker
+  // (`git grep '(draft)' -- 'modes/*'` is empty), and the name rule is the
+  // English words, which five shipped modes translate — modes/es, modes/ru,
+  // modes/tr, modes/zh and modes/zh-TW. For those the block silently returned
+  // null, which is indistinguishable from a report that has no Block H.
+  //
+  // The letter is the structural part every mode keeps: `modes/oferta.md`
+  // defines `H)` as the draft-answers block and each translation renders the
+  // title only. It is deliberately LAST so the marker and the English name stay
+  // authoritative where they apply, and it requires a non-empty title so a bare
+  // `## H)` does not qualify.
+  return headings.find(h => Boolean(DRAFT_ANSWERS_LETTER_RE.exec(h[1])?.[1]?.trim())) ?? null;
+}
+
+/**
+ * Read the evaluation mode's `## H) Draft Application Answers (draft)` block.
  *
  * A DIFFERENT producer and a different format from the section above.
  * `parseApplicationAnswersSection` reads a format this module also writes, so
@@ -339,15 +439,22 @@ export function parseApplicationAnswersSection(reportText, { strict = false } = 
  * `normalizeApplicationAnswersSnapshot` accepts as-is.
  *
  * @param {string} reportText Full report markdown.
+ * The heading's title may be in any language; only the `## H)` marker is
+ * required. A heading with a marker and no title is not Block H.
+ *
  * @returns {{freeText: object[]} | null} `null` when the report has no Block H.
  */
 export function parseDraftAnswersBlockH(reportText) {
   const report = String(reportText ?? '').replace(/\r\n/g, '\n');
-  const heading = /^##\s+H\)\s*Draft Application Answers\s*$/m.exec(report);
+  const hay = withBatchJdBlanked(report);
+  const heading = findDraftAnswersHeading(hay);
   if (!heading) return null;
 
   const afterHeading = heading.index + heading[0].length;
-  const nextHeading = /^## .+$/m.exec(report.slice(afterHeading));
+  // Same grammar as the opener above. That one accepts `##` plus a tab, so a
+  // terminator matching only `## ` let a later `##\tI) ...` section stay inside
+  // Block H and its bold text come back as draft answers (#4400 review).
+  const nextHeading = /^##[ \t]+.+$/m.exec(hay.slice(afterHeading));
   const body = report.slice(
     afterHeading,
     nextHeading ? afterHeading + nextHeading.index : report.length,
@@ -377,7 +484,8 @@ export function parseDraftAnswersBlockH(reportText) {
 export function upsertApplicationAnswersSection(reportText, snapshot = {}) {
   const report = String(reportText ?? '').replace(/\r\n/g, '\n');
   const section = formatApplicationAnswersSection(snapshot).trimEnd();
-  const heading = /^## Application Answers\s*$/m.exec(report);
+  const hay = withBatchJdBlanked(report);
+  const heading = /^## Application Answers\s*$/m.exec(hay);
 
   if (!heading) {
     return `${report.trimEnd()}\n\n${section}\n`;
@@ -385,7 +493,7 @@ export function upsertApplicationAnswersSection(reportText, snapshot = {}) {
 
   const start = heading.index;
   const afterHeading = start + heading[0].length;
-  const nextHeading = /^## .+$/m.exec(report.slice(afterHeading));
+  const nextHeading = /^## .+$/m.exec(hay.slice(afterHeading));
   const end = nextHeading ? afterHeading + nextHeading.index : report.length;
   const before = report.slice(0, start).trimEnd();
   const after = report.slice(end).trimStart();

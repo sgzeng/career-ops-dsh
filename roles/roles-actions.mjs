@@ -22,7 +22,7 @@ import { buildRoleModel, TAB_TARGET_STATUS } from './roles-model.mjs';
 import { isMainModule } from '../lib/is-main-module.mjs';
 import { openTrackerTransaction, rebuildRow } from '../tracker-utils.mjs';
 import { resolveColumns, parseTrackerRow } from '../tracker-parse.mjs';
-import { setMachineSummaryScalar, setRemoteRow } from '../report-format.mjs';
+import { setMachineSummaryScalar, setRemoteRow, editMachineSummaryBody, stripArchivedJd, matchMachineSummary } from '../report-format.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const TRACKER = path.join(ROOT, 'data/applications.md');
@@ -248,11 +248,11 @@ function editReportField(file, field, value, row) {
     text = setMachineSummaryScalar(text, 'advertised_comp', value ? q(value) : 'null');
   } else if (field === 'why') {
     if (!value) throw new Error('"Why it fits" cannot be blank');
-    if (/^top_strengths:[ \t]*\[[ \t]*\][ \t]*$/m.test(text)) {
-      text = text.replace(/^top_strengths:[ \t]*\[[ \t]*\][ \t]*$/m, () => `top_strengths:\n  - ${q(value)}`);
-    } else {
-      text = text.replace(/^(top_strengths:[ \t]*\n[ \t]*-[ \t]*).*$/m, (_m, pre) => pre + q(value));
-    }
+    // Scoped to the real Machine Summary fence: the archived JD can carry its own
+    // `top_strengths:` line, and in the batch layout it precedes the fence.
+    text = editMachineSummaryBody(text, (body) => (/^top_strengths:[ \t]*\[[ \t]*\][ \t]*$/m.test(body)
+      ? body.replace(/^top_strengths:[ \t]*\[[ \t]*\][ \t]*$/m, () => `top_strengths:\n  - ${q(value)}`)
+      : body.replace(/^(top_strengths:[ \t]*\n[ \t]*-[ \t]*).*$/m, (_m, pre) => pre + q(value))));
   }
   if (text === before) throw new Error(`Could not find the ${field} field in ${path.basename(file)}`);
   writeFileSync(file, text, 'utf-8');
@@ -263,8 +263,11 @@ function editLocation(row, field, value) {
   const file = row.reportFile ? path.join(ROOT, 'reports', row.reportFile) : null;
   if (file && existsSync(file)) {
     const text = readFileSync(file, 'utf-8');
-    const hasRow = /\|\s*\*\*Remote\*\*\s*\|/.test(text);
-    const hasMS = /##\s*Machine Summary\s*\n+```/.test(text);
+    // Presence checks run on the report WITHOUT its archived JD (scraped text may
+    // hold a `| **Remote** |` row or a fake Machine Summary).
+    const core = stripArchivedJd(text);
+    const hasRow = /\|\s*\*\*Remote\*\*\s*\|/.test(core);
+    const hasMS = matchMachineSummary(core, /##\s*Machine Summary\s*\n+```/) != null;
     if (hasRow || hasMS) {
       // Location is " / "-separated places (lib/column-contract.mjs); the Remote
       // toggle adds or drops a "Remote" place rather than prefixing prose.
