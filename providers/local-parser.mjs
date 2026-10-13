@@ -255,12 +255,18 @@ async function runLocalParser(entry) {
 
   // cwd is pinned to the project root so a relative script arg resolves to the
   // same file resolveInvocation() validated, regardless of the caller's cwd.
-  const { stdout } = await execFileAsync(command, args, {
+  const { stdout, stderr } = await execFileAsync(command, args, {
     cwd: PROJECT_ROOT,
     timeout,
     maxBuffer,
     windowsHide: true,
   });
+
+  // stderr of a parser that exits 0 used to be dropped, so a warning on a
+  // successful run (linkedin-jobs reports a PARTIAL RESULT after a mid-run rate
+  // limit this way) was a silent success in the scan output.
+  const note = String(stderr || '').trim();
+  if (note) console.error(`⚠️  local-parser: ${entry.name || 'parser'}: ${note.slice(0, 2000)}`);
 
   let payload;
   try {
