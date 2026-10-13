@@ -45,6 +45,8 @@
  *   node scan-ats-full.mjs --verbose            # log per-board fetch failures
  *   node scan-ats-full.mjs --md-out <dir>       # also write a dated markdown digest to <dir>
  *   node scan-ats-full.mjs --resume             # continue an interrupted sweep from its checkpoint
+ *   node scan-ats-full.mjs --seeds yc,a16z      # probe VC-portfolio companies (Greenhouse/Ashby/Lever)
+ *   node scan-ats-full.mjs --seeds yc --refresh-seed-cache # ignore remembered 404s, re-probe everything
  *   node scan-ats-full.mjs --help               # print this usage block and exit
  */
 
@@ -69,7 +71,11 @@ import { buildLevelFilter } from './lib/level-filter.mjs';
 import { fetchJobDescription } from './lib/jd-text.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
-import { SEED_SOURCES, toPortalEntry } from './seeds/vc-portfolios.mjs';
+import { SEED_SOURCES, prioritizeSeedCompanies } from './seeds/vc-portfolios.mjs';
+import {
+  createSeedRunState, emptyUnreachable, formatUnreachable, newSeedStats, observeCtx,
+  probeSeedCompany, resolveSeedGapMs, saveSeedState, unreachableTotal,
+} from './seeds/seed-probe.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { boardKey, loadDeadBoards, recordBoardFailure, recordBoardResult, saveDeadBoards, shouldSkipDeadBoard } from './dead-boards.mjs';
@@ -128,6 +134,12 @@ const RESOLVER_FAILURE_LIMIT = 50;
 const CHECKPOINT_PATH = path.join(DATA_ROOT, 'data/cache/ats-full-checkpoint.json');
 const CHECKPOINT_EVERY = 500;
 const DEAD_BOARDS_PATH = path.join(DATA_ROOT, 'data/dead-boards.tsv');
+// The seed scan's own memory, kept apart from the mass sweep's: it keys on
+// (vendor, slug) rather than careers_url, retires a board after ONE 404 (a
+// portfolio slug that 404s on a vendor is simply not there), and also records
+// which vendor each live company resolved to. See seeds/seed-probe.mjs.
+const SEED_DEAD_BOARDS_PATH = path.join(DATA_ROOT, 'data/seed-dead-boards.tsv');
+const SEED_LIVE_BOARDS_PATH = path.join(DATA_ROOT, 'data/seed-live-boards.tsv');
 
 export function loadCheckpoint(file = CHECKPOINT_PATH) {
   if (!existsSync(file)) return null;
@@ -371,7 +383,7 @@ export const SOURCES = {
 const KNOWN_FLAGS = [
   '--since', '--limit', '--ats', '--seeds', '--history-seeds', '--dry-run', '--liveness',
   '--verbose', '--md-out', '--json', '--include-undated', '--include-blacklisted',
-  '--shuffle', '--resume', '--help', '-h',
+  '--shuffle', '--resume', '--refresh-seed-cache', '--help', '-h',
 ];
 
 // Flags that consume the next argv token as a value (space-separated form —
@@ -391,6 +403,8 @@ const USAGE = `Usage:
   node scan-ats-full.mjs --verbose            # log per-board fetch failures
   node scan-ats-full.mjs --md-out <dir>       # also write a dated markdown digest to <dir>
   node scan-ats-full.mjs --resume             # continue an interrupted sweep from its checkpoint
+  node scan-ats-full.mjs --seeds yc,a16z      # probe VC-portfolio companies (Greenhouse/Ashby/Lever)
+  node scan-ats-full.mjs --seeds yc --refresh-seed-cache # ignore remembered 404s, re-probe everything
   node scan-ats-full.mjs --help               # print this usage block and exit`;
 
 export function parseArgs(argv) {
@@ -473,6 +487,7 @@ export function parseArgs(argv) {
     includeBlacklisted: args.includes('--include-blacklisted'),
     shuffle: args.includes('--shuffle'),
     resume: args.includes('--resume'),
+    refreshSeedCache: args.includes('--refresh-seed-cache'),
   };
 }
 
@@ -836,71 +851,129 @@ export function keepAndMaybeEmit(job, source, sink, blacklist, opts) {
 
 // ── VC portfolio seed scan ──────────────────────────────────────────
 
-// ATS providers that can auto-detect from a careers_url, in probe order.
-// Workday is excluded: its URL format requires a tenant|instance|site triple
-// that can't be derived from a portfolio slug alone.
-const SEED_PROVIDERS = [greenhouse, lever, ashby];
+// The providers a portfolio company can be probed on, by vendor id. Workday is
+// excluded: its URL format requires a tenant|instance|site triple that can't
+// be derived from a portfolio slug alone. The probe order within a company is
+// SEED_VENDOR_ORDER (seeds/vc-portfolios.mjs); this is only the lookup.
+const SEED_PROVIDERS = { greenhouse, ashby, lever };
+
+// The seed memory is written this often (in companies finished), not only at the
+// end: a first run over ~6k YC companies is ~18k requests spread over three
+// rate-limited hosts, and a run that dies halfway should keep the 404s it already
+// paid for.
+const SEED_SAVE_EVERY = 250;
+
+/**
+ * The one-line account of a finished seed scan, for the run log.
+ * @param {ReturnType<typeof newSeedStats>} stats
+ */
+export function formatSeedDone(stats) {
+  if (stats.fetchFailed) return `  ✗ FAILED — no portfolio to probe (${stats.failure})`;
+  const n = (v) => v.toLocaleString('en-US');
+  const vendors = Object.entries(stats.byVendor).map(([v, c]) => `${v} ${n(c)}`).join(' / ');
+  const found = `${n(stats.live)} live${vendors ? ` (${vendors})` : ''}`;
+  const rest = [
+    stats.liveEmpty ? `${n(stats.liveEmpty)} live but empty` : '',
+    `${n(stats.dead)} dead`,
+    stats.unknown ? `${n(stats.unknown)} unknown` : '',
+    stats.duplicate ? `${n(stats.duplicate)} already covered` : '',
+    stats.noCandidate ? `${n(stats.noCandidate)} with no usable slug` : '',
+  ].filter(Boolean).join(', ');
+  const probes = `${n(stats.probes)} probes, ${n(stats.requests)} requests${stats.cachedSkips ? `, ${n(stats.cachedSkips)} remembered-dead skipped` : ''}`;
+  return `  done — ${n(stats.companies)} companies: ${found}, ${rest}; ${n(stats.matches)} matches\n`
+    + `  ${probes}\n`
+    + `  unreachable ${n(unreachableTotal(stats.unreachable))}: ${formatUnreachable(stats.unreachable)}`;
+}
 
 /**
  * Scan a VC portfolio seed source and return matching job offers.
- * Companies are converted to PortalEntry shape, then each ATS provider's
- * detect() is tried in order (greenhouse → lever → ashby). The first hit
- * wins and its fetch() is called — identical to how portals.yml tracked
- * companies flow through scan.mjs.
+ *
+ * Each company is probed on Greenhouse, Ashby and Lever (probeSeedCompany): the
+ * first board that answers with postings wins and its postings go through the
+ * same date / title / location / content / level / blacklist / dedup filters as
+ * a tracked company's. Probing is paced per host, remembers 404s between runs
+ * and reports a degraded run loudly — see seeds/seed-probe.mjs.
+ *
+ * Always returns { offers, errors, total, stats }, including when the portfolio
+ * could not be fetched (`stats.fetchFailed`), so the caller can print a summary
+ * for every outcome.
  *
  * @param {string}   seedId      Key from SEED_SOURCES (e.g. 'yc').
- * @param {object}   opts        Parsed CLI options.
+ * @param {object}   opts        Parsed CLI options. `opts.seedState` (createSeedRunState) carries the
+ *                               memory and host gate across seeds; absent, a throwaway one is made.
  * @param {object}   ctx         HTTP context from makeHttpCtx().
  * @param {Set}      seenUrls    Shared dedup set (mutated in place).
  * @param {string}   label       Human-readable source label for logs.
- * @returns {Promise<object[]>}  New job offers (same shape as ATS scan offers).
+ * @param {{ providers?: Record<string, any>, state?: any, concurrency?: number, onProgress?: (p: { done: number, total: number, matches: number }) => void }} [deps]
+ *   Test seams; the CLI passes only `onProgress`.
+ * @returns {Promise<{ offers: object[], errors: number, total: number, stats: ReturnType<typeof newSeedStats> }>}
  */
-export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
+export async function runSeedScan(seedId, opts, ctx, seenUrls, label, deps = {}) {
   const source = SEED_SOURCES[seedId];
   if (!source) throw new Error(`runSeedScan: unknown seed "${seedId}"`);
 
-  let companies;
-  try {
-    companies = await source.fetch();
-  } catch (err) {
-    console.error(`⚠️  ${seedId}: could not fetch portfolio — ${err.message}`);
-    return [];
-  }
+  const stats = newSeedStats(seedId);
+  const warn = (msg) => {
+    stats.warnings.push(msg);
+    console.error(`⚠️  ${seedId}: ${msg}`);
+  };
 
-  // Apply the --limit cap here too (by slug, consistent with sampleCompanies).
-  const capped = opts.limit < companies.length
-    ? (opts.shuffle
-      ? (() => { const c = companies.slice(); for (let i = c.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [c[i], c[j]] = [c[j], c[i]]; } return c.slice(0, opts.limit); })()
-      : companies.slice(0, opts.limit))
-    : companies;
+  let companies;
+  const diag = {};
+  try {
+    companies = await source.fetch({ onWarn: warn, diag });
+  } catch (err) {
+    stats.fetchFailed = true;
+    stats.failure = err.message;
+    warn(`could not fetch portfolio — ${err.message}`);
+    return { offers: [], errors: 0, total: 0, stats };
+  }
+  if (!Array.isArray(companies)) companies = [];
+  stats.truncated = Boolean(diag.truncated);
+  if (companies.length === 0 && stats.warnings.length === 0) warn('portfolio returned 0 companies — nothing was probed');
+
+  // --limit keeps the companies most worth probing first (hiring ones, active
+  // ones), not simply the newest; a shuffled cap is a random sample instead.
+  // Probing order is the same priority order either way: it is a reordering,
+  // never a filter.
+  const limit = opts.limit ?? Infinity;
+  const work = prioritizeSeedCompanies(sampleCompanies(prioritizeSeedCompanies(companies), limit, opts.shuffle));
+
+  const providers = deps.providers ?? SEED_PROVIDERS;
+  // Without a state from the caller the memory is in-process only: nothing read, nothing written.
+  const state = deps.state ?? opts.seedState ?? createSeedRunState({
+    deadPath: null,
+    livePath: null,
+    persist: false,
+    withKeySlot: createKeyedLimiter(SINGLE_HOST_CONCURRENCY),
+  });
+  const probeCtx = observeCtx(ctx, stats);
 
   const cutoff = Date.now() - opts.sinceDays * 86_400_000;
   const offers = [];
-  let errors = 0;
+  const sourceName = `${seedId}-seed`;
+  const tally = { live: 'live', empty: 'liveEmpty', dead: 'dead', unknown: 'unknown', none: 'noCandidate', duplicate: 'duplicate' };
+  let finished = 0;
 
-  await parallelEach(capped, CONCURRENCY, async (company) => {
-    const entry = toPortalEntry(company);
-    if (!entry.careers_url) return;
+  await parallelEach(work, deps.concurrency ?? CONCURRENCY, async (company) => {
+    const probe = await probeSeedCompany(company, {
+      seedId,
+      providers,
+      ctx: probeCtx,
+      state,
+      stats,
+      // 404 is the expected answer for nearly every guessed slug, so only the
+      // failures that say something about the host are worth a line.
+      onFailure: opts.verbose
+        ? (co, vendor, slug, cls, err) => { if (cls !== '404') console.error(`  ✗ ${seedId}/${co.name} [${vendor}/${slug}] ${cls}: ${err.message}`); }
+        : undefined,
+    });
+    stats.companies++;
+    stats[tally[probe.outcome]]++;
+    if (!probe.board) return;
 
-    // Try each ATS provider's detect() — first hit wins.
-    let provider = null;
-    for (const p of SEED_PROVIDERS) {
-      try {
-        if (p.detect?.(entry)) { provider = p; break; }
-      } catch { /* no-op */ }
-    }
-    if (!provider) return; // No ATS detected — skip silently (or log in --verbose).
-
-    let jobs;
-    try {
-      jobs = await provider.fetch(entry, ctx);
-    } catch (err) {
-      errors++;
-      if (opts.verbose) console.error(`  ✗ ${seedId}/${entry.name}: ${err.message}`);
-      return;
-    }
-
-    const sourceName = `${seedId}-seed`;
+    const { provider, jobs, vendor } = probe.board;
+    stats.byVendor[vendor] = (stats.byVendor[vendor] || 0) + 1;
     for (const job of jobs) {
       if (!job.url || !job.title) continue;
       const dateClass = classifyPostingDate(job, cutoff);
@@ -910,13 +983,13 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
         titleFilter: opts.titleFilter,
         locationFilter: opts.locationFilter,
         contentFilter: opts.contentFilter,
-        companySlug: entry.name,
+        companySlug: company.name,
         titleFilterConfig: opts.titleFilterConfig,
       })) continue;
-      // provider is always one of SEED_PROVIDERS (greenhouse/lever/ashby) here —
-      // none currently define dedupKey, so this is the same normalizeUrlForDedup
-      // behavior as before; kept via the shared helper so the two dedup sites
-      // in this file can't quietly drift apart (#3439).
+      // provider is always one of greenhouse/lever/ashby here — none currently
+      // define dedupKey, so this is the same normalizeUrlForDedup behavior as
+      // before; kept via the shared helper so the two dedup sites in this file
+      // can't quietly drift apart (#3439).
       const dedupToken = dedupTokenFor(job, provider);
       if (seenUrls.has(dedupToken)) continue;
       // Level ceiling: synchronous unless the JD must be fetched; after a fetch,
@@ -927,9 +1000,34 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
       seenUrls.add(dedupToken);
       keepAndMaybeEmit(job, sourceName, offers, opts.blacklist, opts);
     }
+  }, () => {
+    finished++;
+    if (finished % SEED_SAVE_EVERY === 0) {
+      const saved = saveSeedState(state);
+      if (saved.error) warn(`could not save the seed memory (${saved.error}) — this run's 404s will be re-probed next time`);
+    }
+    if (finished % 200 === 0 || finished === work.length) {
+      deps.onProgress?.({ done: finished, total: work.length, matches: offers.length });
+    }
   });
 
-  return { offers, errors, total: capped.length };
+  stats.matches = offers.length;
+  stats.abandonedHosts = state.gate.abandonedHosts();
+  const saved = saveSeedState(state);
+  if (saved.error) warn(`could not save the seed memory (${saved.error}) — this run's 404s will be re-probed next time`);
+
+  // Everything below is the run saying out loud that it did not see the whole
+  // portfolio. Each is a different failure with a different remedy.
+  if (stats.abandonedHosts.length) {
+    warn(`${stats.abandonedHosts.join(', ')} kept refusing (429/403) and was abandoned for the rest of the run — ${stats.skippedAbandoned} probes skipped, not remembered as dead; rerun later`);
+  } else if (stats.unreachable['429'] + stats.unreachable['403'] > 0) {
+    warn(`${stats.unreachable['429']} probes were throttled (429) and ${stats.unreachable['403']} refused (403) — those boards are unknown, not dead`);
+  }
+  if (stats.unknown > 0) {
+    warn(`${stats.unknown} companies have no known board and at least one candidate failed for a reason other than "no such board" (${formatUnreachable(stats.unreachable)}) — they are retried next run`);
+  }
+
+  return { offers, errors: unreachableTotal(stats.unreachable), total: work.length, stats };
 }
 
 /**
@@ -1231,7 +1329,7 @@ async function main() {
   const seedsSummary = opts.seeds.length ? `seeds: ${opts.seeds.join(', ')}` : '';
   const historySummary = opts.historySeeds ? 'history seeds' : '';
   const sourcesSummary = [atsSummary, seedsSummary, historySummary].filter(Boolean).join(' | ');
-  log(`Reverse ATS scan — ${sourcesSummary} | since ${opts.sinceDays}d${opts.limit < Infinity ? ` | limit ${opts.limit}/ats` : ''}${opts.shuffle ? ' | shuffled' : ''}${opts.includeUndated ? ' | +undated' : ''}${opts.liveness ? ' | liveness' : ''}${domainFilter ? ' | domain gate' : ''}${opts.dryRun ? ' | DRY RUN' : ''}`);
+  log(`Reverse ATS scan — ${sourcesSummary} | since ${opts.sinceDays}d${opts.limit < Infinity ? ` | limit ${opts.limit}/ats` : ''}${opts.shuffle ? ' | shuffled' : ''}${opts.includeUndated ? ' | +undated' : ''}${opts.seeds.length && opts.refreshSeedCache ? ' | seed cache refresh' : ''}${opts.liveness ? ' | liveness' : ''}${domainFilter ? ' | domain gate' : ''}${opts.dryRun ? ' | DRY RUN' : ''}`);
 
   // extraTokensFor: a historical scan-history.tsv row records the URL it was
   // FIRST seen on, so without this a Workday requisition seen last run under
@@ -1727,16 +1825,40 @@ async function main() {
   }
 
   // ── VC portfolio seed sources (--seeds flag) ───────────────────────
+  /** @type {Record<string, ReturnType<typeof newSeedStats>>} */
+  const seedStats = {};
+  if (opts.refreshSeedCache && !opts.seeds.length) {
+    console.error('⚠️  --refresh-seed-cache has no effect without --seeds');
+  }
+  if (opts.seeds.length) {
+    // One memory and one set of per-host gates for every seed in the run, so a
+    // slug YC and a16z both lead to is asked about once, and a host that
+    // refused during the YC walk is still being avoided for a16z. A dry run
+    // reads the memory (so it previews the real run) and never writes it.
+    opts.seedState = createSeedRunState({
+      deadPath: SEED_DEAD_BOARDS_PATH,
+      livePath: SEED_LIVE_BOARDS_PATH,
+      refresh: opts.refreshSeedCache,
+      persist: !opts.dryRun,
+      withKeySlot: createKeyedLimiter(SINGLE_HOST_CONCURRENCY),
+      // Six in flight AND no more than ~20 request starts a second per host;
+      // CAREER_OPS_SEED_HOST_GAP_MS tunes the spacing (0 turns it off).
+      minGapMs: resolveSeedGapMs(process.env.CAREER_OPS_SEED_HOST_GAP_MS),
+      onAbandon: (host, cls, count) => console.error(`\n⛔ ${host} answered ${cls} ${count} times in a row — no more requests to it this run. Its remaining probes are skipped (and not remembered as dead); rerun later.`),
+    });
+  }
   for (const seedId of opts.seeds) {
     const seedSource = SEED_SOURCES[seedId];
     log(`\n🌱 ${seedSource.label} (${seedId}-seed) — fetching portfolio...`);
-    const result = await runSeedScan(seedId, opts, ctx, seenUrls, seedSource.label);
-    if (result && result.offers) {
-      totalCompaniesScanned += result.total || 0;
-      totalErrors += result.errors || 0;
-      newOffers.push(...result.offers);
-      log(`  done — ${result.total} companies probed, ${result.offers.length} matches (${result.errors} errors)`);
-    }
+    const result = await runSeedScan(seedId, opts, ctx, seenUrls, seedSource.label, {
+      onProgress: ({ done, total, matches }) => progress(`  ${done}/${total} companies probed, ${matches} matches\r`),
+    });
+    seedStats[seedId] = result.stats;
+    totalCompaniesScanned += result.total;
+    totalErrors += result.errors;
+    newOffers.push(...result.offers);
+    // The progress ticker ends in a carriage return, not a newline.
+    log(`\n${formatSeedDone(result.stats)}`);
   }
 
   const blacklistResult = filterBlacklistedOffers(newOffers, blacklist, { includeBlacklisted: opts.includeBlacklisted });
@@ -1747,6 +1869,21 @@ async function main() {
   printScanSummaryHeader('Reverse ATS Scan', date, log);
   log(`Companies scanned:  ${totalCompaniesScanned}${capHit ? ` of ${totalCompaniesAvailable} (capped)` : ''}`);
   log(`Unreachable boards: ${totalErrors}`);
+  const seedIds = Object.keys(seedStats);
+  if (seedIds.length) {
+    const seedUnreachable = emptyUnreachable();
+    for (const id of seedIds) for (const k of Object.keys(seedUnreachable)) seedUnreachable[k] += seedStats[id].unreachable[k] || 0;
+    log(`  seed boards:      ${formatUnreachable(seedUnreachable)}`);
+    for (const id of seedIds) {
+      const st = seedStats[id];
+      if (st.fetchFailed) { log(`Seed ${id}:          FAILED — ${st.failure}`); continue; }
+      const vendors = Object.entries(st.byVendor).map(([v, c]) => `${v} ${c}`).join(' / ');
+      log(`Seed ${id}:          ${st.companies} companies | ${st.live} live${vendors ? ` (${vendors})` : ''}, ${st.liveEmpty} empty, ${st.dead} dead, ${st.unknown} unknown | ${st.probes} probes, ${st.cachedSkips} remembered-dead skipped`);
+    }
+    for (const id of seedIds) {
+      for (const w of seedStats[id].warnings) log(`⚠️  Seed ${id}: ${w}`);
+    }
+  }
   if (cappedBoards) log(`Page-capped boards: ${cappedBoards} (partial coverage — later postings not scanned)`);
   // Reported whenever the gate RAN, including when it skipped nothing: a zero
   // there is the useful reading that the domain list admitted every board, and
@@ -1861,6 +1998,9 @@ async function main() {
       postingsAnnotatedBlacklisted: blacklistResult.annotatedBlacklisted,
       postingsDroppedContent: droppedContent,
       unreachableBoards: totalErrors,
+      // Per seed source: what the probe found and what it could not reach, by
+      // cause, plus the degraded-run warnings. Empty when --seeds is off.
+      seeds: seedStats,
       retiredBoardsSkipped: totalRetiredBoardsSkipped,
       cappedBoards,
       // `domainFilterActive` is not derivable from the two counts: zero skipped

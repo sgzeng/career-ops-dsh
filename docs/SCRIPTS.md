@@ -864,9 +864,22 @@ npm run scan:yc                                # Y Combinator portfolio only (--
 ```
 
 `--seeds <list>` fetches comma-separated VC portfolio sources (e.g. `yc,a16z`)
-and probes those companies via the ATS providers instead of (or in addition
-to) the directory walk. Other flags: `--verbose`, `--json`, `--include-undated`,
-`--shuffle`.
+and probes those companies on Ashby, Greenhouse and Lever instead of (or in
+addition to) the directory walk. Other flags: `--verbose`, `--json`,
+`--include-undated`, `--shuffle`.
+
+The seed scan remembers what it learned in `data/seed-dead-boards.tsv` (a 404
+for a vendor/slug, re-asked 15–45 days later) and `data/seed-live-boards.tsv`
+(the vendor each live company resolved to), so a weekly run asks about the live
+boards and a rotating slice of the dead ones, not all ~19k candidates.
+`--refresh-seed-cache` ignores that memory for one run; `--dry-run` reads it and
+never writes it. Requests are capped at 6 in flight per API host with 50 ms
+between starts (`CAREER_OPS_SEED_HOST_GAP_MS`, `0` disables); a host that
+answers 429/403 ten times running is abandoned for the run. The summary splits
+"Unreachable boards" into 404 / 403 / 429 / 5xx / timeout / other and repeats any
+degraded-run warning (a truncated YC walk, a throttled host, a parse that found
+far fewer a16z companies than the ~870 on the page) inside the
+`::career-ops:scan-summary::` block. See [`seeds/README.md`](../seeds/README.md).
 
 `--resume` continues an interrupted sweep from its checkpoint, and refuses when
 the run would mix two configurations: different `--ats`, `--limit` or

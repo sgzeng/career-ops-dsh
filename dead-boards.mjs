@@ -28,9 +28,26 @@ export function boardKey(entry) {
   return String(entry?.careers_url || entry?.name || '').trim();
 }
 
-export function shouldSkipDeadBoard(rows, ats, board, now = Date.now()) {
+/**
+ * Whether a board is retired right now.
+ *
+ * The defaults are the mass-sweep policy (three consecutive 404s, a 30-day
+ * window). A caller whose 404 is already conclusive can lower `minMisses`, and
+ * one that wants re-probes spread out can make `recheckDays` a function of the
+ * row — the seed scan does both (seeds/seed-probe.mjs).
+ *
+ * @param {Map<string, object>} rows - Dead-board rows from loadDeadBoards().
+ * @param {string} ats - Source id.
+ * @param {string} board - Board key.
+ * @param {number} [now] - Clock, for tests.
+ * @param {{ minMisses?: number, recheckDays?: number | ((row: object) => number) }} [policy]
+ * @returns {boolean}
+ */
+export function shouldSkipDeadBoard(rows, ats, board, now = Date.now(), { minMisses = DEAD_BOARD_MISSES, recheckDays = DEAD_BOARD_RECHECK_DAYS } = {}) {
   const row = rows.get(key(ats, board));
-  return Boolean(row && row.misses >= DEAD_BOARD_MISSES && now - row.lastChecked < DEAD_BOARD_RECHECK_DAYS * 86_400_000);
+  if (!row || row.misses < minMisses) return false;
+  const days = typeof recheckDays === 'function' ? recheckDays(row) : recheckDays;
+  return now - row.lastChecked < days * 86_400_000;
 }
 
 export function recordBoardResult(rows, ats, board, status, now = Date.now()) {

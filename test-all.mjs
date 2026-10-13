@@ -5637,8 +5637,12 @@ try {
     fail('parseSeedEntries with source="yc" did not return expected entries');
   }
 
-  // ── 2. a16z HTML parsing ───────────────────────────────────────────
-  // Sample HTML fixture with data-company-name attributes (the most reliable strategy).
+  // ── 2. a16z HTML parsing — the data-company-name FALLBACK ──────────
+  // The real portfolio page carries no data-company-name; it ships an inline
+  // `window.a16z_portfolio_companies` list, and that shape (plus the other
+  // fallbacks) is covered against a real excerpt in tests/vc-portfolios-a16z.test.mjs.
+  // This synthetic fixture only pins the attribute fallback, which is still tried
+  // when the inline list is absent.
   const a16zHtml = `
     <div class="portfolio-grid">
       <a href="https://github.com" data-company-name="GitHub" data-company-url="https://github.com" class="portfolio-card"></a>
@@ -5652,7 +5656,7 @@ try {
     a16zEntries.some(e => e.name === 'GitHub' && e.source === 'a16z' && e.url === 'https://github.com') &&
     a16zEntries.some(e => e.name === 'Lyft' && e.source === 'a16z') &&
     a16zEntries.some(e => e.name === 'Slack' && e.source === 'a16z');
-  if (a16zOk) pass('parseA16zPayload: extracts companies from data-company-name HTML attributes');
+  if (a16zOk) pass('parseA16zPayload: fallback strategy still extracts companies from data-company-name HTML attributes');
   else fail(`parseA16zPayload: output wrong — got ${a16zEntries.length} entries: ${JSON.stringify(a16zEntries.map(e => e.name))}`);
 
   // parseSeedEntries() delegating to a16z.
@@ -5698,7 +5702,7 @@ try {
   // ── 5. toPortalEntry — no ATS hint, slug-based fallback ───────────
   const noHint = toPortalEntry({ name: 'NewCo', slug: 'newco', url: 'https://newco.io', source: 'yc' });
   const noHintOk =
-    noHint.careers_url === 'https://job-boards.greenhouse.io/newco' && // Greenhouse is the default probe
+    noHint.careers_url === 'https://job-boards.greenhouse.io/newco' && // single-URL form; the scan itself probes every vendor (toPortalCandidates)
     noHint.name === 'NewCo';
   if (noHintOk) pass('toPortalEntry: no ATS hint falls back to Greenhouse URL from slug (provider.detect() validates at scan time)');
   else fail(`toPortalEntry fallback wrong — got: ${noHint.careers_url}`);
