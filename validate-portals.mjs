@@ -487,6 +487,54 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
+  // company_aliases: canonical company name -> alias (or list of aliases), read by
+  // scan.mjs and merge-tracker.mjs for company identity. Both readers ignore what
+  // they cannot use rather than fail, so a malformed entry looks like coverage
+  // and does nothing; that is why it is named here.
+  if (config.company_aliases !== undefined && config.company_aliases !== null) {
+    if (!isObject(config.company_aliases)) {
+      add(errors, 'company_aliases', 'must be an object of canonical company name -> alias list');
+    } else {
+      const canonicals = new Map();
+      for (const canonical of Object.keys(config.company_aliases)) {
+        if (!normalizeName(canonical)) {
+          add(errors, 'company_aliases', 'canonical company name must not be empty');
+        } else {
+          canonicals.set(normalizeName(canonical), canonical);
+        }
+      }
+      const claimedBy = new Map();
+      for (const [canonical, value] of Object.entries(config.company_aliases)) {
+        // `Fin:` and `Fin: []` are fine: they pin the canonical name's identity.
+        const list = value === null || value === undefined ? [] : (Array.isArray(value) ? value : [value]);
+        const path = `company_aliases.${canonical}`;
+        for (const [idx, rawAlias] of list.entries()) {
+          // A bare YAML number (`3000: ...` style names) reads as the string the
+          // scanner compares it as.
+          const alias = typeof rawAlias === 'number' ? String(rawAlias) : rawAlias;
+          if (typeof alias !== 'string' || alias.trim() === '') {
+            add(errors, Array.isArray(value) ? `${path}[${idx}]` : path, 'alias must be a non-empty string');
+            continue;
+          }
+          const key = normalizeName(alias);
+          if (key === normalizeName(canonical)) {
+            add(warnings, path, `alias "${alias}" is the canonical name itself (no effect)`);
+          } else if (canonicals.has(key)) {
+            add(warnings, path, `alias "${alias}" is also a canonical name (${canonicals.get(key)}); canonical names keep their own identity, so this alias is ignored`);
+          } else {
+            if (!claimedBy.has(key)) claimedBy.set(key, new Set());
+            claimedBy.get(key).add(canonical);
+          }
+        }
+      }
+      for (const [key, owners] of claimedBy) {
+        if (owners.size > 1) {
+          add(warnings, 'company_aliases', `alias "${key}" is claimed by ${[...owners].join(' and ')}; an ambiguous alias is ignored, so it merges nothing`);
+        }
+      }
+    }
+  }
+
   if (config.search_queries !== undefined) {
     if (!Array.isArray(config.search_queries)) {
       add(errors, 'search_queries', 'search_queries must be an array when set');

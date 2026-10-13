@@ -70,6 +70,7 @@ import { resolveColumns, parseTrackerRow, normalizeTextKey, extractReqNumber, RE
 import { workdayDedupKey, stripWorkdayRepostSuffix, isWorkdayJobUrl } from './providers/workday.mjs';
 import { normalizeCompany } from './tracker-utils.mjs';
 import { normalizeCompanyName } from './invite-match.mjs';
+import { buildCompanyIdentity, isRedundantTitleQualifier } from './identity-key.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldAccents } from './title-keywords.mjs';
 import { buildContentRescue } from './lib/content-rescue.mjs';
@@ -2151,12 +2152,12 @@ export function loadSeenUrls(policy = {}, {
 }
 
 /**
- * Normalize a company label when no alias map is configured.
+ * Normalize a company label before alias lookup.
  *
  * This deliberately does only the pre-existing behavior: trim and lowercase the
  * raw company name. `buildCompanyCanonicalizer` wraps this with the optional
- * alias map so installs without `company_aliases` keep byte-for-byte dedupe
- * semantics.
+ * alias map and the trailing-qualifier fold, so a label with no parenthetical
+ * keeps byte-for-byte dedupe semantics.
  *
  * @param {unknown} name - Raw company value from a tracker row or provider job.
  * @returns {string} Lowercased, trimmed company key.
@@ -2174,8 +2175,15 @@ function defaultCompanyNormalizer(name) {
  * tracker/brand label, for example "Fin". Without it, the company+role dedupe
  * key never matches the tracker and the same role is re-scanned every run.
  *
+ * A trailing parenthetical on a label is folded away before comparing, whether
+ * or not an alias map is configured: "NVIDIA (Product Security / AI Red Team)"
+ * is the label the user gave a watchlist entry, and the same role on LinkedIn
+ * says "NVIDIA". An alias written exactly as the label (parenthetical
+ * included) still wins over the fold. See identity-key.mjs for the rule and its
+ * limits; the tracker writer (merge-tracker.mjs) uses the same function.
+ *
  * Unknown names pass through as plain lowercased text, so behavior is unchanged
- * for companies with no alias entry.
+ * for companies with no alias entry and no trailing parenthetical.
  *
  * Canonical names always keep their own identity when an alias collides with
  * one. An alias claimed by multiple canonical companies also passes through
@@ -2187,50 +2195,13 @@ function defaultCompanyNormalizer(name) {
  *   company labels.
  */
 export function buildCompanyCanonicalizer(aliases) {
-  const map = new Map();
-  if (aliases && typeof aliases === 'object' && !Array.isArray(aliases)) {
-    const entries = Object.entries(aliases);
-    const canonicalKeys = new Set();
-
-    // Canonical names always own their identity, independent of YAML key order.
-    for (const [canonical] of entries) {
-      const canon = defaultCompanyNormalizer(canonical);
-      if (!canon) continue;
-      map.set(canon, canon);
-      canonicalKeys.add(canon);
-    }
-
-    const aliasTargets = new Map();
-    for (const [canonical, list] of entries) {
-      const canon = defaultCompanyNormalizer(canonical);
-      if (!canon) continue;
-      const arr = Array.isArray(list) ? list : [list];
-      for (const a of arr) {
-        const alias = defaultCompanyNormalizer(a);
-        if (!alias || canonicalKeys.has(alias)) continue;
-        if (!aliasTargets.has(alias)) aliasTargets.set(alias, new Set());
-        aliasTargets.get(alias).add(canon);
-      }
-    }
-
-    // Ambiguous aliases fail open as their raw normalized label. This may allow
-    // a duplicate through, but it cannot silently suppress another company.
-    for (const [alias, targets] of aliasTargets) {
-      if (targets.size === 1) map.set(alias, targets.values().next().value);
-    }
-  }
-
-  /**
-   * Canonicalize one raw company label through the alias map.
-   *
-   * @param {unknown} name - Raw company value from a tracker row or provider job.
-   * @returns {string} Canonical lowercased company key.
-   */
-  return function canonicalizeCompany(name) {
-    const key = defaultCompanyNormalizer(name);
-    return map.get(key) ?? key;
-  };
+  return buildCompanyIdentity(aliases, { normalize: defaultCompanyNormalizer });
 }
+
+// What every dedup entry point uses when its caller passes no canonicalizer: no
+// aliases, same qualifier fold. One function for seeding and for candidates, so
+// the two sides of a comparison cannot disagree about a label.
+const defaultCompanyCanonicalizer = buildCompanyCanonicalizer(undefined);
 
 const ROLE_LOCATION_SUFFIXES = new Set([
   'amer',
@@ -2367,9 +2338,10 @@ function isRoleLocationSuffix(tag) {
  * IDs live in URLs rather than titles, so this identity remains URL-agnostic.
  *
  * The normalizer lowercases the title, strips trailing location/remote
- * parenthetical/bracketed tags such as "(Berlin)" and "[Remote]", then
- * collapses punctuation and whitespace so em dash vs hyphen or double spaces do
- * not split a key.
+ * parenthetical/bracketed tags such as "(Berlin)" and "[Remote]", strips a
+ * trailing qualifier that only spells out an acronym already in the title
+ * ("... RL (Reinforcement Learning)"), then collapses punctuation and
+ * whitespace so em dash vs hyphen or double spaces do not split a key.
  *
  * This helper does not infer posting churn or detect repost clusters. Those
  * post-tracking facts remain the responsibility of detect-reposts.mjs and the
@@ -2394,6 +2366,15 @@ export function normalizeRoleForDedup(role) {
     // Bracketed: "Engineering Manager (Remote)", "… [US]".
     const bracketed = title.match(/\s*[\[(]([^[\]()]+)[\])]\s*$/);
     if (bracketed && isRoleLocationSuffix(bracketed[1])) {
+      title = title.slice(0, bracketed.index).trimEnd();
+      continue;
+    }
+    // Bracketed, and only repeating the title: "Cybersecurity RL (Reinforcement
+    // Learning)" is the same role as "Cybersecurity RL". The tracker kept the
+    // short form, LinkedIn the long one, and the role was evaluated twice.
+    // Narrow on purpose — a team or product qualifier is NOT dropped; see
+    // isRedundantTitleQualifier for why.
+    if (bracketed && isRedundantTitleQualifier(title.slice(0, bracketed.index), bracketed[1])) {
       title = title.slice(0, bracketed.index).trimEnd();
       continue;
     }
@@ -2508,7 +2489,7 @@ export function normalizeLocationForDedup(location) {
  *   → the bare two-component key.
  * @returns {string} Stable dedupe key: `company::role`, or `company::role@@places`.
  */
-export function companyRoleDedupKey(company, role, canonicalize = defaultCompanyNormalizer, location = undefined) {
+export function companyRoleDedupKey(company, role, canonicalize = defaultCompanyCanonicalizer, location = undefined) {
   const base = `${canonicalize(company)}::${normalizeRoleForDedup(role)}`;
   const places = normalizeLocationForDedup(location);
   // `@@` and not a third `::`: normalizeTextKey strips punctuation, so neither
@@ -2791,7 +2772,7 @@ function recordLanguages(languagesByKey, key, requisitions, languages) {
  *   Raw text of each dedupe source; absent sources default to empty.
  * @param {{recheckAfterDays?: number|null, today?: string}} [policy] - Scan-history
  *   recheck policy, shared with `loadSeenUrls`.
- * @param {(name: unknown) => string} [canonicalize=defaultCompanyNormalizer] -
+ * @param {(name: unknown) => string} [canonicalize=defaultCompanyCanonicalizer] -
  *   Company canonicalizer shared with scan-side dedupe.
  * @param {{includeLocation?: boolean, locatedBases?: Set<string>|null}} [options] -
  *   When `includeLocation` is true (`scan_history.dedup_include_location`), each
@@ -2815,7 +2796,7 @@ function recordLanguages(languagesByKey, key, requisitions, languages) {
  * scan-history never recorded them for stays unknown.
  * @returns {Set<string>} Existing company+role dedupe keys.
  */
-export function collectSeenCompanyRoles(sources = {}, policy = {}, canonicalize = defaultCompanyNormalizer, { includeLocation = false, locatedBases = null, requisitionsByBase = null, locatedRequisitionsByBase = null, languagesByBase = null, locatedLanguagesByBase = null } = {}) {
+export function collectSeenCompanyRoles(sources = {}, policy = {}, canonicalize = defaultCompanyCanonicalizer, { includeLocation = false, locatedBases = null, requisitionsByBase = null, locatedRequisitionsByBase = null, languagesByBase = null, locatedLanguagesByBase = null } = {}) {
   const { applicationsText = '', scanHistoryText = '', pipelineText = '' } = sources;
   const seen = new Set();
   const postingAttributes = collectPostingAttributes(scanHistoryText);
@@ -2832,8 +2813,8 @@ export function collectSeenCompanyRoles(sources = {}, policy = {}, canonicalize 
     const key = companyRoleDedupKey(c, r, canonicalize, includeLocation ? location : undefined);
     seen.add(key);
     // Reverse index, recorded where the key is BUILT rather than by splitting a
-    // finished key back apart. `defaultCompanyNormalizer` only trims and
-    // lowercases, so a company label may legitimately contain the `@@`
+    // finished key back apart. A canonical key only trims, lowercases and folds
+    // a trailing qualifier, so a company label may legitimately contain the `@@`
     // separator; a parsed base would then be wrong for exactly the rows that
     // matter. Skipped entirely when the flag is off — no key can carry a
     // location, so the set stays empty and every reader of it is inert.
@@ -2955,7 +2936,7 @@ function readIfExists(filePath) {
  * pipeline (CI only avoids this because those files are gitignored).
  *
  * @param {string} [appsPath=APPLICATIONS_PATH] - Applications tracker path.
- * @param {(name: unknown) => string} [canonicalize=defaultCompanyNormalizer] -
+ * @param {(name: unknown) => string} [canonicalize=defaultCompanyCanonicalizer] -
  *   Company canonicalizer shared with scan-side dedupe.
  * @param {object} [options] - Additional sources and policy.
  * @param {{recheckAfterDays?: number|null, today?: string}} [options.policy] -
@@ -2971,7 +2952,7 @@ function readIfExists(filePath) {
  */
 export function loadSeenCompanyRoles(
   appsPath = APPLICATIONS_PATH,
-  canonicalize = defaultCompanyNormalizer,
+  canonicalize = defaultCompanyCanonicalizer,
   { policy = {}, scanHistoryPath = SCAN_HISTORY_PATH, pipelinePath = PIPELINE_PATH, includeLocation = false, locatedBases = null } = {},
 ) {
   return collectSeenCompanyRoles({
@@ -3288,13 +3269,13 @@ export function loadFingerprintHistory(historyPath = SCAN_HISTORY_PATH) {
  *
  * @param {{recheckAfterDays?: number|null, today?: string}} [policy] -
  *   Scan-history recheck policy, shared by the URL and company+role sets.
- * @param {(name: unknown) => string} [canonicalize=defaultCompanyNormalizer] -
+ * @param {(name: unknown) => string} [canonicalize=defaultCompanyCanonicalizer] -
  *   Company canonicalizer for the role keys.
  * @returns {{seen: Set<string>, identityPromotableUrls: Map<string, Set<string|null>>, recheckEligible: number, released: Set<string>, seenUrlVariants: Map<string, Array<{languages: string[], title: string}>>, seenCompanyRoles: Set<string>, seenCompanyRoleBases: Set<string>, seenCompanyRoleRequisitions: Map<string, Set<string>>, locatedRequisitionsByBase: Map<string, Set<string>>, seenCompanyRoleLanguages: Map<string, Set<string>>, locatedLanguagesByBase: Map<string, Set<string>>, fingerprintHistory: Array<{url: string, dateStr: string, company: string, title: string, fingerprint: string}>}}
  */
 // Same path seam as loadSeenUrls/appendToPipeline: anchored defaults, explicit
 // paths for a caller with its own lane or a test with a fixture.
-export function loadDedupSnapshot(policy = {}, canonicalize = defaultCompanyNormalizer, {
+export function loadDedupSnapshot(policy = {}, canonicalize = defaultCompanyCanonicalizer, {
   scanHistoryPath = SCAN_HISTORY_PATH,
   pipelinePath = PIPELINE_PATH,
   applicationsPath = APPLICATIONS_PATH,

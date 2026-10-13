@@ -1969,8 +1969,32 @@ search_queries:
 # produce `postingChurn` evidence; detect-reposts.mjs and company-history.mjs own
 # that post-tracking layer.
 #
+# A trailing "(qualifier)" on a company name is folded away for the comparison
+# without any entry here: "NVIDIA (Product Security / AI Red Team)" -- the label
+# you gave a watchlist entry above -- is the same company as the "NVIDIA" a
+# LinkedIn copy of the role carries, and "TrendAI (Trend Micro)" is "TrendAI".
+# Stored names are never rewritten. An alias is looked up on the name AS WRITTEN
+# first, so listing a spelling with its parenthetical keeps it apart from the
+# bare name (two different companies that differ only by a "(qualifier)").
+# A name that is only a qualifier, or the `?` unknown-employer marker, is never
+# folded.
+#
+# What the fold cannot do is connect two genuinely different spellings; that is
+# what this map is for. Typical cases are a brand vs the legal entity your tracker
+# kept ("Cerebras" vs "Cerebras Systems", "Cylake" vs "Cylake, Inc") and a rename
+# ("xAI" vs "SpaceXAI", "TrendAI" vs "Trend Micro").
+#
+# merge-tracker.mjs reads the same map (from the portals.yml in the tracker's
+# workspace, or CAREER_OPS_PORTALS), so a re-evaluation of a role already in the
+# tracker updates that row instead of adding a second one. It matches only in the
+# company+role tier, and the row keeps the name it was filed under.
+#
+# An alias claimed by two canonical names is ignored (config order must never
+# decide which company a posting belongs to); `node validate-portals.mjs` warns.
+#
 # company_aliases:
 #   Fin: [Intercom]
+#   TrendAI: [Trend Micro]
 
 # ── aggregator: true (optional, per entry) ────────────────────────────
 # Marks a tracked_companies entry as a MULTI-EMPLOYER BOARD rather than one

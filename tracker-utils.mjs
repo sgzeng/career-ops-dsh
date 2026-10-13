@@ -123,6 +123,32 @@ export function normalizeCompany(name) {
 }
 
 /**
+ * Read `company_aliases` from a portals.yml, for the tracker writer's company
+ * identity (identity-key.mjs `buildCompanyIdentity`). The scanner reads the same
+ * key from the same file, so the two agree on which spellings are one employer.
+ *
+ * Fails OPEN on purpose: a missing or unparseable portals.yml means "no aliases",
+ * never "stop merging". The cost of an unreadable file is a duplicate row the
+ * user can see; the cost of refusing to merge is a lost evaluation.
+ *
+ * @param {string|null|undefined} portalsPath - Path to portals.yml.
+ * @param {{onError?: (err: Error) => void}} [options] - Told about a parse
+ *   failure (a missing file is not one).
+ * @returns {Record<string, unknown>} Canonical name → alias list, or {}.
+ */
+export function loadCompanyAliases(portalsPath, { onError } = {}) {
+  if (!portalsPath || !existsSync(portalsPath)) return {};
+  try {
+    const doc = yaml.load(readFileSync(portalsPath, 'utf-8'));
+    const aliases = doc && typeof doc === 'object' ? doc.company_aliases : undefined;
+    return aliases && typeof aliases === 'object' && !Array.isArray(aliases) ? aliases : {};
+  } catch (err) {
+    onError?.(err);
+    return {};
+  }
+}
+
+/**
  * Control characters that are invisible in every rendered view of the tracker.
  *
  * C0 and DEL and C1, minus the three whitespace controls: `\t` is ordinary

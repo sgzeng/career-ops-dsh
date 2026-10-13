@@ -44,7 +44,8 @@ import { atsVendorOf } from './ats-vendor.mjs';
 // for the same reason normalizeCompany lives in tracker-utils: a second private
 // list is how company identity drifts between scripts (#2445, #3665).
 import { LEGAL_SUFFIXES, GENERIC_DESCRIPTORS } from './invite-match.mjs';
-import { resolveTrackerPath, resolveWorkspaceRoot, resolvePdfIndexPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell, loadCanonicalStates, findDeadReportLink, rebuildRow } from './tracker-utils.mjs';
+import { buildCompanyIdentity, dropRedundantTitleQualifier } from './identity-key.mjs';
+import { resolveTrackerPath, resolveWorkspaceRoot, resolvePdfIndexPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, loadCompanyAliases, cell, loadCanonicalStates, findDeadReportLink, rebuildRow } from './tracker-utils.mjs';
 // Canonical posting-URL key. Kept in its own module so scan.mjs / scan-history
 // can adopt the same key later without the definitions drifting.
 import { normalizeUrl, isAggregatorUrl, aggregatorPostingId } from './url-key.mjs';
@@ -319,6 +320,7 @@ function formatUrlCell(raw, previousCell = '') {
  * @param {string} [options.additionsDir] - Pending TSVs; defaults to `<dataRoot>/batch/tracker-additions`.
  * @param {string} [options.batchStateFile] - batch-state.tsv; defaults to `<dataRoot>/batch/batch-state.tsv`.
  * @param {string} [options.pdfIndexFile] - PDF manifest; defaults to `<workspace>/data/pdf-index.tsv`.
+ * @param {string} [options.portalsFile] - portals.yml, read only for `company_aliases`; defaults to `<dataRoot>/portals.yml`. Absent or unreadable means no aliases.
  * @param {string} [options.lockDir] - Tracker lock directory; defaults to trackerLockDirFor(appsFile).
  * @param {{timeoutMs?: number, retryMs?: number, staleMs?: number}} [options.lock] - Lock timing.
  * @param {{dryRun?: boolean, verify?: boolean, migrate?: boolean, migrateVia?: boolean, migrateUrls?: boolean, backfillUrls?: boolean, backfillReports?: boolean}} [options.flags]
@@ -368,6 +370,9 @@ export async function mergeTracker(options = {}) {
   // siblings live — they disagreed before #2471.
   const REPORTS_ROOT = resolveWorkspaceRoot(APPS_FILE);
   const PDF_INDEX_FILE = options.pdfIndexFile ?? join(REPORTS_ROOT, 'data', 'pdf-index.tsv');
+  // Where the scanner reads `company_aliases` from (scan.mjs PORTALS_PATH), so the
+  // tracker write and the scan agree on which spellings are one employer.
+  const PORTALS_FILE = options.portalsFile ?? join(DATA_ROOT, 'portals.yml');
   const CHILD_ENV = options.childEnv
     ?? { ...process.env, CAREER_OPS_TRACKER: APPS_FILE, CAREER_OPS_PDF_INDEX: PDF_INDEX_FILE };
 
@@ -619,6 +624,64 @@ export async function mergeTracker(options = {}) {
     if (stem.join('').length < MIN_STEM_CHARS) return false;
     if (stem.some((token, i) => token !== full[i])) return false;
     return full.slice(stem.length).every(token => CORPORATE_FORM_WORDS.has(token));
+  }
+
+  // Built on first use: most merges never reach a tier that needs it, and
+  // portals.yml is a few thousand lines of YAML.
+  let companyIdentity = null;
+
+  /**
+   * True when two company cells name one employer by the scanner's own rule: the
+   * same `portals.yml → company_aliases`, and a trailing parenthetical qualifier
+   * ignored ("TrendAI (Trend Micro)" is "TrendAI").
+   *
+   * Used ONLY in the fuzzy company+role tier's widened pass, next to
+   * companiesMatchIgnoringCorporateForm, for the reason that function gives: the
+   * report-number and entry-number tiers are identity claims of their own, so a
+   * wider company match there would let sequence drift across two employers write
+   * to the wrong row. And like that match it never renames the row: the row keeps
+   * the spelling it was filed under, since company-history, the blacklist and the
+   * follow-ups all join on it.
+   *
+   * An empty key is no evidence (the `?` blind-employer marker, a non-Latin name
+   * the key cannot read), so it never matches; companiesMatch's raw-equality
+   * fallback already covers the identical-cell case.
+   *
+   * @param {string} a - Company cell from one side of the comparison.
+   * @param {string} b - Company cell from the other side.
+   * @returns {boolean} True when both cells resolve to the same non-empty identity.
+   */
+  function companiesSameEmployer(a, b) {
+    companyIdentity ??= buildCompanyIdentity(
+      loadCompanyAliases(PORTALS_FILE, {
+        onError: (err) => console.warn(`⚠️  ${PORTALS_FILE}: cannot read company_aliases (${err.message}) — merging without aliases`),
+      }),
+      { normalize: normalizeCompany },
+    );
+    const key = companyIdentity(String(a));
+    return key !== '' && key === companyIdentity(String(b));
+  }
+
+  /**
+   * Role-title match for the fuzzy tier: roleFuzzyMatch, plus a second look with
+   * the trailing qualifiers that only repeat the title removed.
+   *
+   * roleFuzzyMatch reads "Research Engineer, Cybersecurity RL (Reinforcement
+   * Learning)" as the short title plus two content words, and its specialization
+   * guard (rightly) refuses a title that adds a non-baseline word to another. An
+   * acronym and its own expansion are not a specialization, and the tracker kept
+   * the short form while LinkedIn used the long one. Only that class is dropped;
+   * see identity-key.mjs for why a team or product qualifier is not.
+   *
+   * @param {string} a - Role title from one side of the comparison.
+   * @param {string} b - Role title from the other side.
+   * @returns {boolean} True when the two titles read as one opening.
+   */
+  function rolesMatch(a, b) {
+    if (roleFuzzyMatch(a, b)) return true;
+    const shortA = dropRedundantTitleQualifier(a);
+    const shortB = dropRedundantTitleQualifier(b);
+    return (shortA !== a || shortB !== b) && roleFuzzyMatch(shortA, shortB);
   }
 
   /**
@@ -2067,14 +2130,17 @@ export async function mergeTracker(options = {}) {
           // also held back from claiming a row whose posting is known.
           if (urlBlocksHeuristic(app)) return false;
           // Corporate-form variants of one employer are accepted HERE and nowhere
-          // else (#3665). The tiers above match on a report or entry number, which
-          // is an identity claim on its own, so a wider company match there would
-          // let sequence drift across two employers write to the wrong row. This
-          // tier already requires a fuzzy role match, and the req-number and URL
-          // guards below and above still get to prove the rows distinct.
+          // else (#3665), and so are spellings the user's company_aliases or a
+          // trailing "(qualifier)" reduce to one employer. The tiers above match on
+          // a report or entry number, which is an identity claim on its own, so a
+          // wider company match there would let sequence drift across two employers
+          // write to the wrong row. This tier already requires a fuzzy role match,
+          // and the req-number and URL guards below and above still get to prove
+          // the rows distinct.
           if (!companiesMatch(app.company, addition.company)
-              && !(widenToCorporateForm && companiesMatchIgnoringCorporateForm(app.company, addition.company))) return false;
-          if (!roleFuzzyMatch(addition.role, app.role)) return false;
+              && !(widenToCorporateForm && (companiesMatchIgnoringCorporateForm(app.company, addition.company)
+                || companiesSameEmployer(app.company, addition.company)))) return false;
+          if (!rolesMatch(addition.role, app.role)) return false;
           // Cross-channel guard (#1596): unknown-employer rows (`?`) all normalize
           // to the same empty company key, but the same role via two DIFFERENT
           // agencies is two real submissions — merging them silently is exactly
@@ -2455,6 +2521,11 @@ if (isMainModule(import.meta.url)) {
     // CAREER_OPS_BATCH_STATE overrides the batch-state.tsv path (used by tests).
     batchStateFile: process.env.CAREER_OPS_BATCH_STATE || join(DATA_ROOT, 'batch/batch-state.tsv'),
     pdfIndexFile: resolvePdfIndexPath(appsFile),
+    // The same override scan.mjs honors, so a search lane's own portals.yml
+    // carries its own aliases through the merge as well as the scan. The default
+    // follows the TRACKER's workspace, not the code checkout: a run pointed at
+    // another workspace (CAREER_OPS_TRACKER) must not read this one's aliases.
+    portalsFile: process.env.CAREER_OPS_PORTALS || join(resolveWorkspaceRoot(appsFile), 'portals.yml'),
     lockDir: trackerLockDirFor(appsFile),
     lock: {
       timeoutMs: Number(process.env.CAREER_OPS_TRACKER_LOCK_TIMEOUT_MS) || 60_000,

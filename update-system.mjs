@@ -338,6 +338,7 @@ const SYSTEM_PATHS = [
   'generate-cover-letter.mjs',
   'merge-tracker.mjs',
   'url-key.mjs',
+  'identity-key.mjs',
   'sync-pdf-flags.mjs',
   'tracker-links.mjs',
   'tracker.mjs',
