@@ -5,22 +5,50 @@
 # APIs (Greenhouse / Ashby / Lever / Workday) — no Claude, no API cost:
 #
 #   1. scan.mjs           — the curated watchlist in portals.yml → tracked_companies.
-#   2. scan-ats-full.mjs  — reverse discovery: walks YC + a16z portfolio companies
-#                            (--seeds yc,a16z) and matches postings against the
-#                            SAME title_filter/location_filter in portals.yml, so
-#                            new companies surface without anyone curating a list.
+#   2. verify-portals.mjs — re-probes every tracked slug (silent-404 catcher).
 #   3. discover-ats.mjs against data/seeds/*.yml — resolves any seed list
 #      (e.g. conference sponsors, a VC portfolio) to real ATS boards and
 #      promotes the ones that resolve into portals.yml → tracked_companies, so
 #      they join step 1's zero-token scan from then on.
+#   4. scan-ats-full.mjs --ats greenhouse,ashby,lever — reverse discovery over
+#      the FULL public ATS directory (Feashliaa/job-board-aggregator): every
+#      board that dataset lists, matched against the SAME title_filter /
+#      location_filter / level_filter in portals.yml, so companies nobody
+#      curated surface. One invocation per ATS under a hard time limit.
+#   5. scan-ats-full.mjs --seeds yc,a16z — reverse discovery over the YC and
+#      a16z portfolios, same filters.
 #
-# All three append to data/pipeline.md and data/scan-history.tsv.
+# All of them append to data/pipeline.md and data/scan-history.tsv.
+#
+# THE ORDER IS DELIBERATE. Steps 4 and 5 are the heavy bursts (thousands of
+# requests to boards-api.greenhouse.io / api.lever.co / api.ashbyhq.com; the
+# YC seed sweep runs 20 wide against ONE host). They used to run right after
+# scan.mjs and BEFORE verify-portals, and in 4 of the 6 logged runs that swept
+# ~6,200 YC companies, verify-portals then met 1-17 HTTP 403s on Greenhouse
+# boards that answered 200 later in the same run (12 of 13 on Oct 8; data/logs,
+# Sep 7 - Oct 8). Nothing here proves a Greenhouse rate limit, but nothing that
+# needs a clean answer from those hosts should run after a burst, so the bursts
+# go last, the polite one (6 wide, step 4) before the aggressive one (step 5).
 #
 # Stage 2 (triage + A-G scoring + tracker + HTML) is the scheduled Claude task:
 # it runs `/career-ops pipeline` over the data/pipeline.md this wrote, then
 # WebSearches the portals.yml `scan_method: websearch` companies into the same
 # pipeline, then `node roles/render-roles-html.mjs`. See modes/_custom.md
 # (the scoring ruleset).
+#
+# Environment (all optional):
+#   CAREER_OPS_FULL_SWEEP=0               skip step 4 entirely (default: on)
+#   CAREER_OPS_FULL_SWEEP_ATS="a b c"     which directories, in order
+#                                         (default: greenhouse ashby lever)
+#   CAREER_OPS_FULL_SWEEP_SINCE=14        posting window in days (default 14,
+#                                         twice the weekly cadence: a skipped
+#                                         week or a killed sweep is re-covered
+#                                         by the overlap, dedup makes it free)
+#   CAREER_OPS_FULL_SWEEP_STEP_SECS=600   hard limit for ONE directory
+#   CAREER_OPS_FULL_SWEEP_BUDGET_SECS=900 hard limit for step 4 as a whole, so
+#                                         stage 1 ends before stage 2 starts
+#   CAREER_OPS_TIMEOUT_IMPL=auto          auto | timeout | perl | none — how the
+#                                         limit is enforced (see run_limited)
 #
 # Run by hand:   ./ops/daily-scan.sh   (from the career-ops root)
 # Or on a timer: see ops/daily-scan.plist.example (launchd, macOS)
@@ -33,6 +61,48 @@ cd "$(dirname "$0")/.." || exit 1
 LOG_DIR="data/logs"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/scan-$(date +%Y-%m-%d).log"
+
+# run_limited <seconds> <command...> — run a command under a wall-clock limit
+# and return its exit status (124/137 from timeout, 142 from the perl alarm).
+# macOS ships neither `timeout` nor `gtimeout` (both are Homebrew coreutils),
+# but it always ships perl, and an alarm() armed before exec survives the exec
+# and ends the process with SIGALRM — one process, no watchdog left behind.
+# The matches of a killed scan-ats-full run are lost (it writes pipeline.md only
+# at the end); that is why step 4 runs one directory per invocation.
+run_limited() {
+  local secs=$1
+  shift
+  local impl="${CAREER_OPS_TIMEOUT_IMPL:-auto}"
+  if [ "$impl" = "auto" ]; then
+    if command -v timeout >/dev/null 2>&1; then impl=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then impl=gtimeout
+    elif command -v perl >/dev/null 2>&1; then impl=perl
+    else impl=none
+    fi
+  fi
+  case "$impl" in
+    timeout|gtimeout) "$impl" -k 15 "$secs" "$@" ;;
+    perl) perl -e 'alarm shift; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$secs" "$@" ;;
+    *)
+      echo "WARN: no timeout, gtimeout or perl found — running without a time limit"
+      "$@"
+      ;;
+  esac
+}
+
+# digits_or <value> <default> — the value as a plain decimal when it is a
+# positive integer of at most 9 digits, else the default. A typo in an env var
+# must not reach the arithmetic below as-is: bash reads "08" as a bad octal
+# number and a non-interactive shell exits on it, ending the whole scan.
+digits_or() {
+  case "$1" in
+    ''|*[!0-9]*|??????????*) echo "$2" ;;
+    *)
+      local n=$((10#$1))
+      if [ "$n" -gt 0 ]; then echo "$n"; else echo "$2"; fi
+      ;;
+  esac
+}
 
 {
   echo "=== career-ops daily scan — $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
@@ -60,14 +130,11 @@ LOG="$LOG_DIR/scan-$(date +%Y-%m-%d).log"
   node scan.mjs --since 14 --quiet
   echo "scan.mjs exit=$?"
 
-  echo "--- node scan-ats-full.mjs --seeds yc,a16z (reverse discovery, not limited to the watchlist) ---"
-  node scan-ats-full.mjs --seeds yc,a16z --since 10
-  echo "scan-ats-full.mjs exit=$?"
-
   # Re-probe every tracked slug so a silently-404ing board gets caught.
   # This script runs weekly (Mondays), so this runs once a week.
   echo "--- slug sweep: verify-portals.mjs ---"
-  node verify-portals.mjs || true
+  node verify-portals.mjs
+  echo "verify-portals.mjs exit=$?"
 
   # Resolve any seed list in data/seeds/ (e.g. Black Hat sponsors) against live
   # ATS boards and promote hits into portals.yml. --write is additive and
@@ -76,8 +143,48 @@ LOG="$LOG_DIR/scan-$(date +%Y-%m-%d).log"
   for seed in data/seeds/*.yml; do
     [ -f "$seed" ] || continue
     echo "--- seed resolution: discover-ats.mjs --in $seed --write ---"
-    node discover-ats.mjs --in "$seed" --write --summary || true
+    node discover-ats.mjs --in "$seed" --write --summary
+    echo "discover-ats.mjs --in $seed exit=$?"
   done
+
+  # Reverse discovery over the whole public ATS directory. One invocation per
+  # directory: a hang or a kill costs one directory's matches, not all three,
+  # and each leaves its own header and exit= line. Highest yield per request
+  # first (measured 2026-10-13 over 45-day windows: greenhouse 10 matches per
+  # 366 requests, ashby 4 per 221, lever 1 per 251). No --resume: a checkpoint
+  # pins the date window of the run that wrote it, and the next weekly run
+  # wants its own. Exit status never stops the rest of the script.
+  if [ "${CAREER_OPS_FULL_SWEEP:-1}" = "0" ]; then
+    echo "--- full ATS sweep: skipped (CAREER_OPS_FULL_SWEEP=0) ---"
+  else
+    sweep_since=$(digits_or "${CAREER_OPS_FULL_SWEEP_SINCE:-14}" 14)
+    sweep_step=$(digits_or "${CAREER_OPS_FULL_SWEEP_STEP_SECS:-600}" 600)
+    sweep_budget=$(digits_or "${CAREER_OPS_FULL_SWEEP_BUDGET_SECS:-900}" 900)
+    sweep_start=$SECONDS
+    # Unquoted on purpose: the value is a space-separated list of directories.
+    for ats in ${CAREER_OPS_FULL_SWEEP_ATS:-greenhouse ashby lever}; do
+      remaining=$(( sweep_budget - (SECONDS - sweep_start) ))
+      if [ "$remaining" -lt 30 ]; then
+        echo "--- full ATS sweep: $ats skipped (the ${sweep_budget}s budget is used up) ---"
+        continue
+      fi
+      limit=$sweep_step
+      [ "$remaining" -lt "$limit" ] && limit=$remaining
+      echo "--- node scan-ats-full.mjs --ats $ats --since $sweep_since (full public $ats directory, limit ${limit}s) ---"
+      step_start=$SECONDS
+      run_limited "$limit" node scan-ats-full.mjs --ats "$ats" --since "$sweep_since"
+      rc=$?
+      case "$rc" in
+        124|137|142) echo "scan-ats-full.mjs --ats $ats: STOPPED at the ${limit}s limit — its matches were not saved; the next run's window covers them" ;;
+      esac
+      echo "scan-ats-full.mjs --ats $ats exit=$rc ($((SECONDS - step_start))s)"
+    done
+  fi
+
+  # Last on purpose, see the header. Windows as above.
+  echo "--- node scan-ats-full.mjs --seeds yc,a16z (reverse discovery, not limited to the watchlist) ---"
+  node scan-ats-full.mjs --seeds yc,a16z --since 10
+  echo "scan-ats-full.mjs exit=$?"
 
   echo "--- pipeline.md now has $(grep -c '^\- \[ \]' data/pipeline.md 2>/dev/null || echo 0) unprocessed entries ---"
   echo "=== done $(date '+%H:%M:%S') ==="
