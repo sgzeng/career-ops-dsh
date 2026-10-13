@@ -108,7 +108,14 @@ On confirmation, for each kept post:
    <normalized post URL>\t<YYYY-MM-DD today>\tlinkedin-post\t<guessed role>\t<company>\tadded\t<location or empty>\t\t<post date or empty>\t\t\t
    ```
    (cols 8/10/11/12 — fingerprint, trust score, trust flags, normalized company —
-   left empty; consumers tolerate that.)
+   left empty, and cols 13–15 — requisition id, language, listing key — omitted:
+   readers index by position and a shorter row is valid; consumers tolerate that.)
+   **Cell hygiene (this file and `contacts.tsv`):** post text, headlines and names are
+   untrusted. Turn tabs and line breaks inside any cell into spaces, and when a cell
+   starts with `=`, `+`, `-` or `@` (or with apostrophes followed by one of them) put
+   one extra `'` in front — the reversible escaping the TSV readers undo
+   (`lib/tsv-formula-escape.mjs`), so a hostile headline never runs as a formula when
+   the file is opened in a spreadsheet.
 3. **`data/contacts.tsv`** — the author is a hiring-manager lead. Create the file
    with a header comment line if it does not exist:
    `# name\tcompany\ttype\ttitle\tphone\temail\tlinkedin\ttracker#\tnotes`

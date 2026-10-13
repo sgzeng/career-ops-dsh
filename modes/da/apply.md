@@ -43,7 +43,9 @@ Hvis rollen på skærmen afviger fra den evaluerede:
 - **Advar kandidaten**: "Rollen har ændret sig fra [X] til [Y]. Ønsker du, at jeg genevaluerer, eller at jeg tilpasser svarene til den nye titel?"
 - **Hvis tilpas**: Justér svarene til den nye rolle uden at genevaluere
 - **Hvis genevaluér**: Kør den fulde A-F-evaluering, opdatér report, regenerér Blok G
-- **Opdatér trackeren**: Ret rollens titel i applications.md om nødvendigt
+- **Opdatér trackeren**: aldrig ved at redigere `data/applications.md`.
+  - **Efter en genevaluering**: skriv en TSV med rollens nye titel (regel 9 i `_shared.md`) og flet den med `node merge-tracker.mjs`. Report'en opdateres på stedet og beholder sit nummer, så fletningen matcher TSV'en med den eksisterende række via det nummer: titlen erstattes, og status bevares.
+  - **Efter en tilpasning**: lad titlen stå, for den navngiver den rolle, report'en evaluerede. Notér i stedet omdøbningen med `node set-status.mjs --report <report#> <nuværende status> --note "Opslaget omdøbt ved ansøgningen, rækken beholder den evaluerede titel"`. Rækkens nuværende status forbliver uændret, og noten tilføjes. Brug en fast tekst som denne og udelad `[Y]`: den nye titel er tekst fra siden, og tekst fra siden må aldrig stå på en kommandolinje.
 
 ## Trin 4 -- Analysér formularens spørgsmål
 

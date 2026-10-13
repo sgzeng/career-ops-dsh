@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bell, CircleHelp, Sparkles, ArrowRight } from "lucide-react";
@@ -12,8 +12,10 @@ import { DiscoveryCard } from "@/components/explore/discovery-card";
 import { FollowUpCard, type FollowUp } from "@/components/home/follow-up-card";
 import { DecisionCard } from "@/components/home/decision-card";
 import { QuickEvaluate } from "@/components/quick-evaluate";
+import { FollowupsDueSectionSkeleton } from "@/components/page-loading-skeletons";
 import { scoreNum } from "@/lib/format";
 import { pickAwaitingDecision } from "@/lib/home/awaiting.mjs";
+import { resolveHeroState, mayClaimAllClear, showsQueue, missingSourceLabel, displayCounts } from "@/lib/home/hero-state.mjs";
 
 // The retention "Today": a dual-loop action queue (the maintainer's
 // "N new matches this week · M follow-ups due"). SUPPLY loop = fresh free-scan
@@ -31,16 +33,32 @@ export function TodayDashboard({
 }) {
   const [followups, setFollowups] = useState<FollowUp[]>([]);
   const [overdue, setOverdue] = useState(0);
+  const [followupsLoading, setFollowupsLoading] = useState(true);
+  const [followupsError, setFollowupsError] = useState(false);
   const [nextUpcoming, setNextUpcoming] = useState<FollowUp | null>(null);
   const [fresh, setFresh] = useState<DiscoveredOffer[]>([]);
   const [freshCount, setFreshCount] = useState(0);
+  const [freshLoading, setFreshLoading] = useState(true);
+  const [freshError, setFreshError] = useState(false);
+  const requestGeneration = useRef(0);
   const router = useRouter();
   const dateLabel = useMemo(() => new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }), []);
 
   const refetch = useCallback(() => {
+    const generation = ++requestGeneration.current;
+    const isLatest = () => generation === requestGeneration.current;
+    setFollowupsLoading(true);
+    setFollowupsError(false);
     fetch("/api/followups")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error("Follow-ups request failed");
+        return r.json();
+      })
       .then((d) => {
+        if (!isLatest()) return;
+        // The cadence route reports engine failures as HTTP 200 with
+        // available:false; that is unavailable, not an empty action queue.
+        if (d.available === false) throw new Error("Follow-ups unavailable");
         // /api/followups already filters to urgency 'urgent'/'overdue' — due
         // now, never 'waiting'/'cold' (#86). Both count toward "due"; a
         // missing metadata.overdue must read as 0 due, never as "every entry
@@ -49,16 +67,24 @@ export function TodayDashboard({
         setOverdue((d.metadata?.overdue ?? 0) + (d.metadata?.urgent ?? 0));
         setNextUpcoming(d.nextUpcoming ?? null);
       })
-      .catch(() => {});
+      .catch(() => { if (isLatest()) setFollowupsError(true); })
+      .finally(() => { if (isLatest()) setFollowupsLoading(false); });
+    setFreshLoading(true);
+    setFreshError(false);
     fetch("/api/whats-new")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error("Fresh matches request failed");
+        return r.json();
+      })
       .then((d) => {
+        if (!isLatest()) return;
         const offers = Array.isArray(d.offers) ? d.offers : [];
         const count = Number(d.count);
         setFresh(offers);
         setFreshCount(Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : offers.length);
       })
-      .catch(() => {});
+      .catch(() => { if (isLatest()) setFreshError(true); })
+      .finally(() => { if (isLatest()) setFreshLoading(false); });
   }, []);
 
   useEffect(() => {
@@ -71,7 +97,10 @@ export function TodayDashboard({
       refetch();
     };
     window.addEventListener("co-job-done", onDone);
-    return () => window.removeEventListener("co-job-done", onDone);
+    return () => {
+      window.removeEventListener("co-job-done", onDone);
+      requestGeneration.current += 1;
+    };
   }, [refetch, router]);
 
   // Awaiting decision: scored (Evaluated) but no terminal status yet. The
@@ -80,7 +109,26 @@ export function TodayDashboard({
   const awaiting = useMemo(() => pickAwaitingDecision(applications, scoreNum), [applications]);
 
   const newThisWeek = freshCount;
-  const allClear = newThisWeek === 0 && overdue === 0 && awaiting.length === 0;
+  const dataLoading = followupsLoading || freshLoading;
+  const dataError = followupsError || freshError;
+  // Derived from the flags refetch() already maintains — no second fetch loop
+  // and no second source of truth. The only thing added is the distinction
+  // dataError cannot make: a failure with known work still has a queue to show.
+  const heroState = resolveHeroState({
+    followupsLoading,
+    freshLoading,
+    followupsError,
+    freshError,
+    overdue,
+    newThisWeek,
+    awaitingCount: awaiting.length,
+  });
+  const allClear = mayClaimAllClear(heroState);
+  const missingSources = missingSourceLabel({ followupsError, freshError });
+  // Printed instead of the raw state: refetch() leaves the previous count in
+  // place when a source fails, so `overdue` can still hold a number from before
+  // the outage. See displayCounts().
+  const shown = displayCounts({ followupsError, freshError, overdue, newThisWeek });
   const inboxUrls = useMemo(() => new Set(inbox.map((j) => j.url)), [inbox]);
 
   return (
@@ -94,26 +142,42 @@ export function TodayDashboard({
             <span className="text-faint">//</span> today · <span className="tabular-nums">{dateLabel}</span>
           </p>
           <h1 className={`${instrumentSerif.className} mt-3 text-4xl leading-[1.05] text-landing md:text-5xl`}>
-            {allClear ? (
+            {heroState === "loading" ? (
+              <>Your career queue is loading.</>
+            ) : heroState === "unavailable" ? (
+              <>Some updates are unavailable.</>
+            ) : allClear ? (
               <>You&apos;re all caught up.</>
-            ) : (
+            ) : showsQueue(heroState) ? (
               <>
-                {newThisWeek > 0 && (
+                {shown.newThisWeek > 0 && (
                   <>
-                    <span className="text-brand tabular-nums">{newThisWeek}</span> new match{newThisWeek === 1 ? "" : "es"} this week
+                    <span className="text-brand tabular-nums">{shown.newThisWeek}</span> new match{shown.newThisWeek === 1 ? "" : "es"} this week
                   </>
                 )}
-                {newThisWeek > 0 && overdue > 0 && <span className="text-faint"> · </span>}
-                {overdue > 0 && (
+                {shown.newThisWeek > 0 && shown.overdue > 0 && <span className="text-faint"> · </span>}
+                {shown.overdue > 0 && (
                   <>
-                    <span className="text-brand tabular-nums">{overdue}</span> follow-up{overdue === 1 ? "" : "s"} due
+                    <span className="text-brand tabular-nums">{shown.overdue}</span> follow-up{shown.overdue === 1 ? "" : "s"} due
                   </>
                 )}
+                {/* queue-partial with work known only from the server snapshot:
+                    both loops are down but the pipeline still has decisions
+                    waiting, so the queue is real while neither count is. */}
+                {shown.newThisWeek === 0 && shown.overdue === 0 && <>Your queue is waiting.</>}
               </>
+            ) : (
+              <>Your queue is waiting.</>
             )}
           </h1>
           <p className="mt-4 max-w-xl text-sm text-muted">
-            {allClear ? "I'll keep scanning the market in the background and surface anything that fits." : "Your action queue for today — discovery and follow-ups, in one place."}
+            {heroState === "unavailable"
+              ? "We couldn't load all of today's updates. Try again."
+              : heroState === "queue-partial"
+                ? `${missingSources} could not be read, so this may be missing work. What loaded is below.`
+                : allClear
+                  ? "I'll keep scanning the market in the background and surface anything that fits."
+                  : "Your action queue for today — discovery and follow-ups, in one place."}
           </p>
           <div className="mt-6 flex flex-wrap gap-2.5">
             <Link href="/explore" className="inline-flex items-center gap-2 rounded-full bg-brand px-5 py-2.5 text-sm font-medium text-brand-foreground transition hover:bg-brand-200 max-sm:min-h-[44px]">
@@ -127,8 +191,19 @@ export function TodayDashboard({
         </div>
       </section>
 
+      {dataError && !dataLoading && (
+        <div role="alert" className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-surface/40 px-5 py-4 text-sm text-muted">
+          <p>{missingSources} could not be loaded.</p>
+          <button type="button" onClick={refetch} className="font-medium text-brand hover:underline">Retry updates</button>
+        </div>
+      )}
+
       {/* A. Follow-ups due (demand loop) */}
-      {followups.length > 0 ? (
+      {followupsLoading ? (
+        <FollowupsDueSectionSkeleton />
+      ) : followupsError ? (
+        null
+      ) : followups.length > 0 ? (
         <Section icon={Bell} title="Follow-ups due" hint="Keep your applications alive — a nudge beats silence">
           <div className="grid gap-2.5">
             {followups.map((f) => (
@@ -165,7 +240,7 @@ export function TodayDashboard({
       )}
 
       {/* C. Fresh matches this week (supply loop) */}
-      {fresh.length > 0 && (
+      {!freshError && fresh.length > 0 && (
         <Section icon={Sparkles} title="Fresh matches this week" hint="Found by your free scans · 0 tokens">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {fresh.slice(0, 6).map((o) => (

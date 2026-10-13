@@ -195,9 +195,12 @@ function foldHostname(host) {
 // also Workable's employer-board shape, where it means something else.
 const AGGREGATOR_POSTING_ID = {
   // linkedin.com/jobs/view/{id} · .../jobs/view/{title-slug}-{id} · any page
-  // that carries the posting in ?currentJobId= (search and collection views).
+  // that carries the posting in ?currentJobId= (search and collection views) ·
+  // /comm/jobs/view/{id}, the link in every LinkedIn email. Verified against
+  // linkedin.com itself: `/comm/jobs/view/{id}?trk=…` answers 307 with
+  // `session_redirect=/jobs/view/{id}?trk=…`, the same id with `/comm` dropped.
   'linkedin.com': (u) => {
-    const path = u.pathname.match(/^\/jobs\/view\/(?:.*-)?(\d+)\/?$/);
+    const path = u.pathname.match(/^\/(?:jobs\/view\/(?:.*-)?|comm\/jobs\/view\/)(\d+)\/?$/);
     if (path) return path[1];
     const current = u.searchParams.get('currentJobId');
     return current && /^\d+$/.test(current) ? current : null;

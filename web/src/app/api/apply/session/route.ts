@@ -1,5 +1,6 @@
 import { openSession } from "@/lib/apply/session";
 import { cliSubstitutionNotice, resolveCliOrFallback } from "@/lib/clis";
+import { blockedApplyUrlResponse, isUnsafeApplyUrlError, APPLY_URL_BLOCKED_MESSAGE } from "@/lib/apply/url-guard.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +18,8 @@ export async function POST(req: Request) {
     return Response.json({ error: "bad json" }, { status: 400 });
   }
   const url = (body.url ?? "").trim();
-  if (!/^https?:\/\//i.test(url)) return Response.json({ error: "A valid application URL (https://…) is required" }, { status: 400 });
+  const blocked = await blockedApplyUrlResponse(url);
+  if (blocked) return Response.json({ error: blocked.error }, { status: blocked.status });
   // A stale saved id falls back to the sole installed CLI, as on every other AI
   // route (#4607). Unresolvable → pass it through unchanged: the interpreter
   // already treats a missing CLI as "no agentic fallback".
@@ -29,6 +31,9 @@ export async function POST(req: Request) {
     if (substitution) session.issues.push({ level: "info", code: "cli-substituted", message: substitution });
     return Response.json(session);
   } catch (e) {
+    if (isUnsafeApplyUrlError(e)) {
+      return Response.json({ error: APPLY_URL_BLOCKED_MESSAGE }, { status: 400 });
+    }
     return Response.json({ error: e instanceof Error ? e.message.slice(0, 200) : "could not open the form" }, { status: 500 });
   }
 }

@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveCvTemplate } from "../../src/lib/core/cv-template.mjs";
 import { BASE_CV_TEMPLATE, buildPrompt } from "../../src/lib/run-prompts.mjs";
+import { linkCorePackage } from "../helpers/core-package.mjs";
 
 const CORE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -52,14 +53,19 @@ function fakeCheckout({ profileAt = "config/profile.yml", template = "mine", pac
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cv-template-")));
   fs.copyFileSync(path.join(CORE, "cv-templates.mjs"), path.join(root, "cv-templates.mjs"));
   // cv-templates.mjs imports ./lib/is-main-module.mjs, ./path-resolver.mjs (its
-  // default profile path follows the data root) and ./providers/_html-entities.mjs
-  // (it decodes entities in a template meta block) relative to itself. A missing
+  // default profile path follows the data root), ./providers/_html-entities.mjs
+  // (it decodes entities in a template meta block) and ./lib/template-manifest.mjs
+  // (the manifest block and the section vocabulary) relative to itself. A missing
   // one throws at module load and every case below falls back to the base
   // template, which is the same silent pass the js-yaml link below prevents.
   fs.mkdirSync(path.join(root, "lib"), { recursive: true });
   fs.copyFileSync(
     path.join(CORE, "lib", "is-main-module.mjs"),
     path.join(root, "lib", "is-main-module.mjs"),
+  );
+  fs.copyFileSync(
+    path.join(CORE, "lib", "template-manifest.mjs"),
+    path.join(root, "lib", "template-manifest.mjs"),
   );
   fs.copyFileSync(path.join(CORE, "path-resolver.mjs"), path.join(root, "path-resolver.mjs"));
   fs.mkdirSync(path.join(root, "providers"), { recursive: true });
@@ -70,7 +76,10 @@ function fakeCheckout({ profileAt = "config/profile.yml", template = "mine", pac
   // js-yaml is a bare specifier: outside the checkout there is no node_modules on
   // the way up, the import throws, and EVERY case below would fall back to the
   // base template — i.e. pass for the reason the fix exists to remove.
-  fs.symlinkSync(path.join(CORE, "node_modules"), path.join(root, "node_modules"), "dir");
+  // Linked from wherever Node resolves it for the core, not from
+  // `<core>/node_modules`: a git worktree has none of its own, so that link was
+  // dangling there and every case failed on the base template.
+  linkCorePackage(root, "js-yaml", CORE);
   // Every template must carry the placeholders validateTemplate() requires, or
   // resolveTemplate throws and the fallback would hide which case we are in.
   const body = "{{NAME}}{{EXPERIENCE}}{{EDUCATION}}";

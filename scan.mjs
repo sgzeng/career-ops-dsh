@@ -24,9 +24,9 @@
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
  *   node scan.mjs --company Cohere # scan a single company
- *   node scan.mjs --verify         # Playwright-check each new URL; drop expired postings
+ *   node scan.mjs --verify         # API-first liveness check; use Playwright when inconclusive
  *   node scan.mjs --verify --headed-fallback  # retry anti-bot-blocked URLs in a headed browser (needs a display)
- *   node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
+ *   node scan.mjs --verify --throttle          # jittered ~5-10s gap between browser checks
  *   node scan.mjs --verify --throttle=8000     # custom base gap in ms (waits base..2*base)
  *   node scan.mjs --include-blacklisted        # let data/blacklist.md matches through (annotated)
  *   node scan.mjs --since 7                    # postings from the last 7 days
@@ -65,6 +65,7 @@ import { loadProviders, resolveProvider } from './providers/_registry.mjs';
 import { mergeProviderPlugins } from './plugins/_engine.mjs';
 import { classifyFetchError } from './verify-portals.mjs';
 import { fingerprintText, findCrossListings } from './fingerprint-core.mjs';
+import { computeListingFingerprint } from './listing-fingerprint.mjs';
 import { resolveColumns, parseTrackerRow, normalizeTextKey, extractReqNumber, REQ_NUMBER_RE } from './tracker-parse.mjs';
 import { workdayDedupKey, stripWorkdayRepostSuffix, isWorkdayJobUrl } from './providers/workday.mjs';
 import { normalizeCompany } from './tracker-utils.mjs';
@@ -84,8 +85,10 @@ import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { SCAN_HISTORY_COLUMNS, parseScanHistoryLine } from './lib/scan-history-columns.mjs';
+import { escapeFormulaCell } from './lib/tsv-formula-escape.mjs';
 import { promoteKnownFragmentIdentity } from './url-key.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { checkLivenessViaApi } from './liveness-api.mjs';
 
 const CODE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
@@ -1508,10 +1511,27 @@ const PERMANENT_SCAN_HISTORY_STATUSES = new Set([
 ]);
 
 /**
+ * Statuses the `scan_history.recheck_after_days` TTL is allowed to release.
+ *
+ * `added` is the row a live posting leaves behind. `skipped_expired` is the row
+ * a dead one leaves (#3891), and it belongs here because a posting can be
+ * relisted: pinning the retirement for good would put the recheck the user
+ * configured out of reach for exactly the URLs most likely to come back.
+ *
+ * Everything else keeps its permanent pin. The distinction is whether the status
+ * describes a POSTING, which can change, or the URL itself — an invalid URL does
+ * not become valid and a blocked host does not become reachable because a window
+ * elapsed.
+ */
+const RECHECKABLE_SCAN_HISTORY_STATUSES = new Set(['added', 'skipped_expired']);
+
+/**
  * Statuses recorded for VISIBILITY only, which must never pin a URL for dedup.
  *
- * Every other skipped status describes the posting: a dead URL stays dead, a
- * blocked host stays blocked, so pinning it saves a later scan the work. These
+ * Every other skipped status describes the posting: a dead URL stays dead
+ * until the configured recheck window releases it (see
+ * RECHECKABLE_SCAN_HISTORY_STATUSES), a blocked host stays blocked, so pinning
+ * saves a later scan the work. These
  * two describe the user's CONFIG instead — `location_filter` and
  * `max_posting_age_days` are thresholds they edit. Pinning would mean a role
  * dropped under the old threshold never resurfaces under the new one, which is
@@ -1578,7 +1598,7 @@ export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { rec
     const cooldownUntil = parts[parts.length - 1];
     return today < cooldownUntil;
   }
-  if (status !== 'added') return true;
+  if (!RECHECKABLE_SCAN_HISTORY_STATUSES.has(status)) return true;
   if (recheckAfterDays == null) return true;
   const ageDays = daysBetweenIsoDates(firstSeen, today);
   if (ageDays == null) return true;
@@ -1637,12 +1657,17 @@ export function resolveDedupIncludeLanguage(config = {}) {
   return config.scan_history?.dedup_include_language === true;
 }
 
+// Query params naming the language a page renders in. Stripped from the dedup
+// key like the rest of DEDUP_STRIP_PARAMS, and read back by
+// languageFormsFromUrl to tell a posting's language versions apart.
+const URL_LANGUAGE_PARAMS = ['language', 'lang', 'locale'];
+
 // Query params that carry no identity information for a job posting — safe to
 // strip when computing the dedup key. Deliberately an allowlist rather than
 // "strip everything": several ATSes key the posting off a query param (e.g.
 // Greenhouse's `gh_jid`), so a blanket strip would collapse distinct roles.
 const DEDUP_STRIP_PARAMS = new Set([
-  'language', 'lang', 'locale',
+  ...URL_LANGUAGE_PARAMS,
   'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
   'ref', 'src', 'source', 'gh_src', 'lever-origin', 'lever-source',
   'rltr', // StepStone: regenerated per request, so one posting returns as new every scan
@@ -1693,6 +1718,91 @@ export function normalizeUrlForDedup(url) {
   parsed.hash = '';
   parsed.pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase() || '/';
   return parsed.toString();
+}
+
+/**
+ * The posting language a URL asks for, as dedup forms; none when it names none.
+ *
+ * {@link normalizeUrlForDedup} drops these params, so the language versions of
+ * one posting share a URL key. Reading the param back tells those versions
+ * apart on rows that carry no `language` cell of their own (pipeline.md,
+ * applications.md, scan-history rows written without one).
+ *
+ * @param {unknown} url
+ * @returns {string[]} Zero or one form, as {@link languageFormsForDedup}.
+ */
+export function languageFormsFromUrl(url) {
+  if (typeof url !== 'string' || !url) return [];
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+  for (const [name, value] of parsed.searchParams) {
+    if (URL_LANGUAGE_PARAMS.includes(name.toLowerCase())) return languageFormsForDedup(value);
+  }
+  return [];
+}
+
+/**
+ * Title form for telling apart the language versions of one posting: the same
+ * provider wrote both sides, so only case and whitespace are folded.
+ *
+ * @param {unknown} title
+ * @returns {string}
+ */
+export function variantTitleKey(title) {
+  return String(title ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * Record one seen version of a posting under its URL key, in the shape
+ * {@link isUnseenLanguageVersion} reads.
+ *
+ * @param {Map<string, Array<{languages: string[], title: string}>>} variantsByUrl
+ * @param {string} key - From {@link normalizeUrlForDedup}.
+ * @param {string[]} languages - Language forms; empty when unknown.
+ * @param {unknown} [title] - Raw title; omitted when the source records none.
+ */
+export function recordUrlVariant(variantsByUrl, key, languages, title) {
+  let rows = variantsByUrl.get(key);
+  if (!rows) variantsByUrl.set(key, (rows = []));
+  rows.push({ languages, title: variantTitleKey(title) });
+}
+
+/**
+ * Whether a candidate whose URL key was already seen is a language version of
+ * that posting which none of the seen rows was in.
+ *
+ * Some ATSes serve every language version of a posting at one URL with a
+ * language param, which {@link normalizeUrlForDedup} drops, so the versions
+ * share a URL key. A seen row's language is its own when it recorded one.
+ * Otherwise it is resolved against `siblings`, this scan's versions of the same
+ * posting in provider order: the one sibling whose title matches the row's,
+ * else the first sibling — a provider emits a posting's own default language
+ * first. True only when every seen row resolves to a language and none is the
+ * candidate's; a candidate of unknown language stays a duplicate.
+ *
+ * @param {Array<{languages: string[], title: string}>|undefined} seenRows - From {@link recordUrlVariant}.
+ * @param {{languages: string[], title: unknown}} candidate
+ * @param {Array<{languages: string[], title: unknown}>} siblings - Including the candidate.
+ * @returns {boolean}
+ */
+export function isUnseenLanguageVersion(seenRows, candidate, siblings = []) {
+  if (!Array.isArray(seenRows) || seenRows.length === 0) return false;
+  if (!candidate.languages.length) return false;
+  const known = siblings.filter(sibling => sibling.languages.length > 0);
+  const resolve = (row) => {
+    if (row.languages.length) return row.languages;
+    const titled = row.title ? known.filter(sibling => variantTitleKey(sibling.title) === row.title) : [];
+    if (titled.length === 1) return titled[0].languages;
+    return known[0]?.languages ?? [];
+  };
+  return seenRows.every((row) => {
+    const languages = resolve(row);
+    return languages.length > 0 && !candidate.languages.some(language => languages.includes(language));
+  });
 }
 
 /**
@@ -1893,15 +2003,27 @@ function extractPipelineCompanyRole(line) {
 export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = {}) {
   const { scanHistoryText = '', pipelineText = '', applicationsText = '' } = sources;
   const seen = new Set();
+  // Which language versions each seen URL key stands for — read by
+  // isUnseenLanguageVersion under scan_history.dedup_include_language.
+  const variants = new Map();
+  const identityPromotableUrls = new Map();
   // Rows the age policy has released. Held rather than counted here: the two
   // sources parsed below carry no age policy of their own, so a row the TTL has
   // just freed can be re-pinned a few lines later. The count is taken at the end,
   // against the finished set, so it reports what is actually rescannable.
   const recheckCandidates = new Set();
+  const recheckListingTokens = new Map();
+  const addIdentityPromotableUrl = (urlToken, listingKey = '') => {
+    if (!identityPromotableUrls.has(urlToken)) identityPromotableUrls.set(urlToken, new Set());
+    identityPromotableUrls.get(urlToken).add(listingKey || null);
+  };
 
   // scan-history.tsv
-  for (const line of scanHistoryText.split('\n').slice(1)) { // skip header
-    const { url, first_seen: firstSeen, portal, status: rawStatus } = parseScanHistoryLine(line);
+  // Skip line 0 only when it is the header; a headerless legacy file starts with a data row.
+  const historyLines = scanHistoryText.split('\n');
+  if (historyLines[0].startsWith('url\t')) historyLines.shift();
+  for (const line of historyLines) {
+    const { url, first_seen: firstSeen, portal, status: rawStatus, title, language, listing_key: listingKey } = parseScanHistoryLine(line);
     const status = rawStatus || 'added';
     if (!url) continue;
     // Not pinned and not a recheck candidate either: the row records a config
@@ -1910,13 +2032,26 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
     // OBSERVATIONAL_SCAN_HISTORY_STATUSES.
     if (OBSERVATIONAL_SCAN_HISTORY_STATUSES.has(status)) continue;
     if (shouldDedupScanHistoryRow({ firstSeen, status }, policy)) {
-      seen.add(normalizeUrlForDedup(url));
-      if (extraTokensFor) {
-        for (const token of [].concat(extraTokensFor(url, portal) || [])) {
+      const urlToken = normalizeUrlForDedup(url);
+      seen.add(urlToken);
+      const recorded = languageFormsForDedup(language);
+      recordUrlVariant(variants, urlToken, recorded.length ? recorded : languageFormsFromUrl(url), title);
+      // Only accepted or intentionally deferred posting rows can teach this
+      // scan a strong identity. Verification rejections such as expired or
+      // missing-apply-control URLs may pin that URL, but must not suppress a
+      // different live alias with the same provider identity.
+      const identityMayPromote = status === 'added' || status.startsWith('cooldown:');
+      if (identityMayPromote) addIdentityPromotableUrl(urlToken, listingKey);
+      if (extraTokensFor && identityMayPromote) {
+        for (const token of [].concat(extraTokensFor(url, portal, listingKey) || [])) {
           if (token) seen.add(token);
         }
       }
-    } else recheckCandidates.add(normalizeUrlForDedup(url));
+    } else {
+      const urlToken = normalizeUrlForDedup(url);
+      recheckCandidates.add(urlToken);
+      if (status === 'added' && listingKey) recheckListingTokens.set(urlToken, `listing:${listingKey}`);
+    }
   }
 
   // pipeline.md — extract URLs from checkbox lines, wherever the URL sits in the
@@ -1965,11 +2100,22 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
     const done = /^\s*- \[x\]/i.test(line);
     if ((done || inProcessed) && recheckCandidates.has(key)) continue;
     seen.add(key);
+    recordUrlVariant(variants, key, languageFormsFromUrl(url), extractPipelineCompanyRole(line)?.role);
+    // A stale history row is still pinned while its actionable pipeline entry
+    // exists. Keep its strong identity pinned for the same period, or an ATS
+    // alias could slip through while the original URL remains queued.
+    const listingToken = recheckListingTokens.get(key);
+    if (listingToken) {
+      seen.add(listingToken);
+      addIdentityPromotableUrl(key, recheckListingTokens.get(key)?.slice('listing:'.length));
+    }
   }
 
   // applications.md — extract URLs from report links and any inline URLs
   for (const match of applicationsText.matchAll(/https?:\/\/[^\s|)]+/g)) {
-    seen.add(normalizeUrlForDedup(match[0]));
+    const key = normalizeUrlForDedup(match[0]);
+    seen.add(key);
+    recordUrlVariant(variants, key, languageFormsFromUrl(match[0]));
   }
 
   // Counted against the finished set: a released row that applications.md or an
@@ -1981,7 +2127,9 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
   for (const key of recheckCandidates) if (!seen.has(key)) released.add(key);
   const recheckEligible = released.size;
 
-  return { seen, recheckEligible, released };
+  // `released` is fork-local (lib/first-scan-backfill.mjs); `identityPromotableUrls`
+  // and `variants` are upstream's (listing identity #4642, language versions #4789).
+  return { seen, recheckEligible, released, identityPromotableUrls, variants };
 }
 
 // Path options mirror mergeIntoPipeline's seam below: the defaults are the
@@ -2389,10 +2537,9 @@ export const ANY_REQUISITION = '*';
  *   (`Job.requisitionId`, e.g. SmartRecruiters `refNumber`), or the same value
  *   recorded in scan-history's `requisition_id` column. Not parsed: it is the
  *   employer's own identifier, not text, so it counts even without a digit.
- *   It is compared case-folded and in the form scan-history stores it
- *   (`sanitizeTsvField`, idempotent), so a live id and its stored copy meet
- *   even when the writer's formula guard prefixed the stored one. Forms read
- *   from a URL or from text must contain a digit;
+ *   It is compared case-folded, with whitespace flattened the way the
+ *   scan-history writer flattens it, so a live id meets its copy read back
+ *   from the file. Forms read from a URL or from text must contain a digit;
  * - a Workday URL, via `workdayDedupKey` (the same parse the provider uses for
  *   cross-site dedupe, #3439, including its `-N` repost-suffix stripping);
  * - labelled free text (tracker Notes, a posting title) via the tracker's own
@@ -2439,7 +2586,7 @@ export const ANY_REQUISITION = '*';
 export function requisitionIdsForDedup({ url, text, requisitionId } = {}) {
   const suppliedId = typeof requisitionId === 'string' ? requisitionId.trim() : '';
   const workdayKey = !suppliedId && typeof url === 'string' ? workdayDedupKey({ url }) : null;
-  if (suppliedId) return [sanitizeTsvField(suppliedId).toUpperCase()];
+  if (suppliedId) return [normalizeScanScalar(suppliedId).toUpperCase()];
   let raws;
   if (workdayKey) {
     // `workday:{hostname}:{reqId}` — a hostname has no colon, so the ID is
@@ -2865,9 +3012,12 @@ function sanitizePipelineUrl(value) {
     .replace(/\|/g, '%7C');
 }
 
+// One TSV cell as scan-history stores it: tabs and line breaks flattened to
+// spaces (the format has no escape for them), then reversible formula
+// escaping. parseScanHistoryLine undoes the escaping, so a reader gets back
+// normalizeScanScalar(value).
 export function sanitizeTsvField(value) {
-  const normalized = normalizeScanScalar(value);
-  return /^[=+\-@]/.test(normalized) ? `'${normalized}` : normalized;
+  return escapeFormulaCell(normalizeScanScalar(value));
 }
 
 // Format an offer's parsed compensation (the annualized {min,max,currency} that
@@ -2979,13 +3129,111 @@ export function formatScanHistoryRow(offer, date, status = 'added') {
     normalized_company: normalizeCompanyName(offer.company || ''),
     // Requisition id and posting language, as the provider reported them
     // (Job.requisitionId / Job.language); '' when it didn't. They let
-    // company+role dedup tell apart two requisitions with one title, and two
-    // language versions of one requisition, across runs — see
-    // collectSeenCompanyRoles.
+    // company+role dedup tell apart two same-titled postings with different
+    // requisitions or language variants, across runs.
     requisition_id: typeof offer.requisitionId === 'string' ? offer.requisitionId : '',
     language: typeof offer.language === 'string' ? offer.language : '',
+    listing_key: typeof offer.listingKey === 'string' ? offer.listingKey : '',
   };
   return SCAN_HISTORY_COLUMNS.map((name) => sanitizeTsvField(record[name])).join('\t');
+}
+
+// The provider must explicitly supply all three ATS-native identity fields;
+// a URL or title never fills a missing component. This v1 token shares the
+// scanner's seen set with normalized URL tokens but remains type-prefixed.
+export function listingIdentityToken(offer) {
+  if (!offer?.listingIdentity) return null;
+  try {
+    const record = computeListingFingerprint({ strong: offer.listingIdentity });
+    return record.listing_key ? `listing:${record.listing_key}` : null;
+  } catch {
+    // Malformed or incomplete provider identity is not strong evidence; the
+    // existing URL and company/role rules remain responsible for that offer.
+    return null;
+  }
+}
+
+/**
+ * Replace any provider-supplied listing key with the key derived from the
+ * validated identity, or clear it when the identity is incomplete/malformed.
+ * The scanner calls this before a job can reach history output.
+ */
+export function refreshListingKey(offer) {
+  const token = listingIdentityToken(offer);
+  offer.listingKey = token ? token.slice('listing:'.length) : '';
+  return token;
+}
+
+export function isOfferSeen(offer, seenUrls, identityPromotableUrls = null) {
+  const urlToken = normalizeUrlForDedup(offer?.url);
+  const identityToken = listingIdentityToken(offer);
+  if (seenUrls.has(urlToken)) {
+    const historicalKeys = identityPromotableUrls?.get(urlToken);
+    const currentKey = identityToken?.slice('listing:'.length);
+    if (identityToken && historicalKeys
+        && (historicalKeys.has(null) || historicalKeys.has(currentKey))) seenUrls.add(identityToken);
+    return true;
+  }
+  return Boolean(identityToken && seenUrls.has(identityToken));
+}
+
+export function markOfferSeen(offer, seenUrls, { includeIdentity = true } = {}) {
+  const urlToken = normalizeUrlForDedup(offer?.url);
+  const identityToken = listingIdentityToken(offer);
+  seenUrls.add(urlToken);
+  if (identityToken && includeIdentity) {
+    offer.listingKey = identityToken.slice('listing:'.length);
+    seenUrls.add(identityToken);
+  }
+}
+
+/**
+ * Keep the first live offer for each strong ATS identity and add its token to
+ * the run's seen set. Call only with offers accepted by liveness verification.
+ */
+export function retainVerifiedListingIdentities(offers, seenUrls, verificationStatusByOffer = new Map()) {
+  const selectedByIdentity = new Map();
+  const withoutIdentity = [];
+  for (const offer of offers) {
+    const token = listingIdentityToken(offer);
+    if (!token) {
+      withoutIdentity.push(offer);
+      continue;
+    }
+    const status = verificationStatusByOffer.get(offer);
+    const rank = status === 'active' ? 1 : 0;
+    const current = selectedByIdentity.get(token);
+    if (!current || rank > current.rank) selectedByIdentity.set(token, { offer, rank });
+  }
+  const retained = [...selectedByIdentity.values()].map(({ offer }) => offer);
+  const retainedSet = new Set(retained);
+  // Keep input order for unrelated offers while replacing an uncertain alias
+  // with an active one for the same identity, regardless of which was fetched
+  // first.
+  const ordered = offers.filter((offer) => !listingIdentityToken(offer) || retainedSet.has(offer));
+  const uniqueOrdered = [];
+  const seenObjects = new Set();
+  for (const offer of ordered) {
+    if (seenObjects.has(offer)) continue;
+    seenObjects.add(offer);
+    uniqueOrdered.push(offer);
+  }
+  for (const offer of [...withoutIdentity, ...retained]) {
+    const token = listingIdentityToken(offer);
+    if (!token) continue;
+    seenUrls.add(token);
+    offer.listingKey = token.slice('listing:'.length);
+  }
+  return uniqueOrdered;
+}
+
+/**
+ * Move a verified posting to a rediscovered URL. The source URL's ATS identity
+ * cannot describe the target until its provider resolves that target explicitly.
+ */
+export function migrateOfferToUrl(offer, url) {
+  const { listingIdentity: _sourceIdentity, listingKey: _sourceKey, ...sourceFields } = offer;
+  return { ...sourceFields, url, previousUrl: offer.url };
 }
 
 /**
@@ -3042,7 +3290,7 @@ export function loadFingerprintHistory(historyPath = SCAN_HISTORY_PATH) {
  *   Scan-history recheck policy, shared by the URL and company+role sets.
  * @param {(name: unknown) => string} [canonicalize=defaultCompanyNormalizer] -
  *   Company canonicalizer for the role keys.
- * @returns {{seen: Set<string>, recheckEligible: number, released: Set<string>, seenCompanyRoles: Set<string>, seenCompanyRoleBases: Set<string>, seenCompanyRoleRequisitions: Map<string, Set<string>>, locatedRequisitionsByBase: Map<string, Set<string>>, seenCompanyRoleLanguages: Map<string, Set<string>>, locatedLanguagesByBase: Map<string, Set<string>>, fingerprintHistory: Array<{url: string, dateStr: string, company: string, title: string, fingerprint: string}>}}
+ * @returns {{seen: Set<string>, identityPromotableUrls: Map<string, Set<string|null>>, recheckEligible: number, released: Set<string>, seenUrlVariants: Map<string, Array<{languages: string[], title: string}>>, seenCompanyRoles: Set<string>, seenCompanyRoleBases: Set<string>, seenCompanyRoleRequisitions: Map<string, Set<string>>, locatedRequisitionsByBase: Map<string, Set<string>>, seenCompanyRoleLanguages: Map<string, Set<string>>, locatedLanguagesByBase: Map<string, Set<string>>, fingerprintHistory: Array<{url: string, dateStr: string, company: string, title: string, fingerprint: string}>}}
  */
 // Same path seam as loadSeenUrls/appendToPipeline: anchored defaults, explicit
 // paths for a caller with its own lane or a test with a fixture.
@@ -3055,7 +3303,11 @@ export function loadDedupSnapshot(policy = {}, canonicalize = defaultCompanyNorm
   const scanHistoryText = readIfExists(scanHistoryPath);
   const pipelineText = readIfExists(pipelinePath);
   const applicationsText = readIfExists(applicationsPath);
-  const { seen, recheckEligible, released } = collectSeenUrls({ scanHistoryText, pipelineText, applicationsText }, policy);
+  const { seen, recheckEligible, released, identityPromotableUrls, variants: seenUrlVariants } = collectSeenUrls(
+    { scanHistoryText, pipelineText, applicationsText },
+    policy,
+    { extraTokensFor: (_url, _portal, listingKey) => listingKey ? `listing:${listingKey}` : null },
+  );
   // Preserve the exported snapshot field for existing callers. The scanner's
   // decision uses locatedRequisitionsByBase, not this legacy set.
   const seenCompanyRoleBases = new Set();
@@ -3074,7 +3326,7 @@ export function loadDedupSnapshot(policy = {}, canonicalize = defaultCompanyNorm
     locatedLanguagesByBase,
   });
   const fingerprintHistory = collectFingerprintHistory(scanHistoryText);
-  return { seen, recheckEligible, released, seenCompanyRoles, seenCompanyRoleBases, seenCompanyRoleRequisitions, locatedRequisitionsByBase, seenCompanyRoleLanguages, locatedLanguagesByBase, fingerprintHistory };
+  return { seen, identityPromotableUrls, recheckEligible, released, seenUrlVariants, seenCompanyRoles, seenCompanyRoleBases, seenCompanyRoleRequisitions, locatedRequisitionsByBase, seenCompanyRoleLanguages, locatedLanguagesByBase, fingerprintHistory };
 }
 
 // Standard skeleton created on fresh install — matches the format documented
@@ -3142,17 +3394,19 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
 // appendFileSync is not atomic, so a concurrent append can interleave mid-line.
 // Both surface as rows that silently stop counting, because every reader skips
 // a malformed line quietly.
-export async function appendToScanHistory(offers, date, status = 'added') {
-  await withPipelineLock(SCAN_HISTORY_PATH, () => {
+//
+// `alreadyLocked` is for the one caller whose APPEND is decided by a READ of
+// this same file — check-liveness's expired-verdict recorder, which must hold
+// the lock across both or its plan is a check-then-act (a concurrent scanner
+// appending in between makes it write a row that is no longer needed). The
+// lock is not reentrant, so that caller cannot simply wrap this call; it takes
+// the lock itself and passes true. Everything else must leave it alone: true
+// with no lock actually held reintroduces both races described above.
+export async function appendToScanHistory(offers, date, status = 'added', { alreadyLocked = false } = {}) {
+  const write = () => {
     // Ensure file + header exist. The header is SCAN_HISTORY_COLUMNS, the same
     // list the row writer (formatScanHistoryRow) emits in order. Written ONLY
-    // on fresh-file creation; existing files (including headerless legacy files
-    // and files with an older, shorter header) are never rewritten. All readers
-    // either skip line 0 unconditionally, detect the header by its `url\t`
-    // prefix, or skip non-URL col-0 rows, so widening it stays
-    // backward-compatible. `status` is parameterized so callers can record
-    // verify outcomes (`skipped_expired`, etc.) without the legacy `(expired)`
-    // suffix.
+    // on fresh-file creation; existing files are never rewritten.
     if (!existsSync(SCAN_HISTORY_PATH)) {
       mkdirSync(path.dirname(SCAN_HISTORY_PATH), { recursive: true });
       atomicWriteFile(SCAN_HISTORY_PATH, `${SCAN_HISTORY_COLUMNS.join('\t')}\n`);
@@ -3161,7 +3415,10 @@ export async function appendToScanHistory(offers, date, status = 'added') {
     const lines = offers.map(o => formatScanHistoryRow(o, date, status)).join('\n') + '\n';
 
     appendFileSync(SCAN_HISTORY_PATH, lines, 'utf-8');
-  });
+  };
+
+  if (alreadyLocked) write();
+  else await withPipelineLock(SCAN_HISTORY_PATH, write);
 }
 
 // ── Company blacklist (#1742) ───────────────────────────────────────
@@ -3505,34 +3762,70 @@ async function parallelFetch(tasks, limit) {
 
 // ── Main ────────────────────────────────────────────────────────────
 
-async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0, rediscover = false } = {}) {
-  // Dynamic imports keep the default zero-token path free of Playwright startup
-  let chromium;
-  let checkUrlLiveness;
-  let checkUrlLivenessWithFallback;
-  let createHeadedPageProvider;
-  let newLivenessPage;
-  let jitteredDelayMs;
-  let sleep;
-  try {
-    ({ chromium } = await import('playwright'));
-    ({ checkUrlLiveness, checkUrlLivenessWithFallback, createHeadedPageProvider, newLivenessPage, jitteredDelayMs, sleep } = await import('./liveness-browser.mjs'));
-  } catch (err) {
-    throw new Error(
-      `--verify requires Playwright with Chromium (run "npx playwright install chromium"): ${err.message}`,
-      { cause: err },
-    );
-  }
+export async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0, rediscover = false } = {}, {
+  checkApi = checkLivenessViaApi,
+  loadPlaywright = () => import('playwright'),
+} = {}) {
+  // These helpers do not import Playwright. In particular, apply the same URL
+  // guard before the API rung: an embedded ATS id must not bless a private URL.
+  const {
+    rejectPrivateOrInvalid, checkUrlLiveness, checkUrlLivenessWithFallback,
+    createHeadedPageProvider, newLivenessPage, installLivenessRouteGuard, jitteredDelayMs, sleep,
+  } = await import('./liveness-browser.mjs');
 
-  let browser;
-  try {
-    browser = await chromium.launch({ headless: true });
-  } catch (err) {
-    throw new Error(
-      `--verify could not launch Chromium (run "npx playwright install chromium" or re-run without --verify): ${err.message}`,
-      { cause: err },
-    );
+  // The HTTP rung can run concurrently; each provider retains its own rate
+  // limit inside checkLivenessViaApi. Index results so completion order never
+  // reorders the output or the subsequent sequential browser checks.
+  const verdicts = new Array(offers.length);
+  await parallelFetch(offers.map((offer, i) => async () => {
+    const guard = rejectPrivateOrInvalid(offer.url);
+    if (guard) {
+      verdicts[i] = { result: 'uncertain', ...guard };
+      return;
+    }
+    try {
+      verdicts[i] = await checkApi(offer.url);
+    } catch (err) {
+      console.warn(`  ⚠️ API verification failed for ${offer.url}; falling back to Playwright: ${err.message}`);
+      verdicts[i] = null;
+    }
+  }), CONCURRENCY);
+
+  let browser = null, page = null, headed = null;
+  let hadBrowserOffer = false;
+  async function browserForOffer() {
+    if (!browser) {
+      let chromium;
+      try {
+        ({ chromium } = await loadPlaywright());
+      } catch (err) {
+        throw new Error(
+          `--verify requires Playwright with Chromium (run "npx playwright install chromium"): ${err.message}`,
+          { cause: err },
+        );
+      }
+      try {
+        browser = await chromium.launch({ headless: true });
+      } catch (err) {
+        throw new Error(
+          `--verify could not launch Chromium (run "npx playwright install chromium" or re-run without --verify): ${err.message}`,
+          { cause: err },
+        );
+      }
+      page = await newLivenessPage(browser);
+      await installLivenessRouteGuard(page);
+      headed = headedFallback ? createHeadedPageProvider(chromium) : null;
+    }
+    // Space only browser work, including a search after an API 404 and the
+    // offer after a successful migration. API-only verdicts need no WAF delay.
+    const wait = hadBrowserOffer ? jitteredDelayMs(throttleBaseMs) : 0;
+    if (wait) await sleep(wait);
+    hadBrowserOffer = true;
+    return page;
   }
+  const checkPage = (page, url) => headed
+    ? checkUrlLivenessWithFallback(page, url, { getHeadedPage: () => headed.get() })
+    : checkUrlLiveness(page, url);
 
   // Three permanent buckets + one transient passthrough:
   //   verified  → active pages and transient nav errors (retry next scan)
@@ -3542,41 +3835,46 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
   //               opt-in stricter filter; keeping these defeats the purpose.
   //   invalid   → up-front URL guard rejections (malformed / non-http / private)
   const verified = [];
+  const verificationStatusByOffer = new Map();
   const expired = [];
   const dropped = [];
   const invalid = [];
   const migrated = [];
 
-  const headed = headedFallback ? createHeadedPageProvider(chromium) : null;
-  const getHeadedPage = headed ? () => headed.get() : undefined;
-
   try {
-    const page = await newLivenessPage(browser);
     // Sequential — project rule: never Playwright in parallel
     for (let i = 0; i < offers.length; i++) {
       const offer = offers[i];
-      const { result, code, reason } = headed
-        ? await checkUrlLivenessWithFallback(page, offer.url, { getHeadedPage })
-        : await checkUrlLiveness(page, offer.url);
+      let offerPage = null;
+      let verdict = verdicts[i];
+      // Non-null API `uncertain` is an explicit conservative conclusion, just
+      // as in check-liveness.mjs. Only an inconclusive null needs the browser.
+      if (!verdict) {
+        offerPage = await browserForOffer();
+        verdict = await checkPage(offerPage, offer.url);
+      }
+      const { result, code, reason } = verdict;
       if (result === 'expired') {
         // 404/410 on a tracked company may just be a moved role — run one
         // search + re-verify before giving up (opt-in via --rediscover-404).
-        // Only http_gone (HTTP 404/410) qualifies; soft-expiry signals
+        // Only HTTP 404/410 qualifies, from either rung; soft-expiry signals
         // (redirect/body/listing) are real closures, not URL moves.
-        if (rediscover && code === 'http_gone' && offer.tracked && offer.careersUrlDomain) {
-          const newUrl = await searchForNewUrl(page, offer);
+        const httpGone = code === 'http_gone' || /^[a-z][a-z0-9-]*_api_gone$/.test(code);
+        if (rediscover && httpGone && offer.tracked && offer.careersUrlDomain) {
+          offerPage ??= await browserForOffer();
+          const newUrl = await searchForNewUrl(offerPage, offer);
           if (newUrl) {
             // Mirror the primary check: without the headed fallback, a
             // challenge-prone domain would flag the rediscovered URL as
             // expired just because the recheck hit the same anti-bot wall.
-            const recheck = headed
-              ? await checkUrlLivenessWithFallback(page, newUrl, { getHeadedPage })
-              : await checkUrlLiveness(page, newUrl);
+            const recheck = await checkPage(offerPage, newUrl);
             // Require a *confirmed* live page before migrating. A transient
             // 'uncertain' (timeout/DNS/5xx) must not commit an unverified URL —
             // fall through to expired (the original 404/410 is a real closure).
             if (recheck.result === 'active') {
-              migrated.push({ ...offer, url: newUrl, previousUrl: offer.url });
+              const migratedOffer = migrateOfferToUrl(offer, newUrl);
+              migrated.push(migratedOffer);
+              verificationStatusByOffer.set(migratedOffer, 'active');
               console.log(`  🔄 migrated  ${offer.company} | ${offer.title} → ${newUrl}`);
               continue;
             }
@@ -3599,19 +3897,20 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
       } else {
         // 'active' or 'uncertain' due to navigation_error (transient — retry next scan)
         verified.push(offer);
+        verificationStatusByOffer.set(offer, result);
         const icon = result === 'active' ? '✅' : '⚠️';
         console.log(`  ${icon} ${result.padEnd(9)} ${offer.company} | ${offer.title}`);
       }
-
-      const wait = i < offers.length - 1 ? jitteredDelayMs(throttleBaseMs) : 0;
-      if (wait) await sleep(wait);
     }
   } finally {
-    if (headed) await headed.close();
-    await browser.close();
+    try {
+      if (headed) await headed.close();
+    } finally {
+      if (browser) await browser.close();
+    }
   }
 
-  return { verified, expired, dropped, invalid, migrated };
+  return { verified, expired, dropped, invalid, migrated, verificationStatusByOffer };
 }
 
 // Stable codes from liveness-browser's up-front URL guard. Routing dispatches
@@ -3648,9 +3947,9 @@ const USAGE = `Usage:
   node scan.mjs                              # scan all enabled companies
   node scan.mjs --dry-run                    # preview without writing files
   node scan.mjs --company Cohere             # scan a single company
-  node scan.mjs --verify                     # Playwright-check each new URL; drop expired postings
+  node scan.mjs --verify                     # API-first liveness check; use Playwright when inconclusive
   node scan.mjs --verify --headed-fallback   # retry anti-bot-blocked URLs in a headed browser (needs a display)
-  node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
+  node scan.mjs --verify --throttle          # jittered ~5-10s gap between browser checks
   node scan.mjs --verify --throttle=8000     # custom base gap in ms (waits base..2*base)
   node scan.mjs --rediscover-404             # re-verify tracked URLs that 404/410 (rides on --verify)
   node scan.mjs --include-blacklisted        # let data/blacklist.md matches through (annotated)
@@ -3987,6 +4286,7 @@ async function main() {
   const dedupIncludeLanguage = resolveDedupIncludeLanguage(config);
   const dedupSnapshot = loadDedupSnapshot(historyPolicy, canonicalizeCompany, { includeLocation: dedupIncludeLocation });
   const seenUrls = dedupSnapshot.seen;
+  const seenUrlVariants = dedupSnapshot.seenUrlVariants ?? new Map();
   const seenCompanyRoles = dedupSnapshot.seenCompanyRoles;
   const seenCompanyRoleRequisitions = dedupSnapshot.seenCompanyRoleRequisitions ?? new Map();
   const locatedRequisitionsByBase = dedupSnapshot.locatedRequisitionsByBase ?? new Map();
@@ -4039,6 +4339,7 @@ async function main() {
   let totalFilteredVisa = 0;
   let totalDupes = 0;
   const newOffers = [];
+  const verifyDedupKeys = new Map();
   const errors = [...resolveErrors];
   const emptyTargets = [];
   const backfillDone = [];
@@ -4104,6 +4405,9 @@ async function main() {
       sinceMs: widen ? backfillEarlyStopMs : earlyStopSinceMs,
       includeUndated: true,
       locationHints: config.location_filter,
+      // A provider that serves extra language versions of a posting at extra
+      // cost fetches them only when the scan will keep them.
+      dedupIncludeLanguage,
     };
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
     try {
@@ -4136,8 +4440,24 @@ async function main() {
         ? contentRescue.forCompany(jobs, { providerId: provider.id })
         : null;
 
+      // This fetch's language versions of each posting, in provider order and
+      // before any filter: a seen row is matched against every version, also
+      // those a filter rejects (a German title can fail a title filter that its
+      // English version passes).
+      const siblingsByUrl = new Map();
+      if (dedupIncludeLanguage) {
+        for (const job of jobs) {
+          const languages = languageFormsForDedup(job?.language);
+          if (!languages.length) continue;
+          const key = normalizeUrlForDedup(job.url);
+          if (!siblingsByUrl.has(key)) siblingsByUrl.set(key, []);
+          siblingsByUrl.get(key).push({ languages, title: job.title });
+        }
+      }
+
       const declaredFields = normalizeFilterOn(company.filter_on);
       for (const job of jobs) {
+        const listingToken = refreshListingKey(job);
         // #3438. Presence accounting only — no verdict, no rejection. It runs
         // before every filter below, including the blacklist skip, because it
         // answers "does this provider publish this field at all", which no
@@ -4150,7 +4470,6 @@ async function main() {
             declaredFieldAbsent.set(key, (declaredFieldAbsent.get(key) || 0) + 1);
           }
         }
-
         // Trust enrichment — runs before filters, never drops
         const trustResult = trustValidator(job);
         job.trustScore = trustResult.score;
@@ -4250,11 +4569,30 @@ async function main() {
           continue;
         }
         const dedupUrl = normalizeUrlForDedup(job.url);
-        // A widened (first-coverage) pass reaches postings far older than
-        // --since, including finished ones scan_history.recheck_after_days has
-        // released. Re-adding those would hand stage 2 postings it already
-        // triaged away, so they stay seen here. A normal run keeps the recheck.
-        if (seenUrls.has(dedupUrl) || (widen && releasedUrls.has(dedupUrl))) {
+        const language = languageFormsForDedup(job.language);
+        // A seen URL key passes only as a language version of that posting no
+        // seen row was in; a match on the provider's listing identity stays a
+        // duplicate. Such a version skips the company+role check below as
+        // well: the row it would match there is the same posting's, already
+        // resolved here, and an unknown-language row would hold it back again.
+        let newLanguageVersion = false;
+        if (isOfferSeen(job, seenUrls, dedupSnapshot.identityPromotableUrls)) {
+          newLanguageVersion = dedupIncludeLanguage && seenUrls.has(dedupUrl) && isUnseenLanguageVersion(
+            seenUrlVariants.get(dedupUrl),
+            { languages: language, title: job.title },
+            siblingsByUrl.get(dedupUrl),
+          );
+          if (!newLanguageVersion) {
+            totalDupes++;
+            continue;
+          }
+        } else if (widen && releasedUrls.has(dedupUrl)) {
+          // Fork-local. A widened (first-coverage) pass reaches postings far
+          // older than --since, including finished ones
+          // scan_history.recheck_after_days has released. Re-adding those would
+          // hand stage 2 postings it already triaged away, so they stay seen
+          // here. A normal run keeps the recheck. (A released URL is not in
+          // seenUrls at snapshot time, so isOfferSeen above cannot see it.)
           totalDupes++;
           continue;
         }
@@ -4269,8 +4607,7 @@ async function main() {
             ? companyRoleDedupKey(job.company, job.title, canonicalizeCompany, job.location)
             : baseKey);
         const requisition = requisitionIdsForDedup({ url: job.url, text: job.title, requisitionId: job.requisitionId });
-        const language = languageFormsForDedup(job.language);
-        if (matchesSeenCompanyRole({ key, baseKey, seen: seenCompanyRoles,
+        if (!newLanguageVersion && matchesSeenCompanyRole({ key, baseKey, seen: seenCompanyRoles,
           requisitions: seenCompanyRoleRequisitions, locatedRequisitions: locatedRequisitionsByBase,
           languages: seenCompanyRoleLanguages, locatedLanguages: locatedLanguagesByBase },
         requisition, dedupIncludeLanguage ? language : [])) {
@@ -4279,6 +4616,8 @@ async function main() {
         }
         const cooldownResult = cooldownFilter(job);
         if (cooldownResult.skip) {
+          markOfferSeen(job, seenUrls);
+          recordUrlVariant(seenUrlVariants, dedupUrl, language, job.title);
           totalFilteredCooldown++;
           cooldownOffers.push({
             job: { ...job, source: sourceName },
@@ -4291,11 +4630,21 @@ async function main() {
         // filter kept. A dropped posting is not marked seen: next run re-reads it.
         // Synchronous unless it must fetch the JD; after a fetch the dedup sets
         // are re-checked, since another company's task may have taken the role.
+        // The re-check repeats the two dedup decisions above with the same
+        // language-version exemption: an offer that passed as a new language
+        // version of an already-seen URL is still "seen" by URL, so it is a
+        // duplicate only if its language is no longer unseen (another task
+        // recorded it meanwhile), and it skips the company+role check as above.
         if (levelFilter) {
           const fetching = levelFilter.needsFetch(job);
           const level = fetching ? await levelFilter.check(job) : levelFilter.assess(job.title, job.description);
-          if (fetching && (seenUrls.has(dedupUrl)
-              || (key !== null && matchesSeenCompanyRole({ key, baseKey, seen: seenCompanyRoles,
+          if (fetching && ((isOfferSeen(job, seenUrls, dedupSnapshot.identityPromotableUrls)
+                && !(newLanguageVersion && isUnseenLanguageVersion(
+                  seenUrlVariants.get(dedupUrl),
+                  { languages: language, title: job.title },
+                  siblingsByUrl.get(dedupUrl),
+                )))
+              || (key !== null && !newLanguageVersion && matchesSeenCompanyRole({ key, baseKey, seen: seenCompanyRoles,
                 requisitions: seenCompanyRoleRequisitions, locatedRequisitions: locatedRequisitionsByBase,
                 languages: seenCompanyRoleLanguages, locatedLanguages: locatedLanguagesByBase },
               requisition, dedupIncludeLanguage ? language : [])))) {
@@ -4317,8 +4666,12 @@ async function main() {
         // same breath as the set it indexes, so a role first surfaced with a
         // city THIS run also suppresses a locationless twin later in the run —
         // not only across runs.
-        seenUrls.add(dedupUrl);
-        if (key !== null) {
+        // Verify mode can reject this URL as expired or invalid later. Pin the
+        // URL now for same-run URL dedup, but wait to pin its cross-URL identity
+        // until liveness verification accepts an offer.
+        markOfferSeen(job, seenUrls, { includeIdentity: !verify });
+        recordUrlVariant(seenUrlVariants, dedupUrl, language, job.title);
+        if (key !== null && !verify) {
           seenCompanyRoles.add(key);
           recordForms(seenCompanyRoleRequisitions, key, requisition);
           recordLanguages(seenCompanyRoleLanguages, key, requisition, language);
@@ -4331,11 +4684,15 @@ async function main() {
         // rediscovery fallback. A null domain (no careers_url) marks the offer
         // as broad-discovery — ineligible for the fallback, per the issue scope.
         const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
-        newOffers.push({
+        const offerForVerification = {
           ...job,
           source: sourceName,
           tracked: Boolean(careersUrlDomain),
           careersUrlDomain,
+        };
+        newOffers.push(offerForVerification);
+        if (verify) verifyDedupKeys.set(offerForVerification, {
+          key, baseKey, requisition, language, newLanguageVersion,
         });
       }
       // Every posting went through the filters without a throw. An empty result is
@@ -4366,7 +4723,7 @@ async function main() {
   let invalidOffers = [];
   let migratedOffers = [];
   if (verify && newOffers.length > 0) {
-    console.log(`\nVerifying liveness of ${newOffers.length} new offer(s) with Playwright (sequential)...`);
+    console.log(`\nVerifying liveness of ${newOffers.length} new offer(s) via API, with sequential Playwright fallback...`);
     const result = await verifyOffers(newOffers, { headedFallback, throttleBaseMs, rediscover });
     verifiedOffers = result.verified;
     expiredOffers = result.expired;
@@ -4376,7 +4733,52 @@ async function main() {
     // Migrated offers re-enter the pipeline at their newly discovered URL.
     if (migratedOffers.length > 0) {
       verifiedOffers = [...verifiedOffers, ...migratedOffers];
+      for (const migrated of migratedOffers) {
+        const previous = newOffers.find((offer) => offer.url === migrated.previousUrl);
+        const priorKeys = previous && verifyDedupKeys.get(previous);
+        if (priorKeys) verifyDedupKeys.set(migrated, {
+          ...priorKeys,
+          requisition: requisitionIdsForDedup({ url: migrated.url, text: migrated.title, requisitionId: migrated.requisitionId }),
+          language: languageFormsForDedup(migrated.language),
+        });
+      }
     }
+    // Several URL aliases can reach verification before liveness is known.
+    // Keep the first accepted offer for each strong identity, and only then
+    // publish the identity token to this run's dedup set. Rejected aliases do
+    // not hide a later live URL.
+    const countBeforeIdentityDedup = verifiedOffers.length;
+    verifiedOffers = retainVerifiedListingIdentities(verifiedOffers, seenUrls, result.verificationStatusByOffer);
+    totalDupes += countBeforeIdentityDedup - verifiedOffers.length;
+    const acceptedOffers = [];
+    for (const offer of verifiedOffers) {
+      const keys = verifyDedupKeys.get(offer);
+      // A language version the URL check let through skips the role check
+      // here too, for the same reason as in the scan loop.
+      if (keys?.key !== null && keys?.key !== undefined && !keys.newLanguageVersion && matchesSeenCompanyRole({
+        key: keys.key,
+        baseKey: keys.baseKey,
+        seen: seenCompanyRoles,
+        requisitions: seenCompanyRoleRequisitions,
+        locatedRequisitions: locatedRequisitionsByBase,
+        languages: seenCompanyRoleLanguages,
+        locatedLanguages: locatedLanguagesByBase,
+      }, keys.requisition, dedupIncludeLanguage ? keys.language : [])) {
+        totalDupes++;
+        continue;
+      }
+      if (keys?.key !== null && keys?.key !== undefined) {
+        seenCompanyRoles.add(keys.key);
+        recordForms(seenCompanyRoleRequisitions, keys.key, keys.requisition);
+        recordLanguages(seenCompanyRoleLanguages, keys.key, keys.requisition, keys.language);
+        if (keys.key !== keys.baseKey) {
+          recordForms(locatedRequisitionsByBase, keys.baseKey, keys.requisition);
+          recordLanguages(locatedLanguagesByBase, keys.baseKey, keys.requisition, keys.language);
+        }
+      }
+      acceptedOffers.push(offer);
+    }
+    verifiedOffers = acceptedOffers;
   }
 
   // 5.7. Cross-listing check (#1597): fingerprint each new offer's JD body and

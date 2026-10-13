@@ -164,8 +164,10 @@ function isPlainObject(v) {
  * Plain-text description from a detail document. `description` is observed as
  * an object of HTML sections (`{ company, role }`); the role section goes
  * first so the requirements survive the cap, then any other section, then the
- * company boilerplate. A bare HTML string is accepted as-is. Joined like
- * lever's fullDescription (one line per section, then the overall cap).
+ * company boilerplate. A bare HTML string is accepted as-is. Capped like
+ * lever's leverDescription (each HTML piece at FULL_DESCRIPTION_CAP, then the
+ * joined text); the sections are joined by one newline here, where lever puts a
+ * blank line between its parts.
  * @param {Record<string, any>} detail
  * @returns {string}
  */

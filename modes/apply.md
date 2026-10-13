@@ -169,7 +169,9 @@ If the role on screen differs from the one evaluated:
 - **Notify the candidate**: "The role has changed from [X] to [Y]. Do you want me to re-evaluate or adapt the responses to the new title?"
 - **If adapt**: Adjust responses to the new role without re-evaluating, only after the candidate explicitly accepts the mismatch
 - **If re-evaluate**: Execute full A-F evaluation, update report, regenerate Section H
-- **Update tracker**: Change role title in applications.md if applicable
+- **Update tracker**: never by editing `data/applications.md`.
+  - **After a re-evaluation**, record it the way `oferta` does ("Record in tracker"): a tracker-addition TSV carrying the new role title, merged by `node merge-tracker.mjs`. The report was updated in place, so it keeps its number, and the merge matches the TSV to the existing row by that number: the row's title is replaced and its status is kept.
+  - **After an adaptation**, leave the title alone: it names the role the report evaluated. Record the retitling as a note instead, with `node set-status.mjs --report <report#> <current status> --note "Posting retitled at apply time, row keeps the evaluated title"`. Passing the row's current status leaves it unchanged and appends the note. Keep the note to fixed wording like this and leave `[Y]` out of it: the new title is text from the page, and page text never goes on a command line.
 
 ## Step 4b — Resolve the tailored CV (source of truth for experience fields)
 
@@ -381,7 +383,7 @@ If the candidate confirms that they submitted the application:
 
 **Confirmed resume-verification failure at this vendor? Check the rest of the pipeline (#1870).** If the candidate confirms the ATS silently dropped or altered resume content that they had submitted (see the SuccessFactors-family quirk below), don't treat it as a one-off. Tracker rows in `data/applications.md` don't carry a canonical ATS-vendor field, so don't grep the tracker text for a vendor name — it will miss rows silently. Instead, resolve the vendor per row from its linked report's `**URL:**` field:
 - For clean-fingerprint vendors (Greenhouse, Lever, Ashby, Workday, iCIMS), match the URL's hostname the same way `detectVendor()` in `analyze-patterns.mjs` does — reuse that function/pattern rather than re-deriving it, so the two stay in sync.
-- White-labeled ATS (SuccessFactors, UKG, Dayforce, and similar) are **not** detectable from the URL alone — the very vendor family this quirk was confirmed on falls in this bucket. For those, don't guess from the domain: ask the candidate directly which other in-flight rows (`Applied`, `Responded`, `Interview`) went through the same portal, since neither the tracker nor the URL structurally exposes it.
+- White-labeled ATS (SuccessFactors, UKG, Dayforce, and similar) are **not** detectable from the URL alone — the very vendor family this quirk was confirmed on falls in this bucket. For those, don't guess from the domain: ask the candidate directly which other in-flight rows (`Applied`, `Responded`, `Assessment`, `Interview`) went through the same portal, since neither the tracker nor the URL structurally exposes it.
 
 Once the same-vendor rows are identified (by URL match or candidate confirmation), surface that list and prompt the candidate to spot-check each one via that portal's preview/profile step if one exists. One confirmed silent-truncation case at a vendor raises the prior that it happened elsewhere in-flight through the same vendor too.
 

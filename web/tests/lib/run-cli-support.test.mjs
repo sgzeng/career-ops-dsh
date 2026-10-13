@@ -14,6 +14,7 @@ import {
   codexStreamArgs,
   completedReportNames,
   hasNewCompletedReport,
+  newCompletedReportNum,
   isFatalClaudeStderr,
   isFatalCodexStderr,
   isFatalGenericStderr,
@@ -315,13 +316,18 @@ test("Claude system init becomes the ready status", () => {
   assert.deepEqual(event, { status: "Agent ready" });
 });
 
-test("Claude result usage becomes tokens + cost", () => {
+test("Claude result usage counts cache reads with every reported token category", () => {
   const event = parseClaudeEvent(JSON.stringify({
     type: "result",
-    usage: { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 5 },
+    usage: {
+      input_tokens: 100,
+      output_tokens: 20,
+      cache_creation_input_tokens: 5,
+      cache_read_input_tokens: 500,
+    },
     total_cost_usd: 0.012,
   }));
-  assert.deepEqual(event, { tokens: 125, costUsd: 0.012 });
+  assert.deepEqual(event, { tokens: 625, costUsd: 0.012 });
 });
 
 test("Claude result without usage is ignored, not zeroed", () => {
@@ -524,6 +530,12 @@ test("replacing a reservation with a report counts as persistence", () => {
 test("reservation churn alone does not count as persistence", () => {
   const before = ["020-existing.md", "021-RESERVED.md"];
   assert.equal(hasNewCompletedReport(before, ["020-existing.md", "022-RESERVED.md"]), false);
+});
+
+test("newCompletedReportNum is the leading number of the new report", () => {
+  const before = ["020-existing.md", "021-RESERVED.md"];
+  assert.equal(newCompletedReportNum(before, ["020-existing.md", "021-new-company.md"]), 21);
+  assert.equal(newCompletedReportNum(before, ["020-existing.md", "022-RESERVED.md"]), null);
 });
 
 test("codexStreamArgs turns on the JSONL that parseCodexEvent reads", () => {

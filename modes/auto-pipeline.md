@@ -102,8 +102,9 @@ If the final score is >= 4.5, generate a draft of responses for the application 
 
 ## Step 5 — Update Tracker
 
-Do **not** hand-edit `data/applications.md` (see `_shared.md` rule 9). Write a
-tab-separated file to `batch/tracker-additions/{num}-{company-slug}.tsv` — a header
+Record it in the tracker the way `oferta` does ("Record in tracker"): a tracker-addition TSV merged by `node merge-tracker.mjs`, never a row written into `data/applications.md` by hand (see `_shared.md` rule 9). Fill every field, including the Report link and PDF as ✅.
+
+Write a tab-separated file to `batch/tracker-additions/{num}-{company-slug}.tsv` — a header
 row of column labels, then exactly one data row (`AGENTS.md` → "TSV Format for Tracker
 Additions" / `batch/batch-prompt.md` §Step 5) — then run `node merge-tracker.mjs`. If
 the entry came from `data/pipeline.md`, also run `node reconcile-pipeline.mjs`.

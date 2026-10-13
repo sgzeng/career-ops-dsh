@@ -158,7 +158,26 @@ function toOutputRow(j) {
   };
 }
 
+const USAGE = `Usage:
+  node scripts/parsers/google-careers.mjs [flags]
+
+  --since-days N     keep jobs published in the last N days (default 14)
+  --employers LIST   comma-separated feed employers (default ${DEFAULT_EMPLOYERS.join(',')})
+  --regex STR        case-insensitive topic regex over title + description (default: keep every job in the window)
+  --min-jobs N       fail if the feed parses to fewer jobs than this (default 1000; 1 with --fixture)
+  --fixture FILE     parse a saved feed file instead of fetching; for tests
+  --dry-run          also print a human table to stderr
+  --help, -h         print this usage block and exit
+
+Prints a JSON array on stdout. Exit codes: 0 ok, 1 fetch/parse failure, 2 bad flags.`;
+
 async function main() {
+  // Before anything is fetched: an unhandled flag must never run the scan
+  // (tests/help-flag-handled.test.mjs).
+  if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+    process.stdout.write(`${USAGE}\n`);
+    return;
+  }
   let parsed;
   try {
     parsed = parseArgs({

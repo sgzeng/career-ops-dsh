@@ -119,6 +119,10 @@ ok('dry-run reports the link-less-with-report rows; real run writes the link', (
     const after = readFileSync(env.tracker, 'utf-8');
     assert.match(after, /\[9030\]\((?:\.\.\/)?reports\/9030-acme-vuln-researcher-2026-09-02\.md\)/, 'row 9030 linked');
     assert.match(after, /9031 \| 2026-09-02 \| Beta \| Corp Sec \| 1\.0\/5 \| Evaluated \| ❌ \| — \|/, 'row 9031 left as — (no file)');
+    // A row this pass does not change is not re-serialized: merge-tracker renders the URL
+    // cell as a markdown link (#3516) whenever it rebuilds a row, and a report-link pass
+    // must not rewrite the URL column of every other row on the way.
+    assert.ok(after.includes('| pct 20 · no report on disk | https://example.com/jobs/9031 |'), 'row 9031 kept byte for byte, URL cell still bare');
   } finally { cleanup(env); }
 });
 

@@ -1,11 +1,11 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { coerceId } from './_ids.mjs';
+import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
 
 // Lever provider — hits the public postings endpoint.
 // Auto-detects from careers_url via jobs.(eu.)?lever.co/<slug>.
 // Handles both explicit `api:` URLs and auto-detection from `careers_url`.
-
-import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
 
 const ALLOWED_LEVER_HOSTS = new Set(['api.lever.co', 'api.eu.lever.co']);
 
@@ -70,23 +70,34 @@ function resolveLocation(categories) {
   return merged.join('; ');
 }
 
-/** `descriptionPlain` is only a posting's intro. Its responsibilities and
- *  requirements live in `lists[]` (heading `text` + HTML `content`) and the
- *  closing `additionalPlain` (measured on magnetforensics: ~2k chars of intro vs
- *  ~11k total), so content/visa filters reading only the intro missed them.
- *  A posting without lists or additional text maps to exactly its intro.
- *  @param {any} j */
-function fullDescription(j) {
-  const parts = [];
-  if (typeof j.descriptionPlain === 'string') parts.push(j.descriptionPlain);
-  if (Array.isArray(j.lists)) {
-    for (const list of j.lists) {
-      if (typeof list?.text === 'string') parts.push(list.text);
-      if (typeof list?.content === 'string') parts.push(htmlToText(list.content, FULL_DESCRIPTION_CAP));
-    }
-  }
-  if (typeof j.additionalPlain === 'string') parts.push(j.additionalPlain);
-  return parts.map(p => p.trim()).filter(Boolean).join('\n').slice(0, FULL_DESCRIPTION_CAP);
+/**
+ * The text the description filters (content_filter, its by_title_keyword
+ * gates, visa_filter, content rescue, the level ceiling) match against: the
+ * same three parts browser-extract's normalizeLeverJob() builds a JD from, in
+ * page order. `descriptionPlain` alone is the intro only; the requirements live
+ * in `lists` and the trailing copy in `additionalPlain`, both already in this
+ * board-wide payload (measured on magnetforensics: ~2k chars of intro vs ~11k
+ * total). Lever also leaves `descriptionPlain` empty while `description` holds
+ * the HTML (3817 of 3933 jobgether postings on 2026-10-10), so the intro falls
+ * back to that HTML.
+ *
+ * Fork: every HTML piece is stripped with FULL_DESCRIPTION_CAP (the 4000-char
+ * default would cut a long requirements list before its tail) and the joined
+ * text is capped at the same 20000, like the other full-text providers.
+ *
+ * Exported for tests.
+ *
+ * @param {any} j - one posting from the v0 postings list
+ * @returns {string}
+ */
+export function leverDescription(j) {
+  const str = (/** @type {unknown} */ v) => (typeof v === 'string' ? v.trim() : '');
+  const html = (/** @type {unknown} */ v) => htmlToText(v, FULL_DESCRIPTION_CAP);
+  const intro = str(j?.descriptionPlain) || html(j?.description);
+  const lists = Array.isArray(j?.lists)
+    ? j.lists.map((/** @type {any} */ l) => [str(l?.text), html(l?.content)].filter(Boolean).join('\n'))
+    : [];
+  return [intro, ...lists, str(j?.additionalPlain)].filter(Boolean).join('\n\n').slice(0, FULL_DESCRIPTION_CAP);
 }
 
 /** @type {Provider} */
@@ -108,15 +119,22 @@ export default {
     assertLeverUrl(apiUrl);
     const json = await ctx.fetchJson(apiUrl, { redirect: 'error', timeoutMs: LEVER_TIMEOUT_MS });
     if (!Array.isArray(json)) return [];
+    const boardSlug = new URL(apiUrl).pathname.match(/^\/v0\/postings\/([^/]+)\/?$/)?.[1] || '';
     return json.map(j => ({
       title: j.text || '',
       url: j.hostedUrl || '',
       company: entry.name,
+      listingIdentity: boardSlug && typeof j.id === 'string' && j.id.trim()
+        ? { ats_provider: 'lever', board_slug: boardSlug, posting_id: j.id }
+        : undefined,
       location: resolveLocation(j.categories),
       // Lever's v0 postings list ships the full description for free (same
       // payload, no per-job request) — enables scan.mjs content_filter.
-      description: fullDescription(j),
+      description: leverDescription(j),
       postedAt: typeof j.createdAt === 'number' ? j.createdAt : undefined,
+      // Lever's posting uuid; the v0 board API exposes no employer requisition
+      // field, so requisitionId stays unset rather than being inferred.
+      externalId: coerceId(j.id),
     }));
   },
 };

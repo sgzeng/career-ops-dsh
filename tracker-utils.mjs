@@ -794,7 +794,7 @@ export function writeFileAtomic(path, content, { mode } = {}) {
 /**
  * Load the canonical tracker states from `templates/states.yml`.
  *
- * states.yml is the single source of truth for the 8 canonical states and
+ * states.yml is the single source of truth for the canonical states and
  * their aliases. Parsing it here (instead of hardcoding the list) means a new
  * state or alias lands in one file and every consumer follows.
  *
@@ -875,6 +875,28 @@ export function resolveCanonicalState(input, states) {
     if (s.aliases.some(a => a.toLowerCase() === clean)) return s.label;
   }
   return null;
+}
+
+/**
+ * Resolve a raw tracker status CELL to its canonical lowercase state id.
+ *
+ * The read-side twin of resolveCanonicalState(): scripts that bucket or compare
+ * tracker rows (analyze-patterns, tracker-sync-check) work in ids
+ * (`interview`), not labels (`Interview`), and read cells that legacy trackers
+ * left with a date appended (`Rejected 2026-06-01`). Both steps live here so no
+ * reader needs its own alias table. The hand-copied ones had drifted: a
+ * `Mülakat` row counted as "pending" in the pattern analysis and as an
+ * unrecognized status in the sync check.
+ *
+ * @param {*} input - Raw status cell from applications.md.
+ * @param {{id:string,label:string,aliases:string[]}[]} states - From loadCanonicalStates().
+ * @returns {string|null} Canonical id (e.g. "interview"), or null when unknown.
+ */
+export function resolveCanonicalStateId(input, states) {
+  const cell = String(input ?? '').replace(/\*\*/g, '').replace(/\s+\d{4}-\d{2}-\d{2}.*$/, '');
+  const label = resolveCanonicalState(cell, states);
+  if (label === null) return null;
+  return states.find(s => s.label === label).id.toLowerCase();
 }
 
 /**

@@ -62,6 +62,13 @@
  *   key on; '' means NO KEY and must never be matched against another ''.
  *   Stable across the v1 plugin contract: its behaviour changes only with a
  *   documented note here, and existing plugins that never call it are unaffected.
+ * @property {(raw: string) => ({ domain: string, id: string } | null)} aggregatorPostingId
+ *   The requisition id an aggregator URL carries — LinkedIn's job id (path or
+ *   ?currentJobId=), Indeed's `jk`/`vjk` — keyed on the registrable domain, so
+ *   a tracking link and the canonical view of one posting resolve to the same
+ *   id. null means UNKNOWN (not an aggregator, no extractor, or no id), never
+ *   "the same posting"; ids are comparable only when `domain` matches. Same
+ *   stability promise as normalizePostingUrl.
  */
 
 /**

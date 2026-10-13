@@ -172,7 +172,27 @@ export async function collectJobs(keywords, opts) {
   return jobs;
 }
 
+const USAGE = `Usage:
+  node scripts/parsers/linkedin-jobs.mjs [flags] <keyword> [<keyword> ...]
+
+  --since-days N     recency window, also LinkedIn's f_TPR (default 7)
+  --pages N          guest pages per keyword, 10 cards each (default 2)
+  --location STR     LinkedIn location filter (default "United States")
+  --throttle-ms N    delay between requests (default 3500)
+  --dry-run          also print a human table to stderr
+  --fixture FILE     parse a saved HTML file instead of fetching (one page); for tests
+  --dump DIR         write each fetched page to DIR/<kw>-<start>.html for debugging
+  --help, -h         print this usage block and exit
+
+Prints a JSON array on stdout. Exit codes: 0 ok, 1 fetch failure, 2 blocked/rate-limited or bad flags.`;
+
 async function main() {
+  // Before anything is fetched: an unhandled flag must never run the search
+  // (tests/help-flag-handled.test.mjs).
+  if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+    process.stdout.write(`${USAGE}\n`);
+    return;
+  }
   let parsed;
   try {
     parsed = parseArgs({

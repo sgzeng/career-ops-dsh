@@ -209,6 +209,18 @@ ok('LinkedIn: bare id, title slug and currentJobId are one posting id', () => {
   // Different ids are different postings — that is the whole point.
   assert.notEqual(aggregatorPostingId('https://www.linkedin.com/jobs/view/4002').id, '4001');
 });
+ok('LinkedIn: the /comm/ link an alert email carries is the same posting id', () => {
+  // linkedin.com answers /comm/jobs/view/{id} with a 307 whose session_redirect
+  // is /jobs/view/{id}: the tracking wrapper and the view are one requisition.
+  assert.deepEqual(aggregatorPostingId('https://www.linkedin.com/comm/jobs/view/4001?trk=eml-job_card&trkEmail=eml-x'),
+    { domain: 'linkedin.com', id: '4001' });
+  assert.deepEqual(aggregatorPostingId('https://www.linkedin.com/comm/jobs/view/4001/'),
+    { domain: 'linkedin.com', id: '4001' });
+  // Only the verified shape: the email's other /comm/ links carry no posting.
+  assert.equal(aggregatorPostingId('https://www.linkedin.com/comm/jobs/view/not-a-number'), null);
+  assert.equal(aggregatorPostingId('https://www.linkedin.com/comm/jobs/search?keywords=pm'), null);
+  assert.equal(aggregatorPostingId('https://www.linkedin.com/comm/psettings/email'), null);
+});
 ok('Indeed: jk (and vjk on a results page) is the posting id, the region host is not', () => {
   assert.deepEqual(aggregatorPostingId('https://uk.indeed.com/viewjob?jk=abc123'),
     { domain: 'indeed.com', id: 'abc123' });

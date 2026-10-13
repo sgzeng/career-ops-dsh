@@ -21,6 +21,7 @@ export type Job = {
   text: string;
   result?: JobResult;
   cost?: { tokens: number; usd?: number }; // per-run token cost (Claude result event) — local only
+  reportN?: number | null;
   startedAt: number;
   endedAt?: number;
 };
@@ -140,6 +141,7 @@ export function JobsProvider({ children }: { children: React.ReactNode }) {
         let verdictLine = ""; // latched separately so the 8000-char tail can't drop it
         let doneTokens = 0; // per-run token cost, forwarded on the done event (#6)
         let doneCostUsd: number | null = null;
+        let doneReportN: number | null = null;
         const finish = (status: "done" | "error", lastLabel?: string) => {
           const result = status === "done" ? parseVerdict(verdictLine || text) : undefined;
           const cost = status === "done" && doneTokens > 0 ? { tokens: doneTokens, usd: doneCostUsd ?? undefined } : undefined;
@@ -148,6 +150,7 @@ export function JobsProvider({ children }: { children: React.ReactNode }) {
             status,
             result,
             cost,
+            reportN: doneReportN,
             endedAt: Date.now(),
             steps: lastLabel ? [...j.steps, { kind: "status", label: lastLabel, ts: Date.now() }] : j.steps,
           }));
@@ -198,6 +201,7 @@ export function JobsProvider({ children }: { children: React.ReactNode }) {
           }
           doneTokens = completion.tokens ?? 0;
           doneCostUsd = completion.costUsd ?? null;
+          doneReportN = typeof completion.reportN === "number" ? completion.reportN : null;
           finish("done", "Done");
         } catch {
           finish("error", "Connection error");

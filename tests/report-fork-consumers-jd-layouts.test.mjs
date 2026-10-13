@@ -29,6 +29,7 @@ import {
   setMachineSummaryScalar, setRemoteRow,
 } from '../report-format.mjs';
 import { buildRoleModel } from '../roles/roles-model.mjs';
+import { extractCellUrl } from '../tracker-parse.mjs';
 import { pass, fail, warn, ROOT, rmSync, linkNodeModules } from './helpers.mjs';
 
 console.log('\nfork report consumers: JD layouts and hostile JD text');
@@ -400,7 +401,9 @@ check('merge-tracker --backfill-urls: a URL is only ever taken from the header, 
   assert.equal(res.code, 0, res.out);
   const urls = readFileSync(join(r, 'data/applications.md'), 'utf-8').split('\n')
     .filter((l) => /^\| 900\d/.test(l)).map((l) => l.split('|').map((c) => c.trim())[10]);
-  assert.deepEqual(urls, [REAL_URL, '', '']);
+  // merge-tracker renders the URL cell as a markdown link (#3516), so the cell is
+  // compared by the href it points at, which is the part that must come from the header.
+  assert.deepEqual(urls.map(extractCellUrl), [REAL_URL, '', '']);
 });
 
 check('reconcile-pipeline: Score / PDF come from the header, a JD line cannot stand in for a missing one', () => {

@@ -370,3 +370,97 @@ for (const { text, label } of [
     ? pass(`${label} -> expired/expired_body`)
     : fail(`${label} classified ${verdict.result}/${verdict.code}, expected expired/expired_body`);
 }
+
+console.log('\nliveness-core — a banner on its own line is not read as part of the line above');
+
+// Page chrome above a banner often ends in a clause of its own, with no
+// punctuation, and its "if", "when" or "before" is within ten words of the
+// banner's end. With the lines joined, that word opened the banner's clause
+// and a closed posting with an Apply control on the page read as active.
+for (const { text, label } of [
+  {
+    text: 'Sign in if you have an account\nThis job has been filled.',
+    label: 'a filled banner under "Sign in if you have an account"',
+  },
+  {
+    text: 'Get notified when new jobs are posted\nNo longer accepting applications',
+    label: '"No longer accepting applications" under "Get notified when new jobs are posted"',
+  },
+  {
+    text: 'Please read the full posting before you apply\nThis position is no longer available.',
+    label: '"This position is no longer available" under a line ending "before you apply"',
+  },
+  {
+    // A line break inside the banner does not stop the pattern: patterns
+    // still match on the joined text.
+    text: 'We are no longer accepting\napplications for this role.',
+    label: 'a banner broken over two lines',
+  },
+]) {
+  const verdict = classifyLiveness({
+    status: 200,
+    finalUrl: 'https://careers.example.com/job/123',
+    bodyText: `${jdBody}\n${text}`,
+    applyControls: ['Apply'],
+  });
+  verdict.result === 'expired' && verdict.code === 'expired_body'
+    ? pass(`${label} -> expired/expired_body`)
+    : fail(`${label} classified ${verdict.result}/${verdict.code}, expected expired/expired_body`);
+}
+
+// A closing line on a line of its own is still one clause.
+for (const { text, label } of [
+  {
+    text: 'Salary: $80,000\nApplications will be accepted until the position has been filled.\nBenefits',
+    label: '"accepted until the position has been filled" between two other lines',
+  },
+  {
+    text: 'How to apply\nYou will receive final notification via email when this vacancy has been filled.',
+    label: '"when this vacancy has been filled" under a heading',
+  },
+]) {
+  const verdict = classifyLiveness({
+    status: 200,
+    finalUrl: 'https://careers.example.com/job/123',
+    bodyText: `${jdBody}\n${text}`,
+    applyControls: ['Apply'],
+  });
+  verdict.result === 'active' && verdict.code === 'apply_control_visible'
+    ? pass(`${label} -> active/apply_control_visible`)
+    : fail(`${label} classified ${verdict.result}/${verdict.code}, expected active/apply_control_visible`);
+}
+
+// ---------------------------------------------------------------------------
+// #5000 defect 3: a closure page whose whole content is one sentence.
+// ---------------------------------------------------------------------------
+console.log('\nliveness-core — the "can\'t view this job" closure sentence classifies as expired');
+
+const closureVerdict = (bodyText, applyControls = []) =>
+  classifyLiveness({
+    status: 200,
+    finalUrl: 'https://careers.example.com/job/123',
+    bodyText,
+    applyControls,
+  });
+
+// The reported page: HTTP 200, the sentence is the only content, no apply control.
+closureVerdict("You can't view this job because it's not available at this time.").result === 'expired'
+  ? pass('the closure sentence -> expired')
+  : fail('the closure sentence was not classified expired');
+
+// The same sentence with typographic apostrophes (U+2019) must match too;
+// normalizeForMatch is what makes that true.
+closureVerdict('You can’t view this job because it’s not available at this time.').result === 'expired'
+  ? pass('the closure sentence with U+2019 apostrophes -> expired')
+  : fail('the closure sentence with U+2019 apostrophes was not classified expired');
+
+// Hard tier: the sentence is a statement about THIS posting, so it wins over a
+// stray generic apply control.
+closureVerdict("You can't view this job because it's not available at this time.", ['Apply']).result === 'expired'
+  ? pass('the closure sentence wins over a generic apply control')
+  : fail('the closure sentence did not win over a generic apply control');
+
+// Negative control: a live posting that merely mentions availability stays active.
+closureVerdict('Salary data is not available at this time. Apply now.', ['Apply now']).result === 'active'
+  ? pass('an availability mention on a live posting stays active')
+  : fail('the new pattern over-triggered on a live posting');

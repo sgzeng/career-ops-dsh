@@ -28,8 +28,8 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'f
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { resolveAndValidate } from './_net.mjs';
-import { normalizeUrl } from '../url-key.mjs';
-import { readLock, writeLockEntry, diffPlugin, hashPluginTree, consentSurface } from './_lock.mjs';
+import { normalizeUrl, aggregatorPostingId } from '../url-key.mjs';
+import { readLock, writeLockEntry, diffPlugin, describeDrift, hashPluginTree, consentSurface } from './_lock.mjs';
 import { loadRegistry } from './_registry.mjs';
 
 /** The complete, closed set of hook kinds. Anything else (apply/submit/…) is rejected. */
@@ -517,6 +517,11 @@ export function buildCtx(manifest, opts = {}) {
     // plugin and core callers equivalent without a repository-relative import or
     // a copied body, which is the whole point of the capability (#4218).
     normalizePostingUrl: normalizeUrl,
+    // The requisition id an aggregator URL carries (LinkedIn's job id, Indeed's
+    // `jk`). normalizePostingUrl keeps the path, so two spellings of one posting
+    // on an aggregator — a `/comm/` tracking link and the canonical view — key
+    // apart; the id is what they share. Same function the tracker's merge uses.
+    aggregatorPostingId,
   });
 }
 
@@ -625,7 +630,7 @@ export function lockGate(manifest, root) {
     case 'legit-update': repin(); return { load: true };        // version bumped → honest update, re-pin quietly
     case 'drift-nobump':
       if (source === 'bundled') { repin(); return { load: true }; } // reviewed-by-construction (branch-protected checkout) → re-pin
-      warnSkip(manifest.id, `files changed since you trusted it without a version bump — possible tampering (${d.changedFiles.slice(0, 5).join(', ')}). Review, then \`node plugins.mjs trust ${manifest.id}\``);
+      warnSkip(manifest.id, `files changed since you trusted it without a version bump — possible tampering (${describeDrift(d)}). Review, then \`node plugins.mjs trust ${manifest.id}\``);
       return { load: false };
     case 'surface-widened':
       warnSkip(manifest.id, `capability surface expanded since you consented (${[...d.addedHosts, ...d.addedEnv].join(', ')}${manifest.allowsLocalhost ? ', localhost' : ''}) — re-consent: \`node plugins.mjs enable ${manifest.id}\``);

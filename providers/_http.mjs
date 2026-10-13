@@ -9,7 +9,8 @@ import {
   MACOS_BROWSER_LIKE_USER_AGENT,
 } from '../user-agent.mjs';
 import { providerFetchContext, isBlockedAddress, blockedAddressError } from './_ip-guard.mjs';
-import { normalizeUrl } from '../url-key.mjs';
+import { currentConnectionScope } from './_connection-scope.mjs';
+import { normalizeUrl, aggregatorPostingId } from '../url-key.mjs';
 
 /** @typedef {import('./_types.js').Context} Context */
 /** @typedef {import('./_types.js').FetchOptions} FetchOptions */
@@ -25,8 +26,39 @@ import { normalizeUrl } from '../url-key.mjs';
 
 export { BROWSER_LIKE_USER_AGENT, MACOS_BROWSER_LIKE_USER_AGENT };
 
-/** Per-request abort deadline; override per call with `opts.timeoutMs`. */
-const DEFAULT_TIMEOUT_MS = 10_000;
+const MAX_TIMER_MS = 2_147_483_647; // setTimeout rewrites anything above this to 1ms
+
+/**
+ * Resolve the default per-request timeout from the environment.
+ *
+ * 10s suits almost every board, but a provider that returns its whole catalogue
+ * in one response can legitimately need longer, and when it does the abort
+ * surfaces as an unreachable portal rather than as a timeout — so the board
+ * reads as broken instead of slow. Raising the budget is a deployment concern
+ * rather than a code change, so it is read from the environment.
+ *
+ * Unusable values fall back to the default rather than failing a scan at
+ * request time: a typo in an env var should not take the scanner down.
+ *
+ * "Unusable" includes anything outside setTimeout's honored range, not just
+ * values that fail to parse. A delay below 1ms or above 2_147_483_647ms is
+ * silently rewritten to 1ms, so accepting one would abort every request almost
+ * immediately — the failure this variable exists to prevent, arrived at by a
+ * typo instead of a slow board. Falling back is the quieter outcome: a scan at
+ * the 10s default beats a scan where every portal reads as unreachable.
+ *
+ * @param {unknown} raw - Raw env value (CAREER_OPS_HTTP_TIMEOUT_MS).
+ * @param {number} [fallback=10_000] - Value used when `raw` is unusable.
+ * @returns {number} Milliseconds.
+ */
+export function resolveDefaultTimeoutMs(raw, fallback = 10_000) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > MAX_TIMER_MS) return fallback;
+  return parsed;
+}
+
+const DEFAULT_TIMEOUT_MS = resolveDefaultTimeoutMs(process.env.CAREER_OPS_HTTP_TIMEOUT_MS);
 let proxyAgent;
 let proxySignature;
 
@@ -53,14 +85,14 @@ async function proxyFor(url) {
     process.env.HTTPS_PROXY, process.env.no_proxy, process.env.NO_PROXY].join('\0');
   // Existing installations can keep direct transport without installing undici.
   // Resolve the optional transport only after both the trust flag and proxy URL.
-  const { EnvHttpProxyAgent } = await import('undici').catch((cause) => {
+  const { EnvHttpProxyAgent, fetch: undiciFetch } = await import('undici').catch((cause) => {
     throw new Error('Trusted proxy egress requires undici; run npm install in the career-ops directory, then retry.', { cause });
   });
   if (signature !== proxySignature) {
     proxyAgent = new EnvHttpProxyAgent({ httpProxy, httpsProxy, noProxy });
     proxySignature = signature;
   }
-  return { dispatcher: proxyAgent, proxyHost };
+  return { dispatcher: proxyAgent, proxyHost, fetchImpl: undiciFetch };
 }
 
 /**
@@ -76,8 +108,15 @@ async function proxyFor(url) {
  */
 async function fetchWithTimeout(url, opts = {}, consume, allowManualRedirectResponse = false) {
   const targetHost = new URL(url).hostname.replace(/^\[|\]$/g, '');
-  const { dispatcher, proxyHost } = await proxyFor(url);
-  if (dispatcher && isIP(targetHost) && isBlockedAddress(targetHost)) throw blockedAddressError(targetHost, targetHost);
+  const { dispatcher, proxyHost, fetchImpl } = await proxyFor(url);
+  // A literal IP host never reaches dns.lookup, so the lookup-time guard in
+  // _ip-guard.mjs never sees it: http://127.0.0.1/, http://[::ffff:127.0.0.1]/
+  // and http://2130706433/ were all dialled on the direct path while
+  // http://localhost/ was refused. Check the literal here, on every path, not
+  // only behind a proxy. `new URL()` has already normalised the integer, octal
+  // and hex spellings of IPv4 to a dotted quad, and isBlockedAddress unwraps
+  // the IPv4-mapped IPv6 form.
+  if (isIP(targetHost) && isBlockedAddress(targetHost)) throw blockedAddressError(targetHost, targetHost);
   // Mark this request as provider traffic for the whole of its async life, so
   // the patched dns.lookup validates the addresses it resolves (#3096). The
   // guard is scoped rather than global because _dns-cache.mjs patches
@@ -89,7 +128,7 @@ async function fetchWithTimeout(url, opts = {}, consume, allowManualRedirectResp
   // synchronous part of fetch() has returned, and the context has to still be
   // entered when it does.
   return providerFetchContext.run({ url: String(url), targetHost, proxyHost },
-    () => fetchInContext(url, opts, consume, dispatcher, allowManualRedirectResponse));
+    () => fetchInContext(url, opts, consume, dispatcher, allowManualRedirectResponse, fetchImpl));
 }
 
 // redirect defaults to 'error': a provider fetch must never follow a 3xx, or a
@@ -102,9 +141,10 @@ async function fetchWithTimeout(url, opts = {}, consume, allowManualRedirectResp
  * @param {(res: Response) => Promise<any>} consume
  * @param {import('undici').Dispatcher} [dispatcher]
  * @param {boolean} [allowManualRedirectResponse]
+ * @param {typeof fetch} [fetchImpl] undici's fetch when a proxy dispatcher is used; global fetch otherwise.
  * @returns {Promise<any>}
  */
-async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, redirect = 'error', onResponse } = {}, consume, dispatcher, allowManualRedirectResponse = false) {
+async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, redirect = 'error', onResponse } = {}, consume, dispatcher, allowManualRedirectResponse = false, fetchImpl = fetch) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -121,15 +161,21 @@ async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {
     // rather than a transport error. curl on the same URL returns the full
     // ~900KB. Callers can still override via `headers`.
     if (!requestHeaders.has('accept-encoding')) requestHeaders.set('accept-encoding', 'gzip, deflate, br');
+    // A sweep runs each board inside withConnectionScope() so its sockets are
+    // released when the board is done (see _connection-scope.mjs). The scope
+    // brings its own fetch: undici's Agent is only safe with undici's fetch.
+    // A trusted-proxy dispatcher, when configured, still takes precedence,
+    // together with the fetchImpl proxyFor() paired it with.
+    const scope = dispatcher ? undefined : currentConnectionScope();
     let res;
     try {
-      res = await fetch(url, {
+      res = await (scope ? scope.fetch : fetchImpl)(url, {
         method,
         headers: requestHeaders,
         body,
         redirect,
         signal: controller.signal,
-        dispatcher,
+        dispatcher: dispatcher ?? scope?.agent,
       });
     } catch (err) {
       if (!dispatcher && ['ENOTFOUND', 'EAI_AGAIN'].includes(err?.cause?.code)
@@ -507,6 +553,10 @@ export function makeHttpCtx(observer) {
     // so a standalone provider receives the same function the core calls rather
     // than importing the file or copying its body (#4218).
     normalizePostingUrl: normalizeUrl,
+    // The requisition id an aggregator URL carries, for the same reason: a
+    // provider that reads LinkedIn or Indeed links gets the extractor the
+    // tracker's merge uses, not a regex of its own that drifts from it.
+    aggregatorPostingId,
   };
   if (!observer) return ctx;
   for (const method of ['fetchJson', 'fetchText', 'fetchResponse']) {

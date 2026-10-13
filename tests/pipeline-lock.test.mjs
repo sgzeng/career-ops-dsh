@@ -529,7 +529,7 @@ test('acquirePipelineLock: a maxWaitMs of 0 means no waiting, not the default ce
 
 test('acquirePipelineLock: a negative or -Infinity ceiling takes the default rather than becoming zero', async () => {
   const root = fixtureRoot();
-  const churn = churnLock(`${root}/data/pipeline.md.lock`, 20);
+  let held;
   try {
     const p = join(root, 'data', 'pipeline.md');
     // A negative ceiling is a mistake, not a request for no waiting. Clamping it
@@ -537,17 +537,28 @@ test('acquirePipelineLock: a negative or -Infinity ceiling takes the default rat
     // different behaviour; the default is at least bounded and obvious. Paired
     // with the zero test above on purpose — together they pin that 0 and "less
     // than 0" are NOT the same input.
+    //
+    // The blocker is one live holder that never changes hands, not churnLock.
+    // churnLock's progress comes from a timer on the same event loop as the code
+    // under test. A stall on that loop (a slow filesystem call on a busy runner)
+    // can keep the timer from firing between two fingerprint samples. The lock
+    // then looks wedged and the caller gives up well before the default ceiling.
+    // In production the holder is another process, so that stall never starves
+    // it. An unchanging holder makes the lower bound independent of scheduling.
+    // The wedged-holder rule cannot fire before timeoutMs, and a zero clamp
+    // still throws within milliseconds.
+    held = await acquirePipelineLock(p, { timeoutMs: 300, retryMs: 20 });
     for (const bad of [-5, -Infinity]) {
       const startedAt = Date.now();
       const outcome = await settleOrGiveUp(
-        acquirePipelineLock(p, { timeoutMs: 50, retryMs: 20, maxWaitMs: bad }), 3000,
+        acquirePipelineLock(p, { timeoutMs: 300, retryMs: 20, maxWaitMs: bad }), 3000,
       );
       const elapsed = Date.now() - startedAt;
       assert.ok(outcome instanceof LockTimeoutError, `maxWaitMs=${bad}: expected a timeout, got: ${outcome}`);
       assert.ok(elapsed >= 300, `maxWaitMs=${bad} gave up after ${elapsed}ms — clamped to zero instead of defaulting`);
     }
   } finally {
-    churn.stop();
+    held?.release();
     rmSync(root, { recursive: true, force: true });
   }
 });

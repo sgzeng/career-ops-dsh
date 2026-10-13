@@ -312,7 +312,7 @@ The table's **first row is always the JD's own advertised figure, verbatim** —
 | Advertised (JD) | {verbatim figure or "not stated"} | JD |
 ```
 
-Never blend the advertised figure with researched estimates or replace it with them — market research rows follow below it. This same verbatim figure goes into the Machine Summary `advertised_comp` key (see the report format).
+Never blend the advertised figure with researched estimates or replace it with them — market research rows follow below it. The same figure goes into the Machine Summary `advertised_comp` key reduced to its base-pay span only (the wording stays verbatim in this row and in the archived JD; the key's shape is in the report format).
 
 ## Block E — Customization Plan
 
@@ -332,7 +332,24 @@ Top 5 changes to CV + Top 5 changes to LinkedIn to maximize match.
 
 The **Reflection** column captures what was learned or what would be done differently. This signals seniority — junior candidates describe what happened, senior candidates extract lessons.
 
-**Story Bank:** If `interview-prep/story-bank.md` exists, check if any of these stories are already there. If not, append new ones. Over time this builds a reusable bank of 5-10 master stories that can be adapted to any interview question.
+**Story Bank:** The table above is for the report. The bank at `{DATA_ROOT}/interview-prep/story-bank.md` takes the same stories in a different shape, because `npm run star`, `negotiation-roi.mjs` and `story-provenance-check.mjs` read only that shape:
+
+1. If the file is missing, create it by copying `templates/story-bank.template.md`.
+2. Skip any story whose title is already in the bank.
+3. Append each new story as a `### ` block in the template's format, one field per line:
+
+```markdown
+### [Theme] Story Title
+**Source:** Report #NNN — Company — Role
+**S (Situation):** …
+**T (Task):** …
+**A (Action):** …
+**R (Result):** …
+**Reflection:** …
+**Best for questions about:** …
+```
+
+Never paste table rows into the bank. Always fill in `**A (Action):**`: a block without it is invisible to the readers. Keep the `### ` heading and the field labels in English whatever the output language. Do not add a `**Provenance:**` line: the evaluation does not get to vouch for its own figures. Without one, `story-provenance-check.mjs` sorts each figure by `cv.md` (`existing` when the same number appears there in context, `supportedByResume` when `cv.md` supports the fact but not the number, otherwise `derived-unverified`), and only the user adds a marker, in the form `templates/story-bank.template.md` gives. Over time this builds a reusable bank of 5-10 master stories that can be adapted to any interview question.
 
 **Selected and framed according to the archetype:**
 - FDE → emphasize delivery speed and client-facing
@@ -571,6 +588,47 @@ Then append one optional negotiation talking point:
 > **Compensation conversation:** [Render in {language.output}: "Because this role is explicitly fixed-term, consider asking how the total package accounts for the finite term, benefits coverage, renewal uncertainty, and transition risk at the end of the term. Contract roles commonly carry different compensation structures from equivalent permanent roles; verify current benchmarks for this market and role before choosing an anchor." Never state or invent a percentage premium, market rate, entitlement, or legal conclusion.]
 
 This signal is corroborating information only. It never changes the 1–5 Global Score, the High Confidence / Proceed with Caution / Suspicious tier, or the application recommendation; it never blocks or discourages an application. If no explicit fixed-term language is present, report the check as clear and do not generate the negotiation talking point.
+**17. Relocation Purchasing Power** (from the JD's own stated work location + `config/profile.yml` → `location`/`candidate.location`, computed by `salary-gap.mjs` against `templates/jurisdiction-relocation-tax.yml`; jurisdiction-compliance-lens umbrella #2026, member #4694):
+
+A posting that requires relocation to a different province/state can carry compensation that looks "close enough" to the candidate's target on paper while representing meaningfully different real purchasing power once marginal tax brackets differ enough between the two jurisdictions. This signal surfaces that gap as a plain computation, never a verdict on the posting.
+
+**Gate (mandatory):** only runs when (a) the JD states a specific work location requiring relocation (not fully remote with no base jurisdiction), (b) that location differs from the candidate's own `config/profile.yml` location, and (c) `advertised_comp` resolves to a usable **annual gross** figure (the midpoint of a range is fine — this is a directional comparison, not an exact one). An explicitly annual figure passes through unchanged. An explicitly monthly figure may be annualized as `midpoint × 12`. An explicitly hourly figure may be annualized as `midpoint × the JD's stated weekly hours × 52` — the weekly hours must come from the JD; never assume a 40-hour week or a 2,080-hour year. Any other period, an hourly figure without stated weekly hours, or a missing/ambiguous period means the annual gross is unknown and this signal is **not evaluated**. Missing any of the three gate inputs → say nothing rather than guess.
+
+**Computation (mandatory — run the script, never hand-compute):**
+
+**Never interpolate the JD's stated location directly into a shell argument, and never write it through a fixed-delimiter heredoc either (#4696, CWE-78 — two rounds of this finding now).** It is untrusted, JD-author-controlled text, and this step can run with elevated/skip-permissions execution. A crafted location containing `$(...)` or backticks would be shell-expanded before `salary-gap.mjs` ever sees it if pasted straight into a double-quoted `--posting-location "..."` argument. A **single-quoted heredoc with a fixed delimiter is not safe either** — if the location text itself contains a line that is literally `JD_LOCATION_EOF` (or whatever fixed string is chosen), the heredoc closes early right there, and the shell reads every following line of the "location" text as new shell commands and executes them. Both failure modes are the same root cause: raw, attacker-controlled text landing somewhere a shell parses before any program (not even `salary-gap.mjs`) gets to see it.
+
+The only safe fix is to never let the raw location text touch a shell command line, argument, or heredoc body AT ALL — not even transiently. Do this instead:
+
+1. **You (the agent) compute the base64 encoding of the complete JD location text yourself, as a pure text transformation on the string you already have in context** — the same way you already judge which text is "the JD's stated location, verbatim" a few lines above. This is NOT a shell operation: do not pipe the raw text through `base64`, `printf`, a heredoc, or any other shell command to produce this value — that would just relocate the exact same injection risk into the encoding step instead of removing it. Encode the complete UTF-8 byte sequence of the location text (accented characters, CJK, emoji, etc. all encode correctly as UTF-8 — never transliterate or drop them first) as one unbroken base64 string with **no line wrapping**.
+2. Embed **only** that resulting base64 string — which by construction contains nothing but the characters `A-Z a-z 0-9 + / =`, none of them shell-special — as the string literal inside the `node -e` command below. The raw location text itself must never appear in any command you run, in any form, at any point in this process.
+3. Decode and write the file in the same step, using Node (already this project's runtime) rather than a platform-specific `base64` binary, so this works identically everywhere. Use a fresh, unique temp path via `mktemp` rather than a fixed filename — a shared fixed path risks collision with a concurrent `batch` worker's own run — and clean it up when done:
+
+```bash
+posting_location_file="$(mktemp /tmp/career-ops-posting-location.XXXXXX)"
+trap 'rm -f -- "$posting_location_file"' EXIT
+node -e 'process.stdout.write(Buffer.from("<base64-encoded JD location, no line wrapping>", "base64"))' > "$posting_location_file"
+node salary-gap.mjs --relocation --gross <annual gross: annual midpoint; monthly midpoint × 12; or hourly midpoint × JD-stated weekly hours × 52> --posting-location-file "$posting_location_file" --home-location "<config/profile.yml location>" --currency <advertised_comp's own currency>
+```
+
+**Self-check before running the first command (mandatory):** re-read the base64 string you are about to substitute in. If it contains anything outside `A-Z a-z 0-9 + / =`, or any whitespace/newline, you have not actually encoded the text — go back and encode it properly rather than patching around it (e.g. by quoting it differently). Decoding is exact (`Buffer.from(..., 'base64')` yields the identical original UTF-8 bytes, and `process.stdout.write` plus `>` write them to the file unmodified), so an incorrect result here means the encoding step was done wrong, not that the decode needs adjusting.
+
+`--home-location` stays a plain double-quoted argument — it comes from `config/profile.yml`, a trusted user-layer file, never from the JD. Always pass `--currency` with `advertised_comp`'s own stated currency (e.g. `CAD`, `USD`) — never omit it and never guess it. The script checks it against the matched jurisdiction's own table currency and refuses to compute (`ok: false, reason: 'currency-mismatch'`) rather than silently taxing a non-CAD figure under CAD brackets; an `advertised_comp` with no identifiable currency is the same as the gate's own "no usable gross figure" case — not evaluated.
+
+Read the JSON result. Three distinct `ok: false` reason families, never conflated:
+- `no-jurisdiction-match` — the candidate's or posting's jurisdiction simply has no row in the table yet (evidence-strength honesty: absence of a table row is "no signal," never an assumed penalty).
+- `same-jurisdiction` / `cross-country-not-supported` / `currency-mismatch` — both jurisdictions resolved, but the comparison itself doesn't apply (no actual relocation, cross-country math out of scope, or the gross figure isn't in the table's currency).
+- Any other reason (`no-gross-amount`, `no-table`, `no-federal-table`, `malformed-brackets`) — a data/input problem, not a jurisdiction-match problem.
+
+All of the above mean this signal is **not evaluated** for this posting — say nothing rather than guess. `ok: true` gives both sides' modeled take-home, fully computed from brackets the table carries — never re-derive the arithmetic yourself, and never substitute a number the script did not return.
+
+**Phrasing discipline (mandatory, same discipline as every other umbrella member):** state the inputs and the computed figures side by side — never a verdict like "this is a bad offer because of relocation." The script's own `limitations` string (marginal brackets only; no basic personal amount, credits, CPP/EI, surtaxes, or cost-of-living adjustment modeled) is part of the output, not optional framing — always carry it or an equivalent plain-language restatement into the report. This is **not financial or tax advice**, exactly like the sub-statutory-terms and restrictive-covenant signals' own not-legal-advice framing.
+
+When `ok: true`, append a short, neutral note:
+
+> 📍 **Relocation purchasing-power note:** [Render in {language.output}, filling in the script's own numbers: "At {gross}, modeled take-home in {home.jurisdiction} is ~{home.takeHome} vs. ~{dest.takeHome} in {dest.jurisdiction} ({a signed takeHomeDeltaPct}% difference at the same gross) — federal + provincial/state tax brackets only; no basic personal amount, credits, CPP/EI, surtaxes, or cost-of-living adjustment modeled. Not financial or tax advice — a data point for your own judgment, not a verdict on this offer."]
+
+**Warn-only (mandatory):** this signal never changes the 1-5 score or the High Confidence / Proceed with Caution / Suspicious tier — it is a corroborating data point, reported separately, exactly like every other umbrella member's human-in-the-loop posture. **Out of scope for v1 (deliberately deferred, #4694):** a cost-of-living adjustment between the two cities — no official, citable, cross-city cost-of-living index was available at seed time (see `templates/jurisdiction-relocation-tax.yml`'s own header); and Quebec, which collects its own provincial tax separately and needs its own computation path, not just a new table row.
 
 ### Output format:
 
@@ -604,9 +662,31 @@ This is information about **your own history** with the company, not about this 
 
 ---
 
+## Verdict (lead)
+
+Write a `## Verdict (lead)` block directly after Block G and before `## Risk Summary`. It answers the only question the reader opened the report with: should I apply?
+
+**Derived, never originating.** `final_decision` in `## Machine Summary` is the source of truth. This block restates that same call as one human sentence and never introduces a different one — if the sentence and the field disagree, the field is right and the sentence is the defect. Write the block from `final_decision` rather than alongside it, so the block a reader leads with cannot drift from the field a script reads. The bolded call is that field's value in the report's own language: Apply, Consider, Research first, or Skip.
+
+**The `(lead)` marker is load-bearing, and language-invariant on purpose.** The web report view promotes whichever block carries the marker into the page's lead callout, identifying it by the marker rather than by a heading word or a block letter. Translations therefore keep their own noun and the same parenthetical: `## Veredicto (lead)`, `## Verdict (lead)`. Never translate `(lead)`, and never letter this block — it sits outside the A–H sequence.
+
+**No new judgment.** Every input is gathered by the time this block is written and nothing new is introduced after it. State the call plus one reason drawn from what the report already established. Do not re-score, do not add evidence, and do not hedge a decision the score has already made.
+
+Block format:
+
+```markdown
+## Verdict (lead)
+
+**Apply.** Strong match on the role's core axis with no hard stops, and Block G returned High Confidence.
+```
+
+One sentence after the bolded call is the budget. A reader who wants the reasoning opens the blocks below it; this block exists so the reader who does not still leaves with the answer.
+
+---
+
 ## Risk Summary (after Block G)
 
-Close the report body with a `## Risk Summary` block directly after Block G's section — one row per risk signal, fixed order — so the question the candidate actually asks ("is this company safe to join?") is answered on one screen instead of by mentally joining Block A, Block G, and a sidecar file.
+Close the report body with a `## Risk Summary` block directly after the `## Verdict (lead)` block, which follows Block G's section — one row per risk signal, fixed order — so the question the candidate actually asks ("is this company safe to join?") is answered on one screen instead of by mentally joining Block A, Block G, and a sidecar file.
 
 **Aggregation only, zero new judgment.** Each row quotes or links the verdict already produced by its source signal. The summary never re-scores, re-weights, or overrides — if a row looks wrong, the fix belongs in the source signal, not here.
 
@@ -621,6 +701,7 @@ Three states per row: `✅ {clear verdict}` / `⚠️ {finding}` / `— not eval
 | AI claims vs. infrastructure | AI/infrastructure mismatch check in Block G, when present | If this report contains that check, mirror its verdict (`✅ consistent` / `⚠️ {finding}`); otherwise `— not evaluated`. The row activates automatically once the check exists — no ordering dependency |
 | AI-screening disclosure | AI-screening disclosure signal in Block G (Signal 15), when present | If this report contains that check: `✅ discloses AI use` when (a) fired, `ℹ️ {jurisdiction_name} requires disclosure; posting is silent` when only (b) fired (corroborating-only, never a compliance verdict), `— no jurisdiction match` when neither fired because the candidate's jurisdiction has no table row; otherwise `— not evaluated`. The row activates automatically once the check exists — no ordering dependency |
 | Fixed-term contract | Fixed-term disclosure signal in Block G (Signal 16) | `ℹ️ fixed term — "{quoted phrase}"` when explicit fixed-term language is present; otherwise `✅ no fixed term disclosed`; `— not evaluated` only when no JD text was available |
+| Relocation purchasing power | Relocation purchasing-power signal in Block G (Signal 17), when present | If this report contains that check: `ℹ️ {home.jurisdiction} ~{home.takeHome} vs {dest.jurisdiction} ~{dest.takeHome}` when `ok: true` (informational, never a verdict on the offer); `— no jurisdiction match` ONLY when the script's `reason` is specifically `no-jurisdiction-match`; `— not evaluated` for every other `ok: false` reason (`same-jurisdiction`, `cross-country-not-supported`, `currency-mismatch`, `no-gross-amount`, `no-table`, `no-federal-table`, `malformed-brackets`, …) and when the gate's own conditions (relocation location stated, differs from home, usable comp figure) were not met. A same-jurisdiction or currency-mismatch result is not a jurisdiction-match failure and must never be rendered as one. The row activates automatically once the check exists — no ordering dependency |
 
 Block format:
 
@@ -635,6 +716,7 @@ Block format:
 | Interview red flags | — no interview sessions yet |
 | AI claims vs. infrastructure | — not evaluated |
 | Fixed-term contract | ℹ️ fixed term — "18-month contract" |
+| Relocation purchasing power | ℹ️ {home.jurisdiction} ~{home.takeHome} vs {dest.jurisdiction} ~{dest.takeHome} |
 ```
 
 Mirror the block into `## Machine Summary` as a `risk_summary:` map (exact key names and enum values in `batch/batch-prompt.md`, the Machine Summary source of truth) so downstream scripts consume it without re-parsing prose.
@@ -763,6 +845,9 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 ## G) Posting Legitimacy
 (full content of block G)
 
+## Verdict (lead)
+(the apply-or-not call in one sentence — restates `final_decision`, see the Verdict section above)
+
 ## Risk Summary
 (one row per risk signal, fixed order — see the Risk Summary section above)
 
@@ -784,7 +869,7 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 (the posting's full text, pasted verbatim — see requirement below)
 ```
 
-**Machine Summary (required):** every report carries a `## Machine Summary` YAML fence directly after the header (a report written by the batch worker puts the archived JD between the header and the Machine Summary — `batch/batch-prompt.md` — so readers find the Machine Summary by its heading, never by position) — same schema, exact field names, and rules as the "Machine Summary" block in `batch/batch-prompt.md` (do not duplicate the schema here; that file is the source of truth). It includes `advertised_comp`: the JD's own salary figure **verbatim** (e.g. `"80-90k EUR"`), or `null` when the JD states nothing — never estimated, never replaced with researched market data. This key seeds the advertised salary observation read by `node salary-gap.mjs`. It also includes `risk_summary`: the Risk Summary block mirrored as a map (schema and enum values in `batch/batch-prompt.md`), and `requirement_importance`: Block B's table mirrored row by row, carrying each row's evidence tier, importance band and match (`[]` when the JD yields no usable requirement list). The `inferred` cap from Block B's gate holds in the YAML too — `importance` is never `critical` or `high` when `evidence: inferred`.
+**Machine Summary (required):** every report carries a `## Machine Summary` YAML fence directly after the header (a report written by the batch worker puts the archived JD between the header and the Machine Summary — `batch/batch-prompt.md` — so readers find the Machine Summary by its heading, never by position) — same schema, exact field names, and rules as the "Machine Summary" block in `batch/batch-prompt.md` (do not duplicate the schema here; that file is the source of truth). It includes `advertised_comp`: the JD's own base-pay figure(s) only, in the shape Check 19 accepts (`"$150,000–$200,000"`, `"€80,000–€90,000"`, hourly `"$55.00–$70.00/hr"` — see "Every dashboard-fed field" below and `batch/batch-prompt.md`), or `null` when the JD states nothing — never estimated, never replaced with researched market data. This key seeds the advertised salary observation read by `node salary-gap.mjs`. It also includes `risk_summary`: the Risk Summary block mirrored as a map (schema and enum values in `batch/batch-prompt.md`), and `requirement_importance`: Block B's table mirrored row by row, carrying each row's evidence tier, importance band and match (`[]` when the JD yields no usable requirement list). The `inferred` cap from Block B's gate holds in the YAML too — `importance` is never `critical` or `high` when `evidence: inferred`.
 
 **JD archival (required, #2789):** every report MUST carry a `## Job Description (archived verbatim)` section with the posting's full text pasted as-is — never summarized, never paraphrased. A `**URL:**` header alone is not an archive: it is a live pointer that rots once the posting closes or gets taken down, which reliably happens somewhere in the weeks between applying and a later interview round, and there is no way to recover the original requirements after that. This is the primary mechanism, not a fallback — the report is the one artifact guaranteed to get written and tracked, unlike a separate `jds/` file. If the JD is very long, write it to `archive-posting.mjs --report={num}` instead (or another `{num}-...`-prefixed capture) and, in place of the text, put in this section **exactly** `See jds/{filename} for the full archive (archive-posting.mjs --report={num}).` — `check-jd-archive.mjs` only credits this canonical pointer sentence when it resolves back to that report's number via `findCaptureForReport`; a slug-only `jds/{slug}.md` with no report number does not validate here. This exact phrasing matters: the check only treats a section as a pointer (requiring resolution) when the section is nothing but this sentence — any additional prose alongside it is read as the archived text itself, not a pointer, so don't mix the two. Slug-only captures remain fine for `jd-skill-gap.mjs` run standalone, outside a full evaluation, where there is no report to link back to. `check-jd-archive.mjs` validates every `reports/*.md` has one form or the other and is wired into `test-all.mjs` — a report missing both is a test failure.
 
@@ -808,10 +893,11 @@ By default this scans the base `cv.md` — read it as a **pre-tailoring gap list
 
 ### 2. Record in tracker
 
-Do **not** hand-edit `data/applications.md` — write a tab-separated file (a header row
-of column labels, then exactly one data row) to `batch/tracker-additions/{num}-{company-slug}.tsv`
-and run `node merge-tracker.mjs`
-(see `AGENTS.md` → "TSV Format for Tracker Additions" and `batch/batch-prompt.md` §Step 5):
+**ALWAYS** record the evaluation in the tracker, as a tracker-addition TSV that `node merge-tracker.mjs` merges. Never append or edit a row in `data/applications.md` yourself: a hand-written row skips the tracker lock the other writers share and the merge's duplicate check. Rule 9 in `modes/_shared.md` says where the TSV goes; AGENTS.md, "TSV Format for Tracker Additions", defines its header row and fields. Write one TSV for this evaluation, then run `node merge-tracker.mjs` (once, after the last evaluation, when several run as a batch).
+
+If this company+role is already in the tracker, never hand-write a second row. The merge matches a re-evaluation to the existing row instead of adding another, and a status or notes change on an existing row goes through `node set-status.mjs`.
+
+Write the TSV to `batch/tracker-additions/{num}-{company-slug}.tsv` — a header row of column labels, then exactly one data row (see `AGENTS.md` → "TSV Format for Tracker Additions" and `batch/batch-prompt.md` §Step 5):
 
 ```
 num\tdate\tcompany\trole\tstatus\tscore\tpdf\treport\tnotes\turl
@@ -823,11 +909,11 @@ whenever the report `.md` exists** — reuse the exact `num`/`slug`/`date` from 
 `—` in that cell is valid only for a retroactively added row with no evaluation.
 Never put `report #{num}` in the Notes column as a substitute.
 
-**ALWAYS** record:
-- Next sequential number
+The TSV carries:
+- Number: the report's number (next sequential). The merge keeps it as the tracker `#` unless that number is already taken, in which case it assigns the next free one and prints it (`➕ Add #N`)
 - Current date
 - Company — the END employer. If the JD is agency-mediated ("our client", agency domain, no employer named), ASK the user which agency it came through, use `?` as Company, and put a distinguishing descriptor in Notes (e.g. `fintech, Leeds`). Never write "Confidential" — the `?` marker is locale-invariant and can't collide with a real firm.
-- Via (when the tracker has the column) — the agency/recruiter firm, `—` for direct. In the tracker-addition TSV, append it as a tagged extra field: `via={Agency}` (see the TSV format spec).
+- Via — the agency/recruiter firm the user confirmed; leave it out for a direct application. In the TSV it is a `via` column (see the TSV format spec). The merge can only store it in a tracker that has a Via column: when the user confirmed an agency and the tracker has none, run `node merge-tracker.mjs --migrate-via` first, otherwise the merge warns and drops the value.
 - Role
 - Score: copy the already-decided 1–5 Global Score from the report header and Machine Summary `score`. Apply any `modes/_custom.md` Scoring Rules when deciding that score, not again while writing the tracker. A–H are report sections, not scores to average.
 - Status: `Evaluated`
@@ -835,7 +921,7 @@ Never put `report #{num}` in the Notes column as a substitute.
 - Report: root-relative link `[001](reports/001-company-2026-01-01.md)` (when merged via `merge-tracker.mjs` it is normalized to be relative to the tracker's own dir, e.g. `../reports/...`; see #760)
 - Notes — when the pipeline entry carries a `| posted: {YYYY-MM-DD}` segment (written by the scanner from the provider's `offer.postedAt`, see `modes/pipeline.md`), carry it through as its own trailing segment: `…; posted: 2026-08-07`. This is the only path by which the posting date reaches the tracker, and the dashboard's POSTED column — requisition age, "is this still plausibly being worked?" — reads it from the note. Copy it verbatim; when the entry has no segment, write nothing rather than inferring a date, since the column renders an absent date as `—` and a guessed one would report a months-old req as fresh.
 
-**Tracker format:**
+**The row the merge writes** (for reference; you write the TSV, not this row):
 
 ```markdown
 | # | Date | Company | Role | Score | Status | PDF | Report | Notes |
@@ -854,5 +940,7 @@ If — and only if — the user **explicitly stated a role-specific desired numb
 ```text
 {tracker#}\t{YYYY-MM-DD}\tdesired\t{amount}\t{currency}\tuser\t{short context note}
 ```
+
+`{tracker#}` is the row's `#` **after** the merge in step 2, read from `merge-tracker.mjs`'s output. Write this line after merging, never before: until then the row has no number, and the report number is not a safe stand-in because the merge assigns a different `#` when that one is taken.
 
 Never infer a desired number from the JD, the score, or past conversations. The profile default (`config/profile.yml` → `compensation.target_range`) needs no line — `salary-gap.mjs` reads it as the fallback. The advertised figure also needs no line: the report's `advertised_comp` **is** the advertised observation.

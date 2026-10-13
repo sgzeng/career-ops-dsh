@@ -21,7 +21,10 @@ import { GeneratePdfButton } from "@/components/generate-pdf-button";
 import { ApplyButton } from "@/components/apply-button";
 import { DeleteFromTracker } from "@/components/delete-from-tracker";
 import { ReportMarkdown } from "@/components/report-markdown";
+import { KeywordCoverage } from "@/components/keyword-coverage";
+import { CompanyEvidence } from "@/components/company-evidence";
 import { companyPresentation } from "@/lib/company-presentation.mjs";
+import { PageFrame } from "@/components/page-frame";
 
 // Progressive disclosure of the report. Current oferta.md writes letter F as
 // Interview Plan (STAR+R), not a verdict — never promote by letter (#3416).
@@ -61,6 +64,7 @@ export function ReportView({
   canDelete = false,
   pdfReadyFromIndex = false,
   coverReady = false,
+  backHref = "/pipeline",
 }: {
   id: string;
   app: Application | null;
@@ -74,6 +78,7 @@ export function ReportView({
    *  the page, see resolveTailoredCover). View only — covers are never generated
    *  from here. */
   coverReady?: boolean;
+  backHref?: string;
 }) {
   const meta = report ? parseReport(report) : null;
   const field = (label: string) => meta?.fields.find((f) => f.label === label)?.value;
@@ -91,9 +96,9 @@ export function ReportView({
   const companyName = company?.label ?? app?.company ?? meta?.title ?? id;
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8 xl:max-w-5xl 2xl:max-w-[1600px]">
+    <PageFrame className="max-w-3xl xl:max-w-5xl 2xl:max-w-[1600px]">
       <Link
-        href="/pipeline"
+        href={backHref}
         className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-brand"
       >
         <ArrowLeft className="size-4" /> Pipeline
@@ -195,7 +200,7 @@ export function ReportView({
             );
             if (sections.length === 0) {
               return (
-                <div className="mt-8">
+                <div className="mt-8 max-w-4xl">
                   {callout}
                   <article className="report-prose mt-6">
                     <ReportMarkdown>{meta?.body ?? report}</ReportMarkdown>
@@ -204,7 +209,7 @@ export function ReportView({
               );
             }
             return (
-              <div className="mt-8">
+              <div className="mt-8 max-w-4xl">
                 {callout}
 
                 {mainSections.map((s, i) => {
@@ -254,6 +259,15 @@ export function ReportView({
               </div>
             );
           })()}
+          {/* After the report body: the reader has just decided whether the
+              offer is worth applying to, and this answers the next question —
+              whether the CV they would send reads as a match for it. */}
+          <KeywordCoverage reportId={id} />
+          {/* Then the company itself. Only with a tracker row: the card is keyed
+              on a company name, and a report with no row has none to look up —
+              guessing one from the report would surface another company's
+              history. */}
+          {app?.company && <CompanyEvidence company={app.company} />}
           <ScoreMethodology />
         </>
       ) : (
@@ -262,6 +276,6 @@ export function ReportView({
           No report file found for #{id} in <code className="text-foreground">reports/</code>.
         </div>
       )}
-    </div>
+    </PageFrame>
   );
 }

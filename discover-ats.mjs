@@ -59,6 +59,7 @@ import rippling from './providers/rippling.mjs';
 import joinProvider from './providers/join.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { DEFAULT_SMALL_THRESHOLD, isSmallBoard, smallBoardDetail } from './lib/small-board.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
@@ -135,6 +136,7 @@ const USAGE = `Usage:
   node discover-ats.mjs --in companies.yml --summary  # human-readable table
   node discover-ats.mjs --in companies.yml --vendors gh,ashby,lever  # restrict probes
   node discover-ats.mjs --in companies.yml --vendors workday         # Workday only
+  node discover-ats.mjs --in companies.yml --small-threshold 10  # what counts as a small board (default ${DEFAULT_SMALL_THRESHOLD}, 0 = off)
   node discover-ats.mjs --self-test                   # inline test suite
   node discover-ats.mjs --help                        # print this usage block
 
@@ -458,6 +460,9 @@ export function renderPortalEntry(match) {
   if (typeof match.title_net === 'string' && match.title_net) lines.push(`    title_net: ${yamlScalar(match.title_net)}`);
   lines.push(`    enabled: true`);
   if (match.notes) lines.push(`    notes: ${yamlScalar(match.notes)}`);
+  // A comment, not a key: portals.yml still parses to the same fields, but the
+  // user sees the prompt next to the entry when they open the file (#4772).
+  if (match.smallBoard) lines.push(`    # verify: ${smallBoardDetail(match.jobCount)}`);
   return '\n' + lines.join('\n') + '\n';
 }
 
@@ -492,6 +497,21 @@ export function inheritEntryTags(match, twin = null) {
   // first-coverage pass the new board exists to get.
   if (twin?.first_scan_backfill === true) out.first_scan_backfill = true;
   return out;
+}
+
+/**
+ * Flag resolved boards that list few postings. Purely advisory: it adds a
+ * `smallBoard: true` field and never changes what resolves (#4772).
+ *
+ * @param {any[]} resolved
+ * @param {number} [threshold]
+ * @returns {any[]} the same array, entries mutated in place
+ */
+export function flagSmallBoards(resolved, threshold = DEFAULT_SMALL_THRESHOLD) {
+  for (const r of resolved) {
+    if (isSmallBoard(r.jobCount, threshold)) r.smallBoard = true;
+  }
+  return resolved;
 }
 
 /** Normalize a careers_url/api for dedupe comparison: lowercase, strip trailing slash. */
@@ -548,29 +568,49 @@ export function dedupeAgainstPortals(matches, existingEntries) {
  */
 export function insertIntoTrackedCompanies(fileText, snippets) {
   if (!snippets.length) return fileText;
-  const block = snippets.join('');
+  let block = snippets.join('');
 
-  const header = fileText.match(/^tracked_companies:[ \t]*$/m);
+  // The header line as a user can legitimately write it: bare, with a trailing
+  // comment, or as an empty flow list (`tracked_companies: []`). The last two
+  // used to miss this match, so a SECOND `tracked_companies:` key was appended
+  // to the file, which no YAML parser accepts.
+  const header = fileText.match(/^tracked_companies:[ \t]*(?:\[[ \t]*\][ \t]*)?(?:#[^\n]*)?$/m);
   if (!header) {
     // No block at all — append a fresh one at EOF.
     const sep = fileText.endsWith('\n') ? '\n' : '\n\n';
     return `${fileText}${sep}tracked_companies:${block}`;
   }
 
+  // An empty flow list becomes the block form; its trailing comment stays.
+  const headerText = header[0].replace(/^(tracked_companies:)[ \t]*\[[ \t]*\]/, '$1');
   const headerEnd = header.index + header[0].length; // index of the newline after the header
   const rest = fileText.slice(headerEnd);
   // Find the block's end: the next top-level key (a line starting with a
   // non-space, non-# char and containing a colon). Comments and indented lines
   // stay in-block. `m` anchors ^ to line starts; the leading \n keeps us from
-  // matching the header line itself.
-  const boundary = rest.match(/\n[^\s#][^\n]*:/);
-  const insertAt = boundary ? headerEnd + boundary.index : fileText.length;
+  // matching the header line itself. A list item written at column 0 (`- name:`,
+  // valid YAML and what some YAML emitters produce) is part of the block, not a
+  // key, so a line that starts a sequence entry is never the boundary.
+  const boundary = rest.match(/\n(?!-(?:[ \t]|\r?\n|$))[^\s#][^\n]*:/);
+  const blockEnd = boundary ? headerEnd + boundary.index : fileText.length;
 
-  let before = fileText.slice(0, insertAt);
-  const after = fileText.slice(insertAt);
+  // Match the indentation of the entries already there: our snippets are
+  // indented for the template's two-space style, and a sequence whose entries
+  // sit at two different indents is not valid YAML.
+  const firstItem = fileText.slice(headerEnd, blockEnd).match(/\n([ ]*)-[ \t]/);
+  if (firstItem && firstItem[1].length !== 2) {
+    const shift = firstItem[1].length - 2;
+    block = block.replace(/^( *)(\S)/gm, (_m, spaces, ch) => (
+      shift > 0 ? `${' '.repeat(shift)}${spaces}${ch}` : `${spaces.slice(Math.min(-shift, spaces.length))}${ch}`
+    ));
+  }
+
+  let before = fileText.slice(0, header.index) + headerText + fileText.slice(headerEnd, blockEnd);
+  const after = fileText.slice(blockEnd);
   // Trim trailing blank lines that belong to the block so our leading-newline
   // snippets don't stack extra blank lines before the next key.
-  before = before.replace(/\n[ \t]*(?=\n*$)/g, (m2, off) => (off >= headerEnd ? '\n' : m2));
+  const bodyStart = header.index + headerText.length;
+  before = before.replace(/\n[ \t]*(?=\n*$)/g, (m2, off) => (off >= bodyStart ? '\n' : m2));
 
   return before + block + after;
 }
@@ -647,6 +687,25 @@ export function planPortalEntries(resolved, existingEntries) {
     .map((m) => String(m.name || '').trim())
     .filter((n) => twins.has(n.toLowerCase()));
   return { fresh, duplicates, entries, snippets: entries.map(renderPortalEntry), supersededNames };
+}
+
+/**
+ * Whether a spliced portals.yml text still parses and carries exactly the
+ * expected number of tracked_companies entries. The text splice above works on
+ * lines, not on the YAML, so --write checks its own output before replacing the
+ * user's file.
+ *
+ * @param {string} text
+ * @param {number} expectedCount
+ * @returns {boolean}
+ */
+export function splicedCorrectly(text, expectedCount) {
+  try {
+    const doc = yaml.load(text);
+    return Array.isArray(doc?.tracked_companies) && doc.tracked_companies.length === expectedCount;
+  } catch {
+    return false;
+  }
 }
 
 // ── Network functions (separated from pure logic, like vc-portfolios.mjs) ──
@@ -975,7 +1034,8 @@ function printSummary({ resolved, unresolved, duplicates, superseded = [], retir
     console.log('  ' + '-'.repeat(90));
     for (const r of resolved) {
       console.log('  ' + String(r.name).substring(0, 22).padEnd(24)
-        + String(r.vendor).padEnd(12) + String(r.jobCount).padEnd(7) + r.careers_url);
+        + String(r.vendor).padEnd(12) + String(r.jobCount).padEnd(7) + r.careers_url
+        + (r.smallBoard ? `  [small board — verify ownership]` : ''));
     }
     console.log('');
   }
@@ -1097,6 +1157,12 @@ function runSelfTest() {
   const q = renderPortalEntry({ name: 'Foo: Bar', careers_url: 'https://jobs.ashbyhq.com/foo' });
   check(q.includes('name: "Foo: Bar"'), 'renderPortalEntry quotes name with colon');
 
+  // small-board flag (#4772): advisory field + `# verify:` comment, only when flagged
+  const sb = flagSmallBoards([{ name: 'A', jobCount: 1 }, { name: 'B', jobCount: 6 }]);
+  check(sb[0].smallBoard === true && sb[1].smallBoard === undefined, 'flagSmallBoards flags only boards at or under the threshold');
+  check(renderPortalEntry({ name: 'A', careers_url: 'https://x', smallBoard: true, jobCount: 1 }).includes('# verify:'), 'renderPortalEntry adds # verify: for a small board');
+  check(!renderPortalEntry({ name: 'B', careers_url: 'https://x', jobCount: 6 }).includes('# verify:'), 'renderPortalEntry omits # verify: for a larger board');
+
   // dedupeAgainstPortals
   const existing = [{ name: 'Adyen', careers_url: 'https://job-boards.greenhouse.io/adyen/' }];
   const d1 = dedupeAgainstPortals([{ name: 'Adyen', careers_url: 'x' }], existing);
@@ -1186,8 +1252,8 @@ function runSelfTest() {
 // --write is the explicit opt-in to modify portals.yml (a user-layer file);
 // without it the run is preview-only. --dry-run is accepted as a harmless alias
 // for "don't write" (the default) so an older invocation never surprises anyone.
-const KNOWN_FLAGS = ['--in', '--vendors', '--write', '--dry-run', '--summary', '--self-test', '--help', '-h'];
-const VALUE_FLAGS = ['--in', '--vendors'];
+const KNOWN_FLAGS = ['--in', '--vendors', '--small-threshold', '--write', '--dry-run', '--summary', '--self-test', '--help', '-h'];
+const VALUE_FLAGS = ['--in', '--vendors', '--small-threshold'];
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -1238,7 +1304,16 @@ function parseArgs(argv) {
   // Positional args (not flags, not a consumed flag value) are company names.
   const names = args.filter((a, idx) => !a.startsWith('-') && !consumedValueIndices.has(idx));
 
+  // Same shape check as audit-portals.mjs: a non-negative number, 0 = off.
+  const rawThreshold = valueOf('--small-threshold');
+  const smallThreshold = rawThreshold === null ? DEFAULT_SMALL_THRESHOLD : Number(rawThreshold);
+  if (!Number.isFinite(smallThreshold) || smallThreshold < 0 || String(rawThreshold).trim() === '') {
+    console.error(`Error: --small-threshold expects a non-negative number, got "${rawThreshold}"`);
+    process.exit(1);
+  }
+
   return {
+    smallThreshold,
     inPath: valueOf('--in'),
     vendors,
     includeWorkday,
@@ -1286,6 +1361,8 @@ async function main() {
   }
 
   const { resolved, unresolved } = await runDiscovery(companies, { vendors: opts.vendors, includeWorkday: opts.includeWorkday });
+  // Advisory only: resolution and exit codes are unchanged (#4772).
+  flagSmallBoards(resolved, opts.smallThreshold);
 
   // Dedupe resolved matches against the existing tracker.
   let existingEntries = [];
@@ -1316,19 +1393,32 @@ async function main() {
   // we print the entries we WOULD add and touch nothing. This mirrors how the
   // rest of career-ops treats user files (see DATA_CONTRACT.md).
   let written = false;
+  let writeSkipped = false;
   let retiredTwins = [];
   if (opts.write && fresh.length && existsSync(PORTALS_PATH)) {
     const current = readFileSync(PORTALS_PATH, 'utf-8');
     // Comment out any not-yet-probed websearch placeholder this run supersedes,
     // THEN splice the real board in — same text so the next byte is preserved.
     const { text: pruned, retired } = retireWebsearchTwins(current, supersededNames);
-    retiredTwins = retired;
-    // Write-to-temp-then-rename: atomic on the same filesystem, so a crash
-    // mid-write can't leave the user's portals.yml truncated.
-    const tmpPath = `${PORTALS_PATH}.tmp-${process.pid}`;
-    writeFileSync(tmpPath, insertIntoTrackedCompanies(pruned, snippets), 'utf-8');
-    renameSyncWithRetry(tmpPath, PORTALS_PATH);
-    written = true;
+    const next = insertIntoTrackedCompanies(pruned, snippets);
+    // Retired placeholders leave tracked_companies (they become comments), so
+    // the count the spliced file must parse to drops by that many (#5053).
+    const expectedCount = existingEntries.length - retired.length + fresh.length;
+    if (splicedCorrectly(next, expectedCount)) {
+      retiredTwins = retired;
+      // Write-to-temp-then-rename: atomic on the same filesystem, so a crash
+      // mid-write can't leave the user's portals.yml truncated.
+      const tmpPath = `${PORTALS_PATH}.tmp-${process.pid}`;
+      writeFileSync(tmpPath, next, 'utf-8');
+      renameSyncWithRetry(tmpPath, PORTALS_PATH);
+      written = true;
+    } else {
+      // A text splice cannot cover every way tracked_companies can be written.
+      // Rather than leave a portals.yml the scanner cannot parse, keep the file
+      // as it is and print the entries for the user to paste.
+      writeSkipped = true;
+      warnings.push(`--write skipped — splicing into ${PORTALS_PATH} would not leave it as valid YAML with ${expectedCount} tracked_companies entries; the file is unchanged and the entries are shown in pendingEntries to add by hand`);
+    }
   } else if (opts.write && fresh.length && !existsSync(PORTALS_PATH)) {
     warnings.push(`--write given but portals.yml not found at ${PORTALS_PATH} — printing entries instead`);
   } else if (!opts.write && fresh.length) {
@@ -1349,7 +1439,8 @@ async function main() {
     warnings,
   };
 
-  if (supersededNames.length && !written) {
+  // A skipped write already said so above; "re-run with --write" would mislead.
+  if (supersededNames.length && !written && !writeSkipped) {
     warnings.push(
       `${supersededNames.length} resolved compan${supersededNames.length === 1 ? 'y has' : 'ies have'} a stale scan_method: websearch entry (${supersededNames.join(', ')}) — re-run with --write to promote and comment it out`,
     );
@@ -1357,9 +1448,10 @@ async function main() {
 
   if (opts.summary) {
     // --summary prints no warnings block, and daily-scan.sh runs --write --summary
-    // unattended: a mistyped seed title_net would otherwise drop the net silently.
-    for (const w of warnings.filter((x) => /title_net/.test(x))) console.error(`⚠️  ${w}`);
-    printSummary({ resolved, unresolved, duplicates, superseded: supersededNames, retired: retiredTwins, written });
+    // unattended: a mistyped seed title_net would otherwise drop the net silently,
+    // and so would a --write that was skipped to keep portals.yml valid (#5053).
+    for (const w of warnings.filter((x) => /title_net|^--write skipped/.test(x))) console.error(`⚠️  ${w}`);
+    printSummary({ resolved, unresolved, duplicates, superseded: writeSkipped ? [] : supersededNames, retired: retiredTwins, written });
   } else {
     const out = { metadata, resolved, unresolved };
     // Show the would-be YAML whenever we didn't write it (preview, or --write

@@ -191,6 +191,36 @@ try {
     }
   }
 
+  for (const next of ['-h', '-v', '-o=notes.txt']) {
+    const opts = { valueFlags: ['--since', '-o'], requireOperand: true };
+    const r = runValidate(['--since', next], ['--since', '--help', '-h', '-v', '-o'], 'USAGE-TEXT', opts);
+    if (r.status === 1 && /--since requires a value/.test(r.stderr || '') && !/USAGE-TEXT|REACHED-END/.test(r.stdout || '')) {
+      pass(`requireOperand: recognized short flag ${next} cannot supply an operand`);
+    } else {
+      fail(`requireOperand short-flag case ${next} => status=${r.status} stdout=${r.stdout} stderr=${r.stderr}`);
+    }
+  }
+
+  {
+    const opts = { valueFlags: ['--since'], requireOperand: true };
+    const r = runValidate(['--since', '-h=1'], ['--since', '--help', '-h'], 'USAGE-TEXT', opts);
+    if (r.status === 1 && /unrecognized flag\(s\): -h=1/.test(r.stderr || '') && !/USAGE-TEXT|REACHED-END/.test(r.stdout || '')) {
+      pass('a malformed short boolean flag is still rejected before missing-operand validation');
+    } else {
+      fail(`short boolean equals case => status=${r.status} stdout=${r.stdout} stderr=${r.stderr}`);
+    }
+  }
+
+  for (const args of [['--since', '-notes.txt'], ['--since=-h']]) {
+    const opts = { valueFlags: ['--since'], requireOperand: true };
+    const r = runValidate(args, ['--since', '--help', '-h'], 'USAGE-TEXT', opts);
+    if (r.status === 0 && /REACHED-END/.test(r.stdout || '') && !/USAGE-TEXT/.test(r.stdout || '')) {
+      pass(`requireOperand: literal dash-prefixed value survives (${args.join(' ')})`);
+    } else {
+      fail(`literal dash-prefixed value case => status=${r.status} stdout=${r.stdout} stderr=${r.stderr}`);
+    }
+  }
+
   {
     // The guard that keeps this OPT-IN: without requireOperand the behaviour is
     // unchanged, so callers with richer validation of their own (scan.mjs tells

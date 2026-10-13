@@ -59,11 +59,21 @@
  *                               salary_filter and rendered into pipeline.md's
  *                               compensation column via formatCompensation(); an
  *                               empty/absent value always passes the filter.
- * @property {string} [requisitionId] The EMPLOYER's requisition id (Greenhouse
- *                               `requisition_id`, e.g. "JR103948"; Workday: the
- *                               token ending `externalPath`, cross-site "-N"
- *                               suffix removed) — the
- *                               schema.org/JobPosting `identifier` concept.
+ * @property {string} [externalId] The ATS's own id for this POSTING, where the
+ *                               source exposes one (`git grep -n externalId
+ *                               providers/` lists the providers that set it).
+ *                               Unique within that ATS, not across employers —
+ *                               pair it with the source if you key on it. Not
+ *                               read by the scanner, whose per-posting identity
+ *                               is the URL. Left unset when the source exposes no
+ *                               posting id — never filled with a requisition id,
+ *                               which is shared by sibling postings.
+ * @property {string} [requisitionId] The EMPLOYER's requisition id — the
+ *                               schema.org/JobPosting `identifier` concept — from
+ *                               wherever the ATS exposes it: a dedicated payload
+ *                               field, or the posting URL when the ATS encodes it
+ *                               there. `git grep -n requisitionId providers/`
+ *                               lists the providers that set it.
  *
  *                               ⚠ MANY-TO-ONE WITH POSTINGS. This is a REQ key,
  *                               not a posting key, and must NEVER be used alone to
@@ -80,12 +90,15 @@
  *
  *                               Correct use: an ADVISORY grouping signal ("possible
  *                               repost / sibling req"), always paired with employer
- *                               and, where it matters, location; per-posting
+ *                               and, where it matters, location. Per-posting
  *                               identity is the URL. scan.mjs's company+role dedup
  *                               reads it only in the safe direction: two
  *                               same-titled postings with DIFFERENT ids are two
- *                               requisitions. Written to scan-history.tsv.
- *                               Capture verbatim; never reconstruct from the URL.
+ *                               requisitions. Written to scan-history.tsv. The
+ *                               scanner compares it as given (case folded), so
+ *                               report it in canonical form: any normalization,
+ *                               such as dropping an ATS repost suffix, happens in
+ *                               the provider.
  * @property {number} [trustScore] 0-100 trust score from _trust-validator.mjs.
  * @property {string[]} [trustFlags] Flags raised by trust validation (e.g.
  *                                   'invalid_url', 'suspicious_domain').
@@ -101,7 +114,17 @@
  *                               Omitted when the source doesn't say. Consumed
  *                               by scan.mjs's opt-in
  *                               `scan_history.dedup_include_language` and
- *                               written to scan-history.tsv.
+ *                               written to scan-history.tsv. A source that
+ *                               serves every language version of a posting at
+ *                               one URL, told apart by a `language` / `lang` /
+ *                               `locale` param, returns one Job per version,
+ *                               each with `language` set and that param on its
+ *                               `url`, the posting's own default language
+ *                               first: the URL dedup resolves a seen row of
+ *                               unknown language to the first version when no
+ *                               title tells it apart. A candidate's language
+ *                               is only ever this field, never read from its
+ *                               URL, so a version without it stays a duplicate.
  */
 
 /**
@@ -174,6 +197,11 @@
  *                              paginating providers (avature, workday) to throttle between page
  *                              requests. May be absent — providers fall back to a native
  *                              `setTimeout`-based delay.
+ * @property {boolean} [dedupIncludeLanguage] Whether the scan keeps language versions of
+ *                              one posting apart (`scan_history.dedup_include_language`).
+ *                              A provider whose extra language versions cost extra
+ *                              requests fetches them only when this is true; otherwise
+ *                              the scan keeps one version per posting and drops the rest.
  */
 
 /**

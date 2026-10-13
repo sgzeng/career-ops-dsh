@@ -20,6 +20,8 @@ import path from 'path';
 import { normalizeUrlForDedup } from '../scan.mjs';
 import { buildRoleModel, TAB_TARGET_STATUS } from './roles-model.mjs';
 import { isMainModule } from '../lib/is-main-module.mjs';
+import { localToday } from '../lib/local-today.mjs';
+import { escapeFormulaCell, unescapeFormulaCell } from '../lib/tsv-formula-escape.mjs';
 import { openTrackerTransaction, rebuildRow } from '../tracker-utils.mjs';
 import { resolveColumns, parseTrackerRow } from '../tracker-parse.mjs';
 import { setMachineSummaryScalar, setRemoteRow, editMachineSummaryBody, stripArchivedJd, matchMachineSummary } from '../report-format.mjs';
@@ -63,7 +65,7 @@ async function materializeFromPipeline(row) {
   const m = reserveOut.match(/(\d+)/);
   if (!m) throw new Error(`reserve-report-num.mjs: could not parse "${reserveOut}"`);
   const num = parseInt(m[1], 10);
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localToday();
   const line = [num, date, row.co, row.role, 'Evaluated', '—', '❌', '—', 'Added from New openings (roles web)', row.url].join('\t');
   const additionsDir = path.join(ROOT, 'batch/tracker-additions');
   const file = path.join(additionsDir, `${String(num).padStart(3, '0')}-web-materialize.tsv`);
@@ -111,7 +113,7 @@ export async function permanentDelete(id) {
   let num = row.trackerNum;
   if (num == null) num = await materializeFromPipeline(row);
 
-  await run('set-status.mjs', ['--row', String(num), 'SKIP', '--source', 'web', '--note', `permanent delete ${new Date().toISOString().slice(0, 10)}`]);
+  await run('set-status.mjs', ['--row', String(num), 'SKIP', '--source', 'web', '--note', `permanent delete ${localToday()}`]);
   removeFromPipeline(row.url);
   return { id, action: 'permanent-delete', trackerNum: num };
 }
@@ -122,7 +124,7 @@ export async function permanentDelete(id) {
 export function blacklistCompany(id, reason, rowsOverride) {
   const rows = rowsOverride || buildRoleModel({ root: ROOT }).rows;
   const row = findRow(rows, id);
-  const since = new Date().toISOString().slice(0, 10);
+  const since = localToday();
 
   let content;
   if (existsSync(BLACKLIST)) {
@@ -159,7 +161,8 @@ export async function editField(id, field, rawValue) {
   if (!EDITABLE_FIELDS.has(field)) {
     throw Object.assign(new Error(`Field "${field}" is not editable`), { code: 'BAD_FIELD' });
   }
-  const value = String(rawValue ?? '').replace(/[\r\n]+/g, ' ').replace(/\|/g, '/').trim();
+  // A tab would open a new column in scan-history.tsv, a pipe a new tracker cell.
+  const value = String(rawValue ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\|/g, '/').trim();
   const { rows } = buildRoleModel({ root: ROOT });
   const row = findRow(rows, id);
 
@@ -300,12 +303,16 @@ function editScanHistoryLocation(url, field, value) {
     const cells = line.split('\t');
     if (normalizeUrlForDedup(cells[0]) !== key) return line;
     while (cells.length < 9) cells.push('');
-    const cur = cells[6] || '';
-    cells[6] = field === 'loc'
+    // The cell is stored with reversible formula escaping (lib/tsv-formula-escape.mjs):
+    // edit the value it holds, then store the result the same way. Only this cell is
+    // rewritten; every other cell on the line is carried through as stored.
+    const cur = unescapeFormulaCell(cells[6] || '');
+    const next = field === 'loc'
       ? value
       : (value === 'yes'
         ? (/remote/i.test(cur) ? cur : `Remote${cur ? ` — ${cur}` : ''}`)
         : cur.replace(/remote(\s*[—-]\s*)?/i, '').trim());
+    cells[6] = escapeFormulaCell(next);
     touched = true;
     return cells.join('\t');
   });
@@ -366,7 +373,7 @@ function removeFromPipeline(url) {
 function cooldownScanHistory(url, company, days) {
   if (!existsSync(SCAN_HISTORY)) return;
   const key = normalizeUrlForDedup(url);
-  const until = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+  const until = localToday(new Date(Date.now() + days * 86400000));
   const lines = readFileSync(SCAN_HISTORY, 'utf-8').split('\n');
   let touched = false;
   const out = lines.map((line, i) => {

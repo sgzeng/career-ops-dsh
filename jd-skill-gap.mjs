@@ -31,6 +31,7 @@ import { canonicalize, extractSkills } from './skill-extract.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { join } from 'path';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { normalizePandocLine, toPlainText } from './lib/cv-markdown.mjs';
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -80,7 +81,7 @@ const CV_PATH = join(getCareerOpsRoot(), 'cv.md');
 // a single `*`/`_` — leaves a literal bullet character untouched, since a
 // real bullet is one asterisk, not two.
 const REQUIREMENT_HEADER_RE = new RegExp(
-  '^#{0,6}\\s*(?:(?:' + [
+  '^#{0,6}\\s*\u3010?\\s*(?:(?:' + [
     'required', 'requirements', 'qualifications', 'must[- ]have', 'preferred', 'nice[- ]to[- ]have',
     // (?:'|’)?\s*re|\s+are (not just (?:'|’)?\s*re): the contracted-only form
     // matched "we're"/"we re" but not the equally common uncontracted "we are"
@@ -109,14 +110,24 @@ const REQUIREMENT_HEADER_RE = new RegExp(
     '\u61C9\u5FB5\u689D\u4EF6',   // 應徵條件
     '\u8CC7\u683C\u689D\u4EF6',   // 資格條件
     '\u8077\u52D9\u9700\u6C42',   // 職務需求
-    '\u689D\u4EF6\u8981\u6C42',   // 條件要求 (zh-CN)
-    '\u4EFB\u8077\u8CC7\u683C',   // 任職資格 (zh-CN)
+    '\u689D\u4EF6\u8981\u6C42',   // 條件要求
+    '\u4EFB\u8077\u8CC7\u683C',   // 任職資格
     '\u5FC5\u8981\u689D\u4EF6',   // 必要條件
-    '\u57FA\u672C\u8981\u6C42',   // 基本要求 (zh-CN)
-    '\u8077\u4F4D\u8981\u6C42',   // 職位要求 (zh-CN)
+    '\u57FA\u672C\u8981\u6C42',   // 基本要求 (same code points in zh-TW and zh-CN)
+    '\u8077\u4F4D\u8981\u6C42',   // 職位要求
+    // zh-CN (Simplified). The entries above use Traditional code points
+    // (職 U+8077, 資 U+8CC7, 條 U+689D, 項 U+9805), so a Simplified posting
+    // (职 U+804C, 资 U+8D44, 条 U+6761, 项 U+9879) never matched them.
+    '\u804C\u4F4D\u8981\u6C42',   // 职位要求
+    '\u5C97\u4F4D\u8981\u6C42',   // 岗位要求
+    '\u5C97\u4F4D\u57FA\u672C\u8981\u6C42', // 岗位基本要求
+    '\u4EFB\u804C\u8981\u6C42',   // 任职要求
+    '\u4EFB\u804C\u8D44\u683C',   // 任职资格
+    '\u6761\u4EF6\u8981\u6C42',   // 条件要求
     // preferred / nice-to-have
     '\u52A0\u5206\u9805\u76EE',   // 加分項目
     '\u52A0\u5206\u689D\u4EF6',   // 加分條件
+    '\u52A0\u5206\u9879',         // 加分项 (zh-CN)
   ].join('|') + ')).*$',
   'im'
 );
@@ -131,7 +142,7 @@ const REQUIREMENT_HEADER_RE = new RegExp(
 // is handled by stripBoldMarkers() before this pattern ever sees the line,
 // not by letting the prefix itself swallow `*`/`_` (#4273).
 const NON_REQUIREMENT_HEADER_RE = new RegExp(
-  '^#{0,6}\\s*(?:(?:' + [
+  '^#{0,6}\\s*\u3010?\\s*(?:(?:' + [
     // Responsibilities. The negative lookahead keeps "You will have" on the
     // requirements side — this list is tested BEFORE REQUIREMENT_HEADER_RE in
     // scanJd(), so without it a "You will have:" heading would close a block
@@ -159,6 +170,14 @@ const NON_REQUIREMENT_HEADER_RE = new RegExp(
     '\u95DC\u65BC\u6211\u5011',   // 關於我們
     '\u61C9\u5FB5\u65B9\u5F0F',   // 應徵方式
     '\u5982\u4F55\u61C9\u5FB5',   // 如何應徵
+    // zh-CN (Simplified) closing headers.
+    '\u5DE5\u4F5C\u5185\u5BB9',   // 工作内容
+    '\u5DE5\u4F5C\u804C\u8D23',   // 工作职责
+    '\u5C97\u4F4D\u804C\u8D23',   // 岗位职责
+    '\u804C\u4F4D\u63CF\u8FF0',   // 职位描述
+    '\u85AA\u8D44',               // 薪资
+    '\u516C\u53F8\u4ECB\u7ECD',   // 公司介绍
+    '\u5173\u4E8E\u6211\u4EEC',   // 关于我们
   ].join('|') + ')).*$',
   'im'
 );
@@ -369,39 +388,50 @@ function skillMentionedInText(skill, text) {
 // section at all or matches a literal "Z" character later in the text.
 // Scanning line-by-line for the next heading avoids the anchor entirely.
 
-const SKILLS_HEADING_RE = /^#{1,6}\s*Skills\s*$/i;
 const ANY_HEADING_RE = /^#{1,6}\s/;
 
+// Which headings open a named skills section (#4879). The heading is read
+// through lib/cv-markdown.mjs first, so `## **[Skills]{.smallcaps}**` counts.
+// "Skills" anywhere in the heading counts at any level ("Technical Skills",
+// "Skills & Tools"). "Tools" / "Technologies" / "Tech Stack" only count on a
+// level-1 or level-2 heading: at level 3 they would also match an employer
+// such as "### Acme Technologies — Remote" and promote that job's prose into
+// named skills.
+const SKILLS_WORD_RE = /\bskills\b/i;
+const TOOLS_WORD_RE = /\b(?:tools|technologies|tech\s+stack)\b/i;
+
+function isSkillsHeading(line) {
+  // `\s*` rather than `\s+` keeps the historical `#Skills` (no space) form.
+  const m = String(line).match(/^(#{1,6})(?!#)\s*(.+?)\s*$/);
+  if (!m) return false;
+  const text = toPlainText(normalizePandocLine(m[2]).replace(/\s*\{[^}]*\}\s*$/, ''));
+  return SKILLS_WORD_RE.test(text) || (m[1].length <= 2 && TOOLS_WORD_RE.test(text));
+}
+
 /**
- * Split cv.md into its named "Skills" section (if any) and the remaining
- * prose, without relying on a Python-style end-of-string regex anchor.
+ * Split cv.md into its named skills sections (if any) and the remaining
+ * prose, without relying on a Python-style end-of-string regex anchor. Every
+ * skills heading contributes its section, up to the next heading of any
+ * level, so a CV with both "## Core Skills" and "## Technical Platforms &
+ * Tools" counts both.
  * @param {string} cvText
  * @returns {{namedSkillsText: string, proseText: string}}
  */
 function splitSkillsSection(cvText) {
-  const lines = cvText.split('\n');
-  let start = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (SKILLS_HEADING_RE.test(lines[i])) {
-      start = i + 1;
-      break;
+  const named = [];
+  const prose = [];
+  let inSkills = false;
+  for (const line of cvText.split('\n')) {
+    const skillsHeading = isSkillsHeading(line);
+    if (skillsHeading || ANY_HEADING_RE.test(line)) {
+      inSkills = skillsHeading;
+      // A skills heading itself belongs to neither side.
+      if (!skillsHeading) prose.push(line);
+      continue;
     }
+    (inSkills ? named : prose).push(line);
   }
-  if (start === -1) {
-    return { namedSkillsText: '', proseText: cvText };
-  }
-
-  let end = lines.length;
-  for (let i = start; i < lines.length; i++) {
-    if (ANY_HEADING_RE.test(lines[i])) {
-      end = i;
-      break;
-    }
-  }
-
-  const namedSkillsText = lines.slice(start, end).join('\n');
-  const proseText = lines.slice(0, start - 1).concat(lines.slice(end)).join('\n');
-  return { namedSkillsText, proseText };
+  return { namedSkillsText: named.join('\n'), proseText: prose.join('\n') };
 }
 
 // ── Classification ───────────────────────────────────────────────────
@@ -545,6 +575,31 @@ Python, Docker, Zookeeper
   eq('an h5 Skills heading is recognized as the named section', deepCvResult.existing.includes('Python'), true);
   eq('the named section stops at the h6 heading (Kubernetes stays prose)', deepCvResult.existing.includes('Kubernetes'), false);
   eq('prose under the h6 still classifies as supportedByResume', deepCvResult.supportedByResume.includes('Kubernetes'), true);
+
+  // Pandoc-flavored and differently named skills headings (#4879). The
+  // issue's repro: skills under "## **[Technical Platforms & Tools]{.smallcaps}**"
+  // were reported as resume prose, so the existing bucket was always empty.
+  const pandocSkillsCv = [
+    '# Jane Example', '',
+    '## **[Technical Platforms & Tools]{.smallcaps}**', '',
+    '- Cloud: AWS, Kubernetes, Terraform', '',
+    '## **[Professional Experience]{.smallcaps}**', '',
+    '### **Acme Technologies** --- New York, NY', '',
+    'Migrated the PostgreSQL fleet.',
+  ].join('\n');
+  const pandocSkillsResult = classifySkillGaps(['AWS', 'Kubernetes', 'Terraform', 'PostgreSQL'], pandocSkillsCv);
+  eq('a bold + span "Technical Platforms & Tools" heading is a named skills section',
+    pandocSkillsResult.existing.sort(), ['AWS', 'Kubernetes', 'Terraform']);
+  eq('a level-3 employer named "... Technologies" is not a skills section',
+    pandocSkillsResult.supportedByResume, ['PostgreSQL']);
+  for (const heading of ['## Technical Skills', '## **[Skills]{.smallcaps}**', '### Core Skills', '## Technologies', '# Tech Stack', '## Skills {#skills}']) {
+    eq(`"${heading}" opens a named skills section`,
+      classifySkillGaps(['Python'], `${heading}\nPython\n`).existing, ['Python']);
+  }
+  const twoSectionsCv = '## Skills\nPython\n\n## Experience\nUsed Docker daily.\n\n## Tools\nTerraform\n';
+  const twoSectionsResult = classifySkillGaps(['Python', 'Terraform', 'Docker'], twoSectionsCv);
+  eq('every skills section counts, not just the first', twoSectionsResult.existing.sort(), ['Python', 'Terraform']);
+  eq('prose between two skills sections stays prose', twoSectionsResult.supportedByResume, ['Docker']);
 
   // Regression: requirement headings that are full sentences or bare
   // uppercase rather than the noun forms ("Requirements", "Qualifications").
@@ -913,7 +968,23 @@ Shipped a support assistant on Llama 3.
 
 // ── Main ─────────────────────────────────────────────────────────────
 
+// Derived from the flags this file actually accepts, so `--help` cannot
+// describe an option that does not exist.
+const USAGE = `Usage:
+  node jd-skill-gap.mjs <jd-file> [--summary] [--self-test]
+
+  --summary    human-readable output instead of JSON
+  --self-test  run the built-in checks
+  --help, -h   print this and exit`;
+
 if (isMainModule(import.meta.url)) {
+  // BEFORE any work. Unhandled, `--help` fell through to the analysis: this
+  // script printed a full report for it, which is not what the flag asks for
+  // and hides that it was never recognised.
+  if (process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+    console.log(USAGE);
+    process.exit(0);
+  }
 if (selfTestMode) {
   runSelfTest();
 } else {
@@ -945,6 +1016,14 @@ if (selfTestMode) {
     console.log(`  ✅ Already in Skills section:   ${result.existing.join(', ') || '(none)'}`);
     console.log(`  📝 Mentioned in resume prose:   ${result.supportedByResume.join(', ') || '(none)'}`);
     console.log(`  ⚠️  Real gaps (not found anywhere): ${result.gap.join(', ') || '(none)'}`);
+    // Without a recognized skills heading every match lands in "prose", which
+    // reads like a CV that lists no skills rather than a heading this script
+    // did not recognize (#4879).
+    if (!splitSkillsSection(cvText).namedSkillsText.trim()) {
+      console.log('');
+      console.log('  ℹ️  No skills section recognized in cv.md (a heading containing "Skills", or a top-level');
+      console.log('     "Tools" / "Technologies" / "Tech Stack" heading), so nothing can be "already in Skills section".');
+    }
 
     // An empty three-bucket summary is indistinguishable from a clean bill of
     // health, and modes/pdf.md Step 4 treats this output as a gate. Say out loud

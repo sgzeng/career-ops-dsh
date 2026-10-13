@@ -1,6 +1,6 @@
+// @ts-check
 import { decodeEntities } from './_html-entities.mjs';
 import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
-// @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
 // Teamtailor provider — per-tenant public RSS feed.

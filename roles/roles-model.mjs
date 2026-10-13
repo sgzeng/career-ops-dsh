@@ -22,6 +22,8 @@ import { normalizeUrlForDedup } from '../scan.mjs';
 import { parseReportMeta } from '../report-format.mjs';
 import { WORK_AUTH_LABEL, workAuthFromHeader } from '../lib/column-contract.mjs';
 import { parseContacts } from '../contacts.mjs';
+import { parseScanHistoryLine } from '../lib/scan-history-columns.mjs';
+import { localToday } from '../lib/local-today.mjs';
 
 // ── Tab model ────────────────────────────────────────────────────────
 // UI tab id → canonical states.yml labels it shows (case-sensitive, matches
@@ -30,16 +32,18 @@ export const TAB_STATUSES = {
   new: [],                       // pipeline.md rows with no tracker entry
   evaluated: ['Evaluated'],
   submitted: ['Applied'],
-  pending: ['Responded', 'Interview'],
+  // Assessment (online test / async screening) sits between Responded and
+  // Interview in states.yml; it is an in-process stage, so it shows with them.
+  pending: ['Responded', 'Assessment', 'Interview'],
   rejected: ['Rejected'],
   offered: ['Offer', 'Hired'],
   archived: ['Discarded'],
   deleted: ['SKIP'],
 };
 // Canonical state written when a UI action moves a row into a given tab.
-// (pending has two source statuses; "move to Pending" always means Interview —
-// Responded is a state the row can only arrive at via reply-watch, not a
-// deliberate manual move.)
+// (pending has three source statuses; "move to Pending" always means Interview —
+// Responded and Assessment are states the row arrives at via reply-watch or the
+// follow-up controls, not a deliberate manual move.)
 export const TAB_TARGET_STATUS = {
   evaluated: 'Evaluated',
   submitted: 'Applied',
@@ -57,7 +61,9 @@ export function tabForStatus(status) {
   return null;
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+// The user's own calendar day, not the UTC one: west of Greenwich the UTC day is already
+// tomorrow in the evening (lib/local-today.mjs, #2765), which marked today's rows not-new.
+const today = () => localToday();
 const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
 
 function clampPct(n) {
@@ -145,7 +151,9 @@ function loadScanHistory(text) {
   const lines = text.split('\n');
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue;
-    const [url, firstSeen, portal, title, company, status, location, , postedAt] = line.split('\t');
+    // By column name, with the stored formula escaping undone (a location or title
+    // that starts with `=`/`+`/`-`/`@` is stored behind a `'`; lib/tsv-formula-escape.mjs).
+    const { url, first_seen: firstSeen, portal, title, company, status, location, posted_at: postedAt } = parseScanHistoryLine(line);
     if (!url) continue;
     const key = normalizeUrlForDedup(url);
     byUrl.set(key, { firstSeen, portal, title, company, status, location, postedAt });
@@ -205,8 +213,12 @@ export function buildRoleModel(opts = {}) {
       const tab = tabForStatus(r.status);
       if (!tab) continue; // unrecognized status — skip rather than misclassify
 
-      const urlCellIdx = colmap.url;
-      const url = urlCellIdx != null ? (line.split('|').map((s) => s.trim())[urlCellIdx] || '') : '';
+      // The URL cell is a markdown link (`[host](https://…)`, #3516) on rows a merge
+      // has written and a bare URL on older ones. parseTrackerRow() returns the HREF
+      // for both (`extractCellUrl`), which is what the scan-history join, the pipeline
+      // dedup and the rendered link need; the raw cell would be neither. A placeholder
+      // (`—`, `N/A`) is not a URL, so the report's own `**URL:**` can stand in.
+      const url = /^https?:\/\//i.test(r.url) ? r.url : '';
 
       const reportPath = resolveReport(r.report, REPORTS, root, r.num);
       const meta = reportPath ? parseReport(reportPath) : {};

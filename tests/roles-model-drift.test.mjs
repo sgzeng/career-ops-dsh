@@ -66,13 +66,22 @@ ok('parseTrackerRow still returns the fields buildRoleModel reads', () => {
   const colmap = resolveColumns(lines);
   const row = parseTrackerRow(lines[2], colmap);
   assert.ok(row, 'row did not parse');
-  for (const f of ['num', 'date', 'company', 'role', 'score', 'status', 'pdf', 'report', 'notes']) {
+  for (const f of ['num', 'date', 'company', 'role', 'score', 'status', 'pdf', 'report', 'notes', 'url']) {
     assert.ok(f in row, `parseTrackerRow no longer returns "${f}"`);
   }
   assert.equal(row.num, 42);
   assert.equal(row.company, 'Acme');
   assert.equal(row.status, 'Evaluated');
   assert.ok(colmap.url != null, 'resolveColumns no longer maps a "url" column');
+  assert.equal(row.url, 'https://acme.example/jobs/42');
+});
+
+// buildRoleModel() takes the posting URL from row.url, not from the raw cell: the cell is
+// a markdown link on rows merge-tracker has written (#3516), and a bare URL on older ones.
+ok('parseTrackerRow().url is the href for a markdown-link URL cell too', () => {
+  const lines = TRACKER_FIXTURE.replace('https://acme.example/jobs/42', '[acme.example](https://acme.example/jobs/42)').split('\n');
+  const row = parseTrackerRow(lines[2], resolveColumns(lines));
+  assert.equal(row.url, 'https://acme.example/jobs/42', `row.url = ${JSON.stringify(row.url)} — roles-model.mjs would join scan-history on the link text`);
 });
 
 // ── 3. report-format.mjs anchors ────────────────────────────────────

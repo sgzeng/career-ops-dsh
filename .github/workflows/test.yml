@@ -41,10 +41,14 @@ jobs:
         with:
           # Test code (fork code, in a merge_group) must not find a token in .git/config.
           persist-credentials: false
-      - name: Set up Node 18 for syntax compatibility
+      # The declared floor (lib/node-floor.mjs, package.json engines). Exact on
+      # purpose: a bare '22' resolves to the newest 22.x and tests nothing.
+      # Renovate is told to leave node-version in this file alone (renovate.json);
+      # tests/node-floor.test.mjs fails if this drifts from NODE_MIN.
+      - name: Set up the Node floor (22.13) for syntax compatibility
         uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '22.13'
       - run: npm run lint
       - name: Set up Node 24 for the test suite
         uses: actions/setup-node@v7
@@ -77,7 +81,7 @@ jobs:
             sh -c 'npm install --ignore-scripts --package-lock=false && npm run test:cv-visual'
       - name: Upload CV visual diffs and rendered previews
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cv-visual-artifacts
           path: |
@@ -105,3 +109,5 @@ jobs:
         run: node upgrade-tests.mjs --canary
       - name: Local-paths declaration survives a real apply (#2421)
         run: node upgrade-tests.mjs --local-paths
+      - name: User-layer manifest entry is refused, not fatal (#3782)
+        run: node upgrade-tests.mjs --user-layer-refusal

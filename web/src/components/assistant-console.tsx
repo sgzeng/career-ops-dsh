@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
@@ -152,6 +152,28 @@ export function AssistantConsole() {
   const router = useRouter();
   const pathname = usePathname();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const focusOnOpen = useRef(false);
+  const focusOnClose = useRef(false);
+  const panelTitleId = useId();
+  const inputId = useId();
+  const inputHelpId = `${inputId}-help`;
+
+  function openAssistant(trigger?: HTMLElement) {
+    // Reopening an already visible assistant must not interrupt the user.
+    if (!panelRef.current) {
+      const source = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      returnFocusRef.current = source === document.body ? null : source;
+      focusOnOpen.current = true;
+    }
+    setOpen(true);
+  }
+  function closeAssistant() {
+    focusOnClose.current = !!panelRef.current?.contains(document.activeElement);
+    setOpen(false);
+  }
 
   const { jobs, startJob } = useJobs();
   const pipeline = usePipeline();
@@ -202,6 +224,24 @@ export function AssistantConsole() {
     el.style.height = "auto";
     if (input) el.style.height = `${Math.min(el.scrollHeight, INPUT_MAX_PX[size])}px`;
   }, [input, size, open]);
+
+  useLayoutEffect(() => {
+    if (open && focusOnOpen.current) {
+      focusOnOpen.current = false;
+      // A removed Ask button leaves focus on body. Preserve any newer focus.
+      if (document.activeElement !== document.body && document.activeElement !== returnFocusRef.current) return;
+      const target = inputRef.current && !inputRef.current.disabled
+        ? inputRef.current
+        : panelRef.current?.querySelector<HTMLElement>('a[href="/config"]');
+      target?.focus();
+    } else if (!open && focusOnClose.current) {
+      focusOnClose.current = false;
+      if (document.activeElement !== document.body) return;
+      const trigger = returnFocusRef.current;
+      const usable = trigger?.isConnected && trigger.getClientRects().length > 0 && !trigger.matches(":disabled, [inert], [inert] *");
+      (usable ? trigger : openerRef.current)?.focus();
+    }
+  }, [open]);
 
   // selected CLI from Config (reacts to changes in other tabs)
   useEffect(() => {
@@ -470,6 +510,18 @@ export function AssistantConsole() {
       writePortals: (roles, location) => {
         fetch("/api/portals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles, location }) }).catch(() => {});
       },
+      writePersonalization: (patch) => {
+        fetch("/api/personalization", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
+          .then(async (r) => {
+            // A refused or failed write must not pass for a saved one: the route
+            // answers 409/500 with the reason, and the file is left as it was.
+            if (!r.ok) throw new Error(((await r.json().catch(() => null)) as { error?: string } | null)?.error || `HTTP ${r.status}`);
+            router.refresh();
+            // The onboarding panel listens for this to refetch section state.
+            window.dispatchEvent(new CustomEvent("co-onboarding-changed"));
+          })
+          .catch((e) => appendParts([{ type: "note", text: `Your personalization was NOT saved: ${e instanceof Error ? e.message : "the request failed"}` }]));
+      },
     };
   }
 
@@ -620,7 +672,7 @@ export function AssistantConsole() {
   sendRef.current = send;
   useEffect(() => {
     function onOpen(e: Event) {
-      setOpen(true);
+      openAssistant();
       const msg = (e as CustomEvent).detail?.message as string | undefined;
       if (msg) setTimeout(() => sendRef.current(msg), 80);
     }
@@ -662,7 +714,8 @@ export function AssistantConsole() {
     <>
       {!open && (
         <button
-          onClick={() => setOpen(true)}
+          ref={openerRef}
+          onClick={(e) => openAssistant(e.currentTarget)}
           className="fixed bottom-5 right-5 z-50 flex items-center justify-center gap-2 rounded-full border border-border bg-surface/90 py-1.5 pl-1.5 pr-4 shadow-lg backdrop-blur transition-colors hover:bg-surface-hover max-sm:min-h-[44px]"
           aria-label="Open assistant"
         >
@@ -672,11 +725,23 @@ export function AssistantConsole() {
       )}
 
       {open && (
-        <div className={cn("fixed z-50 flex flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl", PANEL_CLASS[size])}>
+        <div
+          ref={panelRef}
+          role="region"
+          aria-labelledby={panelTitleId}
+          onKeyDown={(e) => {
+            // Let composition and native select popups handle Escape first.
+            if (e.key !== "Escape" || e.defaultPrevented || e.nativeEvent.isComposing || e.keyCode === 229 || (e.target instanceof HTMLElement && e.target.closest("select"))) return;
+            e.preventDefault();
+            e.stopPropagation();
+            closeAssistant();
+          }}
+          className={cn("fixed z-50 flex flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl", PANEL_CLASS[size])}
+        >
           <header className="flex items-center gap-2.5 border-b border-border px-4 py-3">
             <CoMark size={26} />
             <div className="flex-1">
-              <div className="text-sm font-semibold tracking-tight">Assistant</div>
+              <div id={panelTitleId} className="text-sm font-semibold tracking-tight">Assistant</div>
               <div className="text-xs text-faint">{cliId ? `via ${cliId}` : "no CLI configured"}</div>
             </div>
             <Button variant="ghost" size="icon" onClick={cycleSize} className="text-muted" aria-label={SIZE_LABEL[size]} title={SIZE_LABEL[size]}>
@@ -685,7 +750,7 @@ export function AssistantConsole() {
             <Button variant="ghost" size="icon" onClick={() => void selectChat()} disabled={busy || chatPending || !chatReady} className="text-muted" aria-label="New chat" title="New chat">
               <RotateCcw className="size-4" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={() => setOpen(false)} className="text-muted" aria-label="Close assistant">
+            <Button variant="ghost" size="icon" onClick={closeAssistant} className="text-muted" aria-label="Close assistant">
               <X className="size-4" />
             </Button>
           </header>
@@ -763,13 +828,17 @@ export function AssistantConsole() {
           )}
 
           <div className="border-t border-border p-3">
+            <label htmlFor={inputId} className="sr-only">Message to assistant</label>
+            <p id={inputHelpId} className="sr-only">Enter sends your message. Shift+Enter adds a new line.</p>
             <div className="flex items-end gap-2">
               <textarea
+                id={inputId}
+                aria-describedby={inputHelpId}
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                     e.preventDefault();
                     send();
                   }
@@ -781,7 +850,10 @@ export function AssistantConsole() {
                 className="flex-1 resize-none rounded-xl border border-border bg-surface/60 px-3 py-2 text-sm outline-none transition-colors placeholder:text-faint focus:border-brand/50 disabled:opacity-50"
               />
               <button
-                onClick={() => send()}
+                onClick={(e) => {
+                  if (document.activeElement === e.currentTarget) inputRef.current?.focus();
+                  void send();
+                }}
                 disabled={busy || chatPending || !chatReady || !input.trim() || !cliId}
                 className="rounded-xl bg-brand p-2 text-brand-foreground transition-colors hover:bg-brand-200 disabled:opacity-40"
                 aria-label="Send"
@@ -868,29 +940,62 @@ function PartView({
     );
   }
   if (part.type === "confirm") {
-    return (
-      <div className="rounded-xl border border-brand/40 bg-brand-soft p-2.5">
-        <div className="text-xs font-medium text-foreground">{part.summary}</div>
-        {part.state === "pending" ? (
-          <div className="mt-2 flex gap-2">
-            <button
-              onClick={() => onConfirm(part.cid, true)}
-              className="rounded-full bg-brand px-3 py-1 text-xs font-medium text-brand-foreground transition-colors hover:bg-brand-200"
-            >
-              Confirm
-            </button>
-            <button
-              onClick={() => onConfirm(part.cid, false)}
-              className="rounded-full border border-border px-3 py-1 text-xs text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <div className="mt-1 text-xs text-faint">{part.state === "done" ? "✓ started" : "cancelled"}</div>
-        )}
-      </div>
-    );
+    return <ConfirmationCard key={part.cid} part={part} onConfirm={onConfirm} />;
   }
   return null;
+}
+
+function ConfirmationCard({ part, onConfirm }: {
+  part: Extract<Part, { type: "confirm" }>;
+  onConfirm: (cid: string, accept: boolean) => void;
+}) {
+  const id = useId();
+  const summaryId = `${id}-summary`;
+  const resultId = `${id}-result`;
+  const resultRef = useRef<HTMLDivElement>(null);
+  const decisionRef = useRef<HTMLButtonElement | null>(null);
+
+  // Only continue focus from the decision control being removed. Arrival,
+  // history restoration and unrelated focus must never pull the user here.
+  useLayoutEffect(() => {
+    const decision = decisionRef.current;
+    if (part.state === "pending" || !decision) return;
+    decisionRef.current = null;
+    if (document.activeElement === decision || document.activeElement === document.body) {
+      resultRef.current?.focus();
+    }
+  }, [part.state]);
+
+  function decide(button: HTMLButtonElement, accept: boolean) {
+    decisionRef.current = document.activeElement === button ? button : null;
+    onConfirm(part.cid, accept);
+  }
+
+  return (
+    <div role="group" aria-labelledby={summaryId} className="rounded-xl border border-brand/40 bg-brand-soft p-2.5">
+      <div id={summaryId} className="text-xs font-medium text-foreground">{part.summary}</div>
+      {part.state === "pending" ? (
+        <div className="mt-2 flex gap-2">
+          <button
+            aria-label={`Confirm: ${part.summary}`}
+            onClick={(e) => decide(e.currentTarget, true)}
+            className="rounded-full bg-brand px-3 py-1 text-xs font-medium text-brand-foreground transition-colors hover:bg-brand-200"
+          >
+            Confirm
+          </button>
+          <button
+            aria-label={`Cancel: ${part.summary}`}
+            onClick={(e) => decide(e.currentTarget, false)}
+            className="rounded-full border border-border px-3 py-1 text-xs text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div ref={resultRef} tabIndex={-1} aria-labelledby={`${summaryId} ${resultId}`} className="mt-1 rounded text-xs text-faint focus-visible:outline-2 focus-visible:outline-brand">
+          <span id={resultId}>{part.state === "done" ? "✓ started" : "cancelled"}</span>
+        </div>
+      )}
+    </div>
+  );
 }
