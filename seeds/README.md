@@ -94,6 +94,10 @@ for (const [id, source] of Object.entries(SEED_SOURCES)) {
 
 Six requests in flight per API host (`SINGLE_HOST_CONCURRENCY`, the same cap the directory sweep uses on these hosts) and at least 50 ms between request starts to a host (`CAREER_OPS_SEED_HOST_GAP_MS`, `0` turns it off), instead of 20 workers on one host. A 429/403 pauses that host for its `Retry-After` (else 15 s, doubling to 120 s); ten in a row abandon the host for the rest of the run, loudly, and its remaining probes are reported as skipped rather than as dead boards.
 
+## What a posting must pass
+
+Postings found on a seed company's board go through the filters the directory sweep applies, which are `scan.mjs`'s: date, title, `skip_tiers`, location, content, `country_eligibility_filter`, `visa_filter`, the level ceiling, the blacklist, and the URL and company+title duplicate checks (`scan-ats-full.mjs`: `firstRejectingFilter`, `createRoleDedup`). The summary's `Filtered by tier / visa / country` and `Duplicate roles` lines add the seed scan's drops to the sweep's; `--json` has them per seed under `seeds.<id>.gated`.
+
 ## Reading the summary
 
 ```

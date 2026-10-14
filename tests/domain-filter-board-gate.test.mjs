@@ -275,8 +275,12 @@ check(!buildDomainFilter(['word:rwa'])('Software RWAs Team'), 'an explicit `word
 
   // A deferred board finishes in the sweep, so a checkpoint can advance past it
   // before the retry runs. Both checkpoint writes carry the deferred indices,
-  // and a resumed run queues the ones below its offset for the retry.
-  const writes = src.match(/current: \{ name, resumeAt: startAt \+ \w+, datasetLen: list\.length, datasetHash(, deferred: deferredIndices\(\))? \}/g) ?? [];
+  // and a resumed run queues the ones below its offset for the retry. The two
+  // writes are liveCheckpoint() (the periodic one, shared with a stop signal) and
+  // the stop block's; each states its resume point as startAt + the lowest
+  // unfinished board, held down to the first refused board (Math.min(...)) or
+  // already so (resumeAbs).
+  const writes = src.match(/current: \{ name, resumeAt: [^}]*?datasetLen: list\.length, datasetHash(, deferred: deferredIndices\(\))? \}/g) ?? [];
   check(writes.length === 2 && writes.every((w) => w.includes('deferred: deferredIndices()')), 'the periodic and outage checkpoints both carry the deferred board indices');
   check(/checkpoint\.current\.deferred[\s\S]{0,120}if \(index >= startAt/.test(sweep)
     && /truncated\.push\(entriesAll\[index\]\);\s*deferred\.set\(entriesAll\[index\]/.test(sweep),
@@ -309,7 +313,8 @@ check(!buildDomainFilter(['word:rwa'])('Software RWAs Team'), 'an explicit `word
 // ── The SIGTERM partial result reports the gate too ─────────────────
 {
   const src = readFileSync(join(ROOT, 'scan-ats-full.mjs'), 'utf-8');
-  const partial = src.slice(src.indexOf("process.on('SIGTERM'"), src.indexOf('const snapshotCounters'));
+  // The handler is the stop-signal one (SIGTERM and SIGALRM, see onStopSignal).
+  const partial = src.slice(src.indexOf('const onStopSignal'), src.indexOf('const snapshotCounters'));
   check(['domainFilterActive: Boolean(domainFilter)', 'domainGatedBoards,', 'domainGatedPostings,'].every((f) => partial.includes(f)),
     'the stoppedEarly JSON carries domainFilterActive and both gate counters');
 }

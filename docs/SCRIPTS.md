@@ -886,8 +886,56 @@ the run would mix two configurations: different `--ats`, `--limit` or
 `--include-undated` flags, `--shuffle`, or a `portals.yml` filter edited since
 the checkpoint was written (`title_filter` / `title_filter_full`,
 `title_filter_overrides`, `location_filter`, `content_filter`,
-`domain_filter`). The error names the filter that changed; restore it to finish
-the sweep, or delete the checkpoint to start fresh.
+`domain_filter`, `level_filter`, `skip_tiers`, `visa_filter`,
+`country_eligibility_filter`). The error names the filter that changed; restore
+it to finish the sweep, or delete the checkpoint to start fresh.
+
+#### A host that refuses the sweep
+
+A Greenhouse, Lever or Ashby sweep is thousands of requests to one API host. A
+429 or 403 pauses the whole source for the host's `Retry-After` (else 15 s,
+doubling to 120 s) and the refused board is asked once more; **25 refusals in a
+row** (a 200 or a 404 in between resets the count, a 5xx neither resets nor
+counts) abandon that source for the run, loudly. (Workday, iCIMS and BambooHR
+give every tenant its own host, where one tenant's 403 says nothing about the
+next, so they have no breaker; their failures are still split by cause.)
+
+```
+⛔ stopped greenhouse: 25 consecutive HTTP 429 (last refused board: acme); 1,234 of 8,712 boards scanned; rerun later or with --resume.
+```
+
+The matches found so far are written as usual, the checkpoint is left for
+`--resume` (its resume point stays at or below every refused or never-asked
+board), the boards that were not asked are **not** recorded in
+`data/dead-boards.tsv`, and the exit status stays 0, as it does for the DNS
+breaker. A `--seeds` scan in the same invocation is skipped. The summary keeps
+`Unreachable boards: N` and adds `sweep boards:` with the same figure split into
+404 / 403 / 429 / 5xx / timeout-network / other, so a throttled run reads
+differently from a dead-board run; `--json` has `stoppedByRefusals`,
+`abandonedSources`, `unreachableByCause` and `sweep.<source>`.
+`CAREER_OPS_SWEEP_COOLDOWN_MS` / `CAREER_OPS_SWEEP_COOLDOWN_MAX_MS` set the
+back-off.
+
+#### Gates shared with `scan.mjs`
+
+After the title filter the sweep (and the seed scan) applies the gates
+`scan.mjs` applies, built from the same `portals.yml` keys, in the same order
+(title, `skip_tiers`, location, content, `country_eligibility_filter`,
+`visa_filter`), and counts what each removed (`Filtered by tier / visa /
+country` in the summary; `postingsFilteredTier|Visa|Country` in `--json`).
+`country_eligibility_filter` does nothing for a profile whose
+`location.country` is United States, and the summary says so. A role the
+tracker, `pipeline.md` (Pending included) or `scan-history.tsv` already holds
+under another URL is not appended again: the same company+title key as
+`scan.mjs`, with `company_aliases` (`Duplicate roles: N`).
+
+#### Stopped at a time limit
+
+`SIGTERM` (what `timeout` sends in `ops/daily-scan.sh`) and `SIGALRM` (its perl
+fallback) no longer lose the run: the matches already found are appended to
+`pipeline.md` and `scan-history.tsv` exactly once, the checkpoint is brought up
+to date, and the process exits 143 / 142. `--dry-run` writes nothing; `--json`
+keeps its partial-result contract (exit 0). A SIGKILL cannot be caught.
 
 ### DNS pacing
 

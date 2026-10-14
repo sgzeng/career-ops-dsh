@@ -129,6 +129,9 @@ export function newSeedStats(seedId) {
     truncated: false,
     warnings: /** @type {string[]} */ ([]),
     matches: 0,
+    // Postings the quality gates removed (scan-ats-full.mjs: skip_tiers, country
+    // eligibility, visa, and the company+title duplicate check).
+    gated: { tier: 0, country: 0, visa: 0, duplicateRole: 0 },
   };
 }
 

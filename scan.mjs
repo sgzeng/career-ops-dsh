@@ -1606,7 +1606,7 @@ export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { rec
   return ageDays < recheckAfterDays;
 }
 
-function scanHistoryPolicy(config = {}) {
+export function scanHistoryPolicy(config = {}) {
   const raw = config.scan_history?.recheck_after_days;
   const parsed = Number.parseInt(raw, 10);
   return {
@@ -2722,7 +2722,7 @@ export function matchesSeenCompanyRole({ key, baseKey, seen, requisitions, locat
 
 /** Record a row's forms (requisitions or languages) under a key, or the
  * {@link ANY_REQUISITION} marker when the row named none. */
-function recordForms(formsByKey, key, forms) {
+export function recordForms(formsByKey, key, forms) {
   let seen = formsByKey.get(key);
   if (!seen) formsByKey.set(key, (seen = new Set()));
   const list = toRequisitionForms(forms);
@@ -2733,7 +2733,7 @@ function recordForms(formsByKey, key, forms) {
 /** Record a row's languages under a key, filed under each of its requisition
  * forms ({@link ANY_REQUISITION} when it named none) — the shape
  * {@link isDistinctLanguage} reads. */
-function recordLanguages(languagesByKey, key, requisitions, languages) {
+export function recordLanguages(languagesByKey, key, requisitions, languages) {
   let byRequisition = languagesByKey.get(key);
   if (!byRequisition) languagesByKey.set(key, (byRequisition = new Map()));
   const list = toRequisitionForms(requisitions);

@@ -67,8 +67,12 @@ LOG="$LOG_DIR/scan-$(date +%Y-%m-%d).log"
 # macOS ships neither `timeout` nor `gtimeout` (both are Homebrew coreutils),
 # but it always ships perl, and an alarm() armed before exec survives the exec
 # and ends the process with SIGALRM — one process, no watchdog left behind.
-# The matches of a killed scan-ats-full run are lost (it writes pipeline.md only
-# at the end); that is why step 4 runs one directory per invocation.
+# A killed scan-ats-full run is not a lost one: on SIGTERM (timeout) or SIGALRM
+# (the perl alarm) it appends the matches it already has to pipeline.md and
+# scan-history.tsv before it exits. Only the -k SIGKILL that timeout sends 15s
+# later, if the flush has not finished, loses them. Step 4 still runs one
+# directory per invocation, so one hung directory costs the rest of that
+# directory and nothing else.
 run_limited() {
   local secs=$1
   shift
@@ -175,7 +179,7 @@ digits_or() {
       run_limited "$limit" node scan-ats-full.mjs --ats "$ats" --since "$sweep_since"
       rc=$?
       case "$rc" in
-        124|137|142) echo "scan-ats-full.mjs --ats $ats: STOPPED at the ${limit}s limit — its matches were not saved; the next run's window covers them" ;;
+        124|137|142|143) echo "scan-ats-full.mjs --ats $ats: STOPPED at the ${limit}s limit — the matches found before it were saved (see its ⏹ line); the next run's window covers the rest" ;;
       esac
       echo "scan-ats-full.mjs --ats $ats exit=$rc ($((SECONDS - step_start))s)"
     done
