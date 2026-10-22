@@ -31,11 +31,18 @@
 //     expose its application control; the SPA root's `?position_id=` query does
 //     not reliably select the posting.
 //
+// Recruitment types (verified live on jobs.bytedance.com, 2026-10-22): a query with no
+// `recruitment_id_list` returns ONLY experienced hires (101). Graduate / new-grad (201) and
+// intern (202) postings are invisible to it — "Security" is 422 rows on 101 but 115 more on
+// 201 — so a PhD new-grad search must name them. `feishu_jobs_recruitment_ids` lists the
+// types to query (each one is paged separately); absent = the old behaviour.
+//
 // portals.yml entry example:
 //   - name: 字节跳动
 //     careers_url: https://jobs.bytedance.com
 //     keywords: ["AI", "大模型", "Agent"]
 //     max_pages: 200               # optional safety bound; pageSize 100
+//     feishu_jobs_recruitment_ids: ["101", "201", "202"]   # optional, see below
 //
 //   - name: MiniMax
 //     careers_url: https://vrfi1sk8a0.jobs.feishu.cn
@@ -95,7 +102,9 @@ export function parseFeishuJobsResponse(json, companyName, origin) {
     const encodedId = safeEncodeURIComponent(id);
     if (encodedId === null) continue;
     const cities = Array.isArray(p.city_list)
-      ? p.city_list.map((c) => c?.name).filter(Boolean).join('/')
+      // en_name first: location_filter matches English city names ("San Jose"), and the
+      // localized `name` is Chinese on jobs.bytedance.com (圣何塞), which no US rule can match.
+      ? p.city_list.map((c) => c?.en_name || c?.name).filter(Boolean).join('/')
       : '';
     const category = p?.job_category?.name || '';
     const recruitType = p?.recruit_type?.name || '';
@@ -134,9 +143,15 @@ export default {
     }
     const api = `${origin}/api/v1/search/job/posts`;
 
-    const keywords = Array.isArray(entry.keywords) && entry.keywords.length
-      ? entry.keywords
+    const rawKeywords = Array.isArray(entry.feishu_jobs_keywords) ? entry.feishu_jobs_keywords : entry.keywords;
+    const keywords = Array.isArray(rawKeywords) && rawKeywords.length
+      ? rawKeywords
       : DEFAULT_KEYWORDS;
+    const recruitIds = Array.isArray(entry.feishu_jobs_recruitment_ids)
+      ? entry.feishu_jobs_recruitment_ids.map(String).filter((v) => /^\d{1,6}$/.test(v))
+      : [];
+    // null = the unfiltered default query (experienced hires only).
+    const recruitTypes = recruitIds.length ? recruitIds : [null];
     const entryLimit = Number(entry.max_pages);
     const probeLimit = Number(ctx?.maxPages);
     const entryMaxPages = Number.isSafeInteger(entryLimit) && entryLimit > 0
@@ -151,7 +166,7 @@ export default {
     const seen = new Map();
     let firstRequest = true;
 
-    for (const keyword of keywords) {
+    for (const recruitType of recruitTypes) for (const keyword of keywords) {
       for (let page = 1; page <= maxPages; page++) {
         if (firstRequest) firstRequest = false;
         else await sleep(INTER_PAGE_DELAY_MS, ctx);
@@ -166,7 +181,12 @@ export default {
               'user-agent': MACOS_BROWSER_LIKE_USER_AGENT,
               'referer': `${origin}/`,
             },
-            body: JSON.stringify(keyword ? { limit: PAGE_SIZE, offset, keyword } : { limit: PAGE_SIZE, offset }),
+            body: JSON.stringify({
+              limit: PAGE_SIZE,
+              offset,
+              ...(keyword ? { keyword } : {}),
+              ...(recruitType ? { recruitment_id_list: [recruitType] } : {}),
+            }),
             redirect: 'error',
           }));
           if (json?.code !== 0) {

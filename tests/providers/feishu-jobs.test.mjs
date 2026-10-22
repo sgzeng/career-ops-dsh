@@ -86,6 +86,12 @@ try {
   };
   const { jobs, total } = parseFeishuJobsResponse(sample, 'Example Labs', 'https://example-labs.jobs.feishu.cn');
 
+  {
+    const en = parseFeishuJobsResponse({ code: 0, data: { count: 1, job_post_list: [{ id: '9', title: 'Research Scientist', city_list: [{ name: '圣何塞', en_name: 'San Jose' }, { name: '西雅图', en_name: 'Seattle' }] }] } }, 'ByteDance', 'https://jobs.bytedance.com');
+    if (en.jobs[0]?.location === 'San Jose/Seattle') pass('parseFeishuJobsResponse() prefers en_name so location_filter can match US cities');
+    else fail(`parseFeishuJobsResponse() location = ${en.jobs[0]?.location}`);
+  }
+
   if (total === 192) pass('parseFeishuJobsResponse() reads data.count as total');
   else fail(`parseFeishuJobsResponse() total = ${total}`);
 
@@ -148,6 +154,7 @@ try {
           const body = JSON.parse(opts.body);
           const call = {
             keyword: body.keyword,
+            recruitment_id_list: body.recruitment_id_list,
             offset: body.offset,
             limit: body.limit,
             headers: opts.headers,
@@ -186,6 +193,23 @@ try {
     pass('feishu-jobs.fetch() paces follow-up requests via ctx.sleep (no delay before the first request)');
   } else {
     fail(`feishu-jobs.fetch() ctx.sleep calls: ${JSON.stringify(paged.sleeps)}`);
+  }
+
+  {
+    const rec = mkCtx(({ recruitment_id_list }) => ({
+      code: 0,
+      data: { count: 1, job_post_list: [mkJob(`r${recruitment_id_list ? recruitment_id_list[0] : 'default'}`, `岗位R${recruitment_id_list || 'default'}`)] },
+    }));
+    const recJobs = await feishu.fetch({ name: 'Example Labs', careers_url: TENANT_URL, feishu_jobs_keywords: ['Security'], feishu_jobs_recruitment_ids: ['201', '202', 'x; drop'] }, rec.ctx);
+    if (rec.calls.length === 2 && rec.calls[0].recruitment_id_list?.[0] === '201' && rec.calls[1].recruitment_id_list?.[0] === '202' && rec.calls.every((c) => c.keyword === 'Security') && recJobs.length === 2) {
+      pass('feishu-jobs.fetch() queries each feishu_jobs_recruitment_ids type separately (non-numeric ids dropped)');
+    } else {
+      fail(`feishu-jobs.fetch() recruitment ids: ${JSON.stringify(rec.calls.map((c) => [c.keyword, c.recruitment_id_list]))}`);
+    }
+    const plain = mkCtx(() => ({ code: 0, data: { count: 0, job_post_list: [] } }));
+    await feishu.fetch({ name: 'Example Labs', careers_url: TENANT_URL, keywords: ['AI'] }, plain.ctx);
+    if (plain.calls[0].recruitment_id_list === undefined) pass('feishu-jobs.fetch() sends no recruitment_id_list unless configured');
+    else fail('feishu-jobs.fetch() sent a recruitment_id_list by default');
   }
 
   const inventoryCount = 2101;
