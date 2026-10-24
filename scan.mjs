@@ -73,7 +73,7 @@ import { normalizeCompanyName } from './invite-match.mjs';
 import { buildCompanyIdentity, isRedundantTitleQualifier } from './identity-key.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldAccents } from './title-keywords.mjs';
-import { buildContentRescue } from './lib/content-rescue.mjs';
+import { buildContentRescue, buildMustCatch } from './lib/content-rescue.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
 import { fetchJobDescription } from './lib/jd-text.mjs';
 import {
@@ -4129,6 +4129,9 @@ async function main() {
   // Optional (lib/content-rescue.mjs): a title_filter miss may be kept when its
   // description is strong evidence. Title negatives (Manager, Sales, ...) still veto.
   const contentRescue = buildContentRescue(config.content_rescue, config.content_filter);
+  // content_rescue.must_catch: >= N distinct listed concepts in the description always pass
+  // the title and content gates (lib/content-rescue.mjs buildMustCatch).
+  const mustCatch = buildMustCatch(config.content_rescue?.must_catch);
   const titleNotVetoed = buildTitleFilter({ negative: config.title_filter?.negative });
   // Optional (lib/level-filter.mjs): a Staff/Principal/Distinguished title is
   // dropped only when its JD requires level_filter.min_years+ or a team lead;
@@ -4505,11 +4508,14 @@ async function main() {
         for (const field of declaredFields) {
           if (field === 'title') {
             if (!titleFilter(job.title, company._isBoard ? undefined : company.title_net)) {
-              const rescued = rescue && titleNotVetoed(job.title) ? rescue.check(job) : null;
-              if (!rescued) { failedField = field; break; }
+              const vetoOk = titleNotVetoed(job.title);
+              const rescued = rescue && vetoOk ? rescue.check(job) : null;
+              const mustHit = !rescued && rescue && vetoOk ? rescue.mustCatch(job) : null;
+              if (!rescued && !mustHit) { failedField = field; break; }
               totalContentRescued++;
-              job.contentRescue = rescued.keywords;
-              const label = `content-rescue: ${rescued.keywords.join(', ')}`;
+              const kws = rescued ? rescued.keywords : mustHit;
+              job.contentRescue = kws;
+              const label = `${rescued ? 'content-rescue' : 'must-catch'}: ${kws.join(', ')}`;
               job.note = typeof job.note === 'string' && job.note.trim() ? `${job.note} — ${label}` : label;
             }
           } else {
@@ -4551,7 +4557,7 @@ async function main() {
           totalFilteredSalary++;
           continue;
         }
-        if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
+        if (!(mustCatch && mustCatch(job.description)) && !contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
           continue;
         }

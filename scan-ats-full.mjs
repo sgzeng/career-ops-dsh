@@ -83,6 +83,7 @@ import {
   recordForms, recordLanguages, resolveDedupIncludeLocation, resolveDedupIncludeLanguage, scanHistoryPolicy,
   PORTALS_PATH, PIPELINE_PATH, SCAN_HISTORY_PATH,
 } from './scan.mjs';
+import { buildMustCatch } from './lib/content-rescue.mjs';
 import { classifyTier } from './classify-tier.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
 import { fetchJobDescription } from './lib/jd-text.mjs';
@@ -1557,7 +1558,13 @@ async function main() {
   const locationFilter = buildLocationFilter(config?.location_filter);
   // Same content_filter (incl. by_title_keyword scoping) scan.mjs applies —
   // see #1846. Built once here from the same portals.yml config.
-  const contentFilter = buildContentFilter(config?.content_filter);
+  const baseContentFilter = buildContentFilter(config?.content_filter);
+  // content_rescue.must_catch: >= N distinct listed concepts in a description always pass the
+  // content gate (same rule as scan.mjs; the title gate of this sweep is unchanged).
+  const mustCatch = buildMustCatch(config?.content_rescue?.must_catch);
+  const contentFilter = mustCatch
+    ? (description, ...rest) => Boolean(mustCatch(description)) || baseContentFilter(description, ...rest)
+    : baseContentFilter;
   // Opt-in, and the opt-in IS the key: `domain_filter` does not exist in any
   // portals.yml written before this feature, so every existing install keeps
   // its exact behaviour and nobody loses a board without having asked for the
