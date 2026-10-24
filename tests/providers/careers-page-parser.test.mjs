@@ -124,3 +124,20 @@ const LINK = /^\/about\/careers\/[a-z0-9-]+$/i;
   if (d('October 12, 2026') === '2026-10-12' && d('2026-10-12T10:00:00Z') === '2026-10-12' && d('garbage') === undefined) pass('datePosted: ISO kept, free-form parsed whole, junk dropped');
   else fail(`dates: ${d('October 12, 2026')} ${d('garbage')}`);
 }
+
+// 9. Several roles inline on one page (Theorem-style): one job each, own URL, own description
+{
+  const html = '<h2>Systems Engineer</h2><p>Deep expertise in systems and formal verification.</p><h2>ML Researcher</h2><p>Teach models to tackle hard software problems.</p>';
+  const titles = ['Systems Engineer', 'ML Researcher'];
+  const jobs = titles.flatMap((t) => pageAsJob(html, 'https://theorem.dev/careers/', t, { company: 'Theorem', siblings: titles }));
+  if (jobs.length === 2 && jobs[0].url.endsWith('?role=systems-engineer') && /formal verification/.test(jobs[0].description) && !/Teach models/.test(jobs[0].description) && jobs[1].url !== jobs[0].url) pass('multi-role page: distinct URLs, descriptions split at the next title');
+  else fail(`multi-role wrong: ${JSON.stringify(jobs)}`);
+}
+
+// 10. A role card built as <a><div>...long...</div></a> (Pensar-style) is still a link
+{
+  const card = '<a class="g" href="/careers/security-research-engineer"><div>' + '<span>x</span>'.repeat(400) + '</div></a>';
+  const links = extractRoleLinks(card + card.replace('security-research-engineer', 'offensive-agent-engineer'), 'https://pensar.dev/careers', /^\/careers\/[a-z-]+$/);
+  if (links.length === 2) pass('long nested anchor cards still yield role links');
+  else fail(`nested anchors gave ${links.length}`);
+}

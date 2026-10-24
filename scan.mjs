@@ -623,8 +623,22 @@ export function titleSignalsRemote(title) {
 
 // `url` and `title` are optional. Callers that omit them get the original
 // location-only semantics, which is what the existing unit tests exercise.
+// A multi-location posting ("Palo Alto · United States · London · United Kingdom") that
+// lists a US place is a US-eligible opening. Used only by the opt-in
+// `location_filter.block_hard_unless_us_listed`, so a country-level block_hard entry
+// ("United Kingdom") does not kill the US row of a posting that also lists the UK.
+const LOCATION_LIST_SEPARATOR = /\s*(?:·|•|;|\||\s\/\s|\s+and\s+)\s*/;
+const US_SEGMENT = /(?:^|[\s,\-–])(?:united states(?: of america)?|usa|u\.s\.a?\.?|us)$/;
+export function listsUsLocation(lower) {
+  if (typeof lower !== 'string' || !lower) return false;
+  const segments = lower.split(LOCATION_LIST_SEPARATOR).map(x => x.trim()).filter(Boolean);
+  return segments.length > 1
+    && segments.some(seg => US_SEGMENT.test(seg) || US_STATE_ALWAYS_ALLOW_MATCHERS.some(m => m(seg)));
+}
+
 export function buildLocationFilter(locationFilter) {
   if (!locationFilter) return () => true;
+  const blockHardUnlessUsListed = locationFilter.block_hard_unless_us_listed === true;
   const alwaysAllowKeywords = normalizeKeywordList(locationFilter.always_allow);
   const alwaysAllow = alwaysAllowKeywords.map(compileLocationKeyword);
   // US-targeted configs list the country in always_allow and foreign cities
@@ -666,7 +680,7 @@ export function buildLocationFilter(locationFilter) {
     // Madrid" must not die on a London entry) — so the user marks the entries
     // that are country-level and therefore never a false rejection. Opt-in and
     // additive: a config without `block_hard` behaves exactly as before.
-    if (blockHard.length > 0 && blockHard.some(matches)) return false;
+    if (blockHard.length > 0 && blockHard.some(matches) && !(blockHardUnlessUsListed && listsUsLocation(lower))) return false;
     // always_allow still wins over block, and may be satisfied by either field:
     // a genuinely US role whose display string says "United States" is never
     // rejected because of what its URL happens to contain.

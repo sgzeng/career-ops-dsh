@@ -31,7 +31,7 @@
  *   --throttle-ms N    delay between requests (default 400)
  *   --no-detail        do not fetch role pages; title = anchor text (only for listings whose
  *                      anchor text IS the title)
- *   --page-as-job TITLE  the listing page itself is the posting (no per-role pages, e.g. one
+ *   --page-as-job TITLE  (repeatable) the listing page itself is the posting (no per-role pages, e.g. one
  *                      "Member of Technical Staff" blurb). Emits one job only while TITLE still
  *                      appears in the page text, so a removed role disappears.
  *   --allow-host H     (repeatable) also accept role links on host H (e.g. jobs.ashbyhq.com); by
@@ -66,14 +66,23 @@ const stripTags = (s) => decodeEntities(String(s).replace(/<[^>]*>/g, ' ')).repl
  * @param {RegExp|null} [excludeRe]
  * @returns {{url:string,anchorText:string}[]}
  */
+// Text of the anchor that starts at `from`: up to the next </a>, at most 3000 chars, found with
+// indexOf so a long nested card (<a><div>...</div></a>) cannot defeat a bounded regex.
+function anchorBody(src, from, lower) {
+  const end = lower.indexOf('</a', from);
+  return src.slice(from, end < 0 || end - from > 3000 ? from + 3000 : end);
+}
+
 export function extractRoleLinks(html, baseUrl, linkRe, excludeRe = null, { allowHosts = [], keepQuery = false } = {}) {
   const out = [];
   const seen = new Set();
-  const re = /<a\b[^>]*?(?<![\w-])href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))[^>]*>([\s\S]{0,2000}?)<\/a\s*>/gi;
+  const re = /<a\b[^>]*?(?<![\w-])href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))[^>]*>/gi;
   const baseHost = new URL(baseUrl).hostname.toLowerCase();
   const sameSite = (h) => h === baseHost || h.endsWith('.' + baseHost) || baseHost.endsWith('.' + h) || h.split('.').slice(-2).join('.') === baseHost.split('.').slice(-2).join('.') || allowHosts.includes(h);
   let m;
-  while ((m = re.exec(String(html || '')))) {
+  const src = String(html || '');
+  const lower = src.toLowerCase();
+  while ((m = re.exec(src))) {
     const raw = decodeEntities((m[1] ?? m[2] ?? m[3] ?? '').trim());
     if (!raw || raw.startsWith('#') || /^(mailto|tel|javascript):/i.test(raw)) continue;
     let abs;
@@ -95,7 +104,7 @@ export function extractRoleLinks(html, baseUrl, linkRe, excludeRe = null, { allo
     if (excludeRe && matches(excludeRe)) continue;
     if (seen.has(href)) continue;
     seen.add(href);
-    out.push({ url: href, anchorText: stripTags(m[4].replace(/<(script|style|svg)\b[\s\S]*?<\/\1\s*>/gi, ' ')) });
+    out.push({ url: href, anchorText: stripTags(anchorBody(src, re.lastIndex, lower).replace(/<(script|style|svg)\b[\s\S]*?<\/\1\s*>/gi, ' ')) });
   }
   return out;
 }
@@ -177,8 +186,20 @@ export function parseRolePage(html, opts = {}) {
  */
 export function pageAsJob(html, url, title, opts = {}) {
   const text = htmlToText(String(html || ''), FULL_DESCRIPTION_CAP);
-  if (!title || !text.toLowerCase().includes(title.toLowerCase())) return [];
-  return [{ title, url, company: opts.company || '', location: opts.location || '', description: text }];
+  const at = title ? text.toLowerCase().indexOf(title.toLowerCase()) : -1;
+  if (at < 0) return [];
+  // Several roles on one page (opts.siblings = the other titles): the description is the
+  // section from this title up to the next sibling title, and the URL gets ?role=<slug> so
+  // each role has its own identity for dedup.
+  const siblings = (opts.siblings || []).filter((t) => t && t !== title);
+  let end = text.length;
+  for (const t of siblings) {
+    const i = text.toLowerCase().indexOf(t.toLowerCase(), at + title.length);
+    if (i > at && i < end) end = i;
+  }
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const u = siblings.length ? `${url}${url.includes('?') ? '&' : '?'}role=${slug}` : url;
+  return [{ title, url: u, company: opts.company || '', location: opts.location || '', description: text.slice(at, end) }];
 }
 
 // Every request goes through providers/_http.mjs so the parser gets the same SSRF guard as
@@ -228,7 +249,7 @@ export async function run(argv) {
       max: { type: 'string', default: '40' },
       'throttle-ms': { type: 'string', default: '400' },
       'no-detail': { type: 'boolean', default: false },
-      'page-as-job': { type: 'string' },
+      'page-as-job': { type: 'string', multiple: true },
       'allow-host': { type: 'string', multiple: true, default: [] },
       'keep-query': { type: 'boolean', default: false },
       fixture: { type: 'string' },
@@ -236,7 +257,7 @@ export async function run(argv) {
     allowPositionals: false,
   });
   if (!values.url) throw new Error('careers-page: --url is required');
-  if (!values.link && values['page-as-job'] === undefined) {
+  if (!values.link && !values['page-as-job']) {
     throw new Error('careers-page: --link REGEX is required (or --page-as-job TITLE)');
   }
   const max = Math.max(1, Math.min(100, Number(values.max) || 40));
@@ -252,8 +273,9 @@ export async function run(argv) {
     throw err;
   }
 
-  if (values['page-as-job'] !== undefined) {
-    return pageAsJob(listing, values.url, values['page-as-job'], { company: values.company, location: values.location });
+  if (values['page-as-job']) {
+    const titles = values['page-as-job'];
+    return titles.flatMap((t) => pageAsJob(listing, values.url, t, { company: values.company, location: values.location, siblings: titles }));
   }
 
   const links = extractRoleLinks(listing, values.url, compile(values.link, 'link'), compile(values.exclude, 'exclude'), { allowHosts: values['allow-host'].map((h) => h.toLowerCase()), keepQuery: values['keep-query'] }).slice(0, max);
