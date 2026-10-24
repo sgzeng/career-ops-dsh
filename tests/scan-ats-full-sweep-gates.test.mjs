@@ -80,14 +80,18 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   if (wrong.length === 0) pass('the visa gate is scan.mjs\'s buildVisaFilter: explicit refusals and clearances drop, silence and "we do sponsor" pass, the export-license boilerplate does not trip it');
   else fail(`visa gate: ${JSON.stringify(wrong)}`);
 
-  // FINDING, pinned: a custom `negative` list REPLACES the built-in one, so a posting that says
-  // "does not sponsor" is not removed by a list that only has "will not sponsor".
+  // CONTRACT (2026-10-23): a custom `negative` list ADDS to the canonical
+  // patterns; it can no longer narrow them away. Before this, the author's list
+  // replaced the defaults, which is how 18 clearance/citizenship/no-sponsorship
+  // postings reached stage 2 on 2026-10-23. `patterns: false` is the escape
+  // hatch for an install that really wants literal-only matching.
   const turquoise = 'This role requires current authorization to work in the United States. Turquoise does not sponsor employment visas (H-1B, PERM, etc.) for this position.';
   const withDefaults = buildQualityGates({ visa_filter: { enabled: true } }).visaFilter;
-  if (visaFilter(turquoise) === true && withDefaults(turquoise) === false) {
-    pass('a custom visa_filter.negative replaces the default list: "does not sponsor" passes the author\'s list and is dropped only by the defaults (see portals_yml_changes in the report)');
+  const literalOnly = buildQualityGates({ visa_filter: { enabled: true, patterns: false, negative: ['will not sponsor'] } }).visaFilter;
+  if (visaFilter(turquoise) === false && withDefaults(turquoise) === false && literalOnly(turquoise) === true) {
+    pass('a custom visa_filter.negative is additive: the canonical patterns still drop "does not sponsor", and patterns: false opts out');
   } else {
-    fail('custom negative list no longer replaces the default list');
+    fail('a custom negative list can still narrow the canonical patterns away');
   }
   const strict = buildQualityGates({ visa_filter: { enabled: true, require_mention: true, positive: ['will sponsor'] } }).visaFilter;
   if (strict('We will sponsor.') && !strict('Nothing about visas.') && !strict('')) pass('require_mention keeps only postings that advertise sponsorship, a missing description included');

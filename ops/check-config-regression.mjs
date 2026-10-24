@@ -13,7 +13,9 @@
  * data/ dir (default data/filter-regression-fixtures.json). Shape:
  *   { "titles_kept": [{ "text": "...", "title_net": "security", "why": "..." }], "titles_dropped": [...],
  *     "locations_kept": [...], "locations_dropped": [...],
- *     "levels": [{ "title": "...", "jd": "full JD text", "expected": "drop" | "keep", "why": "..." }] }
+ *     "levels": [{ "title": "...", "jd": "full JD text", "expected": "drop" | "keep", "why": "..." }],
+ *     "visa_dropped": [{ "text": "...", "category": "clearance" | "citizenship" | "no_sponsorship", "why": "..." }],
+ *     "visa_kept": [{ "text": "...", "why": "..." }] }
  * A titles_* case with `title_net` is judged as at a tracked company tagged with
  * that net (scan.mjs's titleFilter(title, entry.title_net)); a name missing from
  * title_nets fails the case. Without it, the plain title_filter decides. A
@@ -23,6 +25,9 @@
  * and company mean nothing for locations_* cases and fail them.
  * level_filter judges the JD, not the title, so titles_* never apply it; a
  * `levels` case runs the title AND its JD through level_filter's assess().
+ * visa_* cases run the JD text through buildVisaFilter().assess(); the keep
+ * half is the safety net for the clearance/citizenship patterns — a false drop
+ * loses the posting for good.
  * No fixtures file → nothing to check, exit 0.
  *
  * Usage:  node ops/check-config-regression.mjs [--portals PATH] [--fixtures PATH]
@@ -59,7 +64,7 @@ process.chdir(ROOT);
 const load = (rel) => import(pathToFileURL(join(ROOT, rel)).href);
 const yaml = await import('js-yaml');
 const { classifyTier } = await load('classify-tier.mjs');
-const { buildLocationFilter, buildScanTitleFilter } = await load('scan.mjs');
+const { buildLocationFilter, buildScanTitleFilter, buildVisaFilter } = await load('scan.mjs');
 const { buildLevelFilter } = await load('lib/level-filter.mjs');
 
 let config;
@@ -121,6 +126,24 @@ for (const [key, predicate, expected, netAware] of suites) {
     }
     if (predicate(text, net) !== expected) {
       failures.push(`${key}: ${label} was ${expected ? 'DROPPED' : 'KEPT'}${item.why ? ` — ${item.why}` : ''}`);
+    }
+  }
+}
+
+// Work-authorization text (visa_filter): clearance / citizenship / no-sponsorship.
+// `visa_dropped` is a JD sentence that MUST drop, `visa_kept` one that MUST
+// pass. The keep half is the important one: a false drop loses a job for good,
+// while a false keep costs one stage-2 read.
+const visaFilter = buildVisaFilter(config.visa_filter);
+for (const [key, expected] of [['visa_dropped', false], ['visa_kept', true]]) {
+  for (const item of fixtures[key] || []) {
+    checked++;
+    const text = typeof item === 'string' ? item : item.text;
+    const verdict = visaFilter.assess(text);
+    if (verdict.pass !== expected) {
+      failures.push(`${key}: "${String(text).slice(0, 70)}" was ${verdict.pass ? 'KEPT' : 'DROPPED'}${verdict.category ? ` (${verdict.category}: ${verdict.reason})` : ''}${item.why ? ` — ${item.why}` : ''}`);
+    } else if (expected === false && item.category && verdict.category !== item.category) {
+      failures.push(`${key}: "${String(text).slice(0, 70)}" dropped as ${verdict.category}, expected ${item.category}`);
     }
   }
 }

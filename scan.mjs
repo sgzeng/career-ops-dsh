@@ -1087,8 +1087,138 @@ export const DEFAULT_VISA_NEGATIVE = [
 // before the negative match so no default or user phrase can fire on it.
 const EXPORT_LICENSE_SPONSORSHIP_RE = /sponsorship for (?:an? )?(?:u\.s\. )?export licen[cs]es?/g;
 
+// ── Work-authorization patterns ─────────────────────────────────────
+// The literal `negative` list above is matched as a raw substring, which is
+// why "U.S. Citizenship required.", "will not be providing visa sponsorship"
+// and "require sponsorship of a visa" all slipped through while
+// "us citizenship required" did not: the punctuation and the wording differ,
+// the meaning does not. These patterns run on a normalized copy of the
+// description (normalizeVisaText) and are the CANONICAL definition — a config
+// `negative` list ADDS to them, it cannot narrow them away.
+//
+// Conservative by construction: every pattern requires an explicit requirement
+// or refusal, never a bare mention. "Security clearance preferred",
+// "must be authorized to work in the US", and a lone "ITAR" are all KEPT —
+// OPT satisfies the second, and the first/third never say the job is gated.
+// A keep-pattern list runs first and vetoes a drop ("no clearance required",
+// "customs clearance"), so a single contradictory sentence cannot drop a job.
+//
+// Measured against the 18 stage-2 hard blockers of 2026-10-23: 18/18 caught,
+// with the keep cases (below, tests/visa-work-auth.test.mjs) still kept.
+export const DEFAULT_VISA_PATTERNS = Object.freeze([
+  // Clearance — a qualifier/requirement must be present, not just the noun.
+  { category: 'clearance', pattern: /\b(?:active|current|valid|required|must have|must possess|must obtain|ability to obtain|eligible to obtain|secret|top secret|ts|ts\/sci|dod|dhs|public trust|personnel security)\b[^.;]{0,40}\bclearance\b/ },
+  { category: 'clearance', pattern: /\bclearance\b\s*(?:is|:|-)?\s*(?:required|mandatory|a condition of employment)\b/ },
+  { category: 'clearance', pattern: /\b(?:ability|eligible|eligibility|able|required)\s+to\s+(?:obtain|maintain|hold)\b[^.;]{0,60}\b(?:security\s+)?clearance\b/ },
+  { category: 'clearance', pattern: /\brequires?\b[^.;]{0,30}\b(?:security\s+)?clearance\b/ },
+  { category: 'clearance', pattern: /\bts\s*\/\s*sci\b/ },
+  { category: 'clearance', pattern: /\b(?:public trust|dhs entry on duty|dhs eod|sci eligibility|entry on duty)\b/ },
+  { category: 'clearance', pattern: /\b(?:ts|top secret|secret|dod)\s+clearance\b/ },
+  // Citizenship — "US citizenship" alone is not enough; it needs a requirement.
+  { category: 'citizenship', pattern: /\brequires?\s+(?:verification of\s+|proof of\s+)?us citizenship\b/ },
+  { category: 'citizenship', pattern: /\bus citizenship\b[^.;]{0,40}\b(?:required|only|mandatory|is a (?:condition|requirement))\b/ },
+  { category: 'citizenship', pattern: /\bcitizenship\b\s*(?:is|:|-)?\s*(?:required|mandatory)\b/ },
+  { category: 'citizenship', pattern: /\b(?:must|required to|need to)\s+be\s+(?:a\s+)?(?:us\s+)?citizen\b/ },
+  { category: 'citizenship', pattern: /\b(?:us\s+)?citizens?\s+only\b/ },
+  { category: 'citizenship', pattern: /\b(?:us\s+)?citizens?\s+and\s+(?:lawful\s+)?permanent residents?\s+only\b/ },
+  // Sponsorship refusal.
+  { category: 'no_sponsorship', pattern: /\bno\s+(?:visa\s+|work\s+visa\s+|h-?1b\s+)?sponsorship\b/ },
+  { category: 'no_sponsorship', pattern: /\b(?:will not|won't|cannot|can not|unable to|not able to|does not|do not|is not able to|is unable to)\s+(?:be\s+)?(?:providing|provide|offering|offer|sponsoring|sponsor)\b[^.;]{0,40}\b(?:visa|visas|sponsorship|h-?1b|work visa)\b/ },
+  { category: 'no_sponsorship', pattern: /\bsponsorship\b\s*(?:is\s+)?not\s+(?:available|offered|provided)\b/ },
+  { category: 'no_sponsorship', pattern: /\bnot\s+(?:eligible|available)\s+for\s+(?:visa\s+)?sponsorship\b/ },
+  { category: 'no_sponsorship', pattern: /\bwithout\s+(?:requiring\s+|the need for\s+)?(?:current or future\s+)?(?:visa\s+|work\s+visa\s+|h-?1b\s+)?sponsorship\b/ },
+  { category: 'no_sponsorship', pattern: /\brequire(?:s|d|ing)?\b[^.;]{0,30}\bsponsorship\s+(?:of|for)\s+(?:a\s+)?visa\b/ },
+  { category: 'no_sponsorship', pattern: /\bmust\s+(?:already\s+)?be\s+(?:legally\s+)?authorized\s+to\s+work\b[^.;]{0,60}\bwithout\b[^.;]{0,30}\bsponsorship\b/ },
+]);
+
+// Checked BEFORE any drop pattern: an explicit "not required" sentence wins.
+// "Clearance preferred" is not here because it never matches a drop pattern —
+// the clearance patterns all require a requirement word.
+export const DEFAULT_VISA_KEEP_PATTERNS = Object.freeze([
+  { pattern: /\b(?:no|not|without)\s+(?:a\s+)?(?:security\s+|personnel\s+security\s+)?clearance\s+(?:is\s+)?(?:required|needed|necessary)\b/ },
+  { pattern: /\bclearance\b\s*(?:is|:|-)?\s*(?:not|none)\s+(?:required|needed)\b/ },
+  { pattern: /\b(?:does not|do not|will not|not)\s+require\s+(?:a\s+)?(?:security\s+)?clearance\b/ },
+  // "requires no clearance" — the negation sits inside the drop pattern's own
+  // sentence ("requires" + "clearance"), so it has to be vetoed explicitly.
+  { pattern: /\b(?:require|requires|required|requiring|need|needs)\s+no\s+(?:security\s+|personnel\s+security\s+)?clearance\b/ },
+  { pattern: /\bcustoms clearance\b/ },
+  // "preferred", not required. Deliberately permissive: a rare contradiction
+  // that keeps one job costs a stage-2 read, while dropping a "clearance
+  // preferred" role loses it for good.
+  { pattern: /\b(?:clearance|ts\s*\/\s*sci|top secret)\b[^.;]{0,40}\b(?:preferred|desired|a plus|nice to have)\b/ },
+  { pattern: /\b(?:preferred|desired|a plus|nice to have)\b[^.;]{0,40}\b(?:clearance|ts\s*\/\s*sci)\b/ },
+  { pattern: /\b(?:us\s+)?citizenship\b\s*(?:is\s+)?not\s+required\b/ },
+  { pattern: /\bcitizenship\b\s*(?:is|:|-)?\s*not\s+required\b/ },
+]);
+
+// Below this many characters a description is a teaser, not a JD — the same
+// threshold lib/level-filter.mjs uses before it spends a fetch.
+const MIN_VISA_JD_CHARS = 400;
+
+/**
+ * Normalize JD text for the work-authorization patterns.
+ *
+ * The 2026-10-23 misses were mostly spelling, not vocabulary:
+ * "U.S. Citizenship required." never matched the literal "us citizenship
+ * required" because of the periods; Microsoft used a U+2011 non-breaking
+ * hyphen inside "citizenship‑based". Both are folded here, once, for every
+ * pattern and every config keyword. Export-control boilerplate is blanked
+ * first, before "u.s." folding, so the Cloudflare case keeps working.
+ *
+ * @param {unknown} input
+ * @returns {string} lowercased, punctuation-folded, whitespace-collapsed text
+ */
+export function normalizeVisaText(input) {
+  if (typeof input !== 'string' || input === '') return '';
+  return input
+    .toLowerCase()
+    .replace(EXPORT_LICENSE_SPONSORSHIP_RE, 'export license')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
+    // Explicit dotted forms only, and no trailing \s anywhere: "U.S.
+    // Citizenship" must become "us citizenship", not "uscitizenship" (measured
+    // regression). The second pass covers "US" without the final period.
+    .replace(/\bu\.s\.(?:a\.)?/g, 'us')
+    .replace(/\bu\.s\b/g, 'us')
+    .replace(/\bu\.k\./g, 'uk')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// One sentence around a match, for the log and for stage 2. Not a full
+// sentence parser: JD bullets are often flattened onto one line, so this takes
+// the nearest '.' boundaries and clips to a readable width.
+function sentenceAt(text, index) {
+  const start = Math.max(0, text.lastIndexOf('.', index) + 1);
+  let end = text.indexOf('.', index);
+  if (end < 0) end = text.length;
+  const sentence = text.slice(start, Math.min(end + 1, start + 240)).trim();
+  return sentence || text.slice(Math.max(0, index - 80), index + 120).trim();
+}
+
+function compileVisaConfigPatterns(value) {
+  if (value === false) return [];
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    const source = typeof entry === 'string' ? entry : entry && entry.pattern;
+    if (typeof source !== 'string' || !source.trim()) continue;
+    try {
+      out.push({ category: (entry && entry.category) || 'visa', pattern: new RegExp(source, 'i') });
+    } catch {
+      console.error(`Warning: visa_filter pattern is not a valid regex — skipped: ${source}`);
+    }
+  }
+  return out;
+}
+
 export function buildVisaFilter(visaFilter) {
-  if (!visaFilter || visaFilter.enabled === false) return () => true;
+  if (!visaFilter || visaFilter.enabled === false) {
+    const always = () => true;
+    always.assess = () => ({ pass: true, category: null, reason: '', sentence: '' });
+    always.needsJd = () => false;
+    return always;
+  }
   const positive = visaFilter.positive != null
     ? normalizeKeywordList(visaFilter.positive)
     : DEFAULT_VISA_POSITIVE.slice();
@@ -1096,16 +1226,57 @@ export function buildVisaFilter(visaFilter) {
     ? normalizeKeywordList(visaFilter.negative)
     : DEFAULT_VISA_NEGATIVE.slice();
   const requireMention = visaFilter.require_mention === true;
+  // `patterns: false` is the escape hatch for an install that wants the old
+  // literal-only behavior; by default the canonical patterns always apply.
+  const negativePatterns = visaFilter.patterns === false
+    ? []
+    : [...DEFAULT_VISA_PATTERNS, ...compileVisaConfigPatterns(visaFilter.patterns)];
+  const keepPatterns = [
+    ...DEFAULT_VISA_KEEP_PATTERNS,
+    ...compileVisaConfigPatterns(visaFilter.keep_patterns),
+  ];
 
-  return (description) => {
+  const assess = (description) => {
     const hasText = typeof description === 'string' && description.trim() !== '';
-    if (!hasText) return !requireMention;
-    const lower = description.toLowerCase().replace(EXPORT_LICENSE_SPONSORSHIP_RE, 'export license');
-    if (negative.length > 0 && negative.some(k => lower.includes(k))) return false;
-    if (!requireMention) return true;
-    if (positive.length === 0) return true;
-    return positive.some(k => lower.includes(k));
+    if (!hasText) {
+      return { pass: !requireMention, category: null, reason: '', sentence: '' };
+    }
+    const text = normalizeVisaText(description);
+    for (const rule of keepPatterns) {
+      if (rule.pattern.test(text)) return { pass: true, category: null, reason: '', sentence: '' };
+    }
+    for (const rule of negativePatterns) {
+      const match = rule.pattern.exec(text);
+      if (match) {
+        return {
+          pass: false,
+          category: rule.category,
+          reason: match[0].trim(),
+          sentence: sentenceAt(text, match.index),
+        };
+      }
+    }
+    if (negative.length > 0) {
+      const hit = negative.find(k => text.includes(k));
+      if (hit) {
+        return { pass: false, category: 'visa', reason: hit, sentence: sentenceAt(text, text.indexOf(hit)) };
+      }
+    }
+    if (!requireMention) return { pass: true, category: null, reason: '', sentence: '' };
+    if (positive.length === 0) return { pass: true, category: null, reason: '', sentence: '' };
+    if (positive.some(k => text.includes(k))) return { pass: true, category: null, reason: '', sentence: '' };
+    return { pass: false, category: 'visa', reason: 'no sponsorship mention', sentence: '' };
   };
+
+  const filter = (description) => assess(description).pass;
+  filter.assess = assess;
+  // True when the listing carries no usable JD, so the caller may fetch one
+  // before judging. Deliberately says nothing about whether fetching is
+  // enabled or budgeted — that is the caller's policy (scan.mjs), the same
+  // split lib/level-filter.mjs uses between needsFetch and its fetch budget.
+  filter.needsJd = (job) => Boolean(job && typeof job.url === 'string' && job.url)
+    && (typeof job.description === 'string' ? job.description : '').trim().length < MIN_VISA_JD_CHARS;
+  return filter;
 }
 
 // ── Salary filter ───────────────────────────────────────────────────
@@ -4141,6 +4312,14 @@ async function main() {
   const countryEligibilityFilter = buildCountryEligibilityFilter(config.country_eligibility_filter, candidateCountry);
   const visaFilter = buildVisaFilter(config.visa_filter);
   const visaEnabled = Boolean(config.visa_filter) && config.visa_filter.enabled !== false;
+  // Work-authorization JD fetch (P2): a blind listing (LinkedIn search cards,
+  // single-location Workday rows) is enriched once, right before the visa gate
+  // reads it — the same zero-token route lib/level-filter.mjs uses, through
+  // lib/jd-text.mjs. Budgeted and fail-open: no JD means KEEP, never a drop.
+  const visaFetchEnabled = visaEnabled && config.visa_filter.fetch_jd !== false;
+  const visaFetchMax = Number.isFinite(config.visa_filter?.fetch_jd_max_per_run)
+    ? Math.max(0, Math.floor(config.visa_filter.fetch_jd_max_per_run))
+    : 40;
 
   // 3. Resolve a provider for each enabled company / board
   const targets = [];
@@ -4335,6 +4514,9 @@ async function main() {
   let totalFilteredBlacklist = 0;
   let annotatedBlacklisted = 0;
   let totalFilteredVisa = 0;
+  let totalVisaFetched = 0;
+  let totalVisaUnchecked = 0;
+  const visaDropped = [];
   let totalDupes = 0;
   const newOffers = [];
   const verifyDedupKeys = new Map();
@@ -4565,9 +4747,30 @@ async function main() {
           totalFilteredCountryEligibility++;
           continue;
         }
-        if (!visaFilter(job.description)) {
-          totalFilteredVisa++;
-          continue;
+        if (visaEnabled) {
+          // Enrich a blind listing once, at the gate that needs it. Guarded by
+          // the seen-URL set (a row we already know costs nothing) and
+          // budgeted so a big board cannot turn a scan into a crawl. Fail-open
+          // by design: a failed fetch leaves the row KEPT and counted unread.
+          if (!dryRun && visaFetchEnabled && visaFetchMax > 0
+              && totalVisaFetched < visaFetchMax
+              && visaFilter.needsJd(job)
+              // Pure URL check, not isOfferSeen(): that one also records an
+              // identity token, and a guard must not mutate the dedup sets
+              // before the dedup block has had its say.
+              && !seenUrls.has(normalizeUrlForDedup(job.url))) {
+            totalVisaFetched++;
+            let fetchedJd = null;
+            try { fetchedJd = await fetchJobDescription(job.url); } catch { /* keep */ }
+            if (typeof fetchedJd === 'string' && fetchedJd.trim()) job.description = fetchedJd;
+            else totalVisaUnchecked++;
+          }
+          const visa = visaFilter.assess(job.description);
+          if (!visa.pass) {
+            totalFilteredVisa++;
+            visaDropped.push(`${job.company || company.name} | ${job.title} | ${job.url} — ${visa.category || 'visa'}: ${visa.sentence || visa.reason}`);
+            continue;
+          }
         }
         const dedupUrl = normalizeUrlForDedup(job.url);
         const language = languageFormsForDedup(job.language);
@@ -4930,7 +5133,12 @@ async function main() {
     console.log(`Filtered by country eligibility: ${totalFilteredCountryEligibility} removed`);
   }
   if (visaEnabled) {
-    console.log(`Filtered by visa:      ${totalFilteredVisa} removed`);
+    const extra = [
+      totalVisaFetched ? `${totalVisaFetched} JDs fetched` : '',
+      totalVisaUnchecked ? `${totalVisaUnchecked} kept unread (no JD text)` : '',
+    ].filter(Boolean).join(', ');
+    console.log(`Filtered by visa:      ${totalFilteredVisa} removed (clearance / citizenship / no sponsorship)${extra ? ` — ${extra}` : ''}`);
+    for (const line of visaDropped) console.log(`  - ${line}`);
   }
   if (Object.keys(windows).length > 0 || totalFilteredCooldown > 0) {
     console.log(`Filtered by cooldown:  ${totalFilteredCooldown} removed`);

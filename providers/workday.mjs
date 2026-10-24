@@ -12,6 +12,7 @@
 // and omitted for the unbounded "30+ Days Ago" form.
 
 import { BROWSER_LIKE_USER_AGENT, fetchJsonWithRetry, sleep } from './_http.mjs';
+import { htmlToText, DESCRIPTION_CAP } from './_html-to-text.mjs';
 
 // Why one paginated pass (the unfaceted root crawl, or one facet-split slice)
 // stopped. COMPLETE covers both "ran out of pages" and "hit the offset
@@ -672,6 +673,27 @@ export function locationsFromDetail(detail) {
 }
 
 /**
+ * The posting's job description, from a detail document already paid for.
+ *
+ * The detail GET exists to resolve multi-location placeholders and exact dates;
+ * the JD rides along in the same payload (`jobPostingInfo.jobDescription`) and
+ * was being discarded. Attaching it costs no extra request and gives the
+ * description-based gates (content / country / visa) the text they need — the
+ * same reason providers/greenhouse.mjs and providers/lever.mjs attach theirs.
+ *
+ * HTML is stripped and capped like every other provider. A missing body yields
+ * '' so the caller can leave `description` absent rather than set an empty one.
+ *
+ * @param {unknown} detail - Parsed detail document.
+ * @returns {string} plain JD text, or '' when the document carries none.
+ */
+export function descriptionFromDetail(detail) {
+  const html = detail?.jobPostingInfo?.jobDescription;
+  if (typeof html !== 'string' || !html.trim()) return '';
+  return htmlToText(html, DESCRIPTION_CAP);
+}
+
+/**
  * The posting's real publication date, from the detail document.
  *
  * The list endpoint offers only `postedOn`, relative prose that `parsePostedOn`
@@ -1127,6 +1149,7 @@ export default {
       let resolved = 0;
       let redated = 0;
       let failed = 0;
+      let described = 0;
       // Two counters, because a retry is a request the tenant sees but not a
       // posting the caller gets. `requests` is what MAX_DETAIL_REQUESTS bounds
       // — every attempt, retries included — and `attempted` is how far down
@@ -1173,6 +1196,13 @@ export default {
           failed++;
           continue;
         }
+        // The JD rides in the same document. Attach it before the place check:
+        // a document whose places we cannot parse still carries usable JD text,
+        // and discarding it would waste a request already paid for.
+        if (!(typeof job.description === 'string' && job.description.trim())) {
+          const jd = descriptionFromDetail(detail);
+          if (jd) { job.description = jd; described++; }
+        }
         const places = locationsFromDetail(detail);
         if (places === '') { failed++; continue; }
         job.location = places;
@@ -1195,7 +1225,8 @@ export default {
         // detail document can carry places but no parseable startDate. Folding
         // them into one number would hide that.
         const dated = redated > 0 ? `, ${redated} dated exactly from the detail document` : '';
-        console.error(`ℹ️  workday: ${entry.name} resolved ${resolved} of ${placeholders.length} multi-location placeholder(s)${unreadable}${unroutable}${capped}${dated}`);
+        const withJd = described > 0 ? `, ${described} with JD text` : '';
+        console.error(`ℹ️  workday: ${entry.name} resolved ${resolved} of ${placeholders.length} multi-location placeholder(s)${unreadable}${unroutable}${capped}${dated}${withJd}`);
       }
     }
 

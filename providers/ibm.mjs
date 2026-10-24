@@ -18,6 +18,8 @@
 // Omit `country` / `categories` to widen the search. Paginates via `from` until
 // the result set is exhausted or MAX_RECORDS is reached.
 
+import { htmlToText } from './_html-to-text.mjs';
+
 const API_URL = 'https://www-api.ibm.com/search/api/v2';
 const PAGE_SIZE = 30;
 const MAX_RECORDS = 600; // safety cap on pagination
@@ -66,6 +68,13 @@ export function parseIbmResponse(json) {
       url: s.url.trim(),
       company: 'IBM',
       location: [loc, mode].filter(Boolean).join(' · '),
+      // The search payload already asks for `description`; dropping it here was
+      // why every description-based gate (content / country / visa) was blind
+      // on IBM. IBM returns HTML, so strip it the way the other providers do.
+      // An absent/empty body is omitted rather than invented.
+      ...(typeof s.description === 'string' && s.description.trim()
+        ? { description: htmlToText(s.description) }
+        : {}),
     });
   }
   return out;
