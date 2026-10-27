@@ -424,7 +424,8 @@ check('reconcile-pipeline: Score / PDF come from the header, a JD line cannot st
     '2\thttps://x.example/2\tcompleted\t-\t-\t9002\t-\t-\t0',
   ].join('\n') + '\n');
   writeFileSync(join(r, 'data/pipeline.md'), '# Pipeline\n\n## Pending\n\n- [ ] https://x.example/1 | RealCo | Role 1\n- [ ] https://x.example/2 | RealCo | Role 2\n');
-  const res = runScript('reconcile-pipeline.mjs', ['--dry-run'], r);
+  // batch-state.tsv is read from the codebase root unless --state names it (upstream).
+  const res = runScript('reconcile-pipeline.mjs', ['--dry-run', '--state', join(r, 'batch/batch-state.tsv')], r);
   assert.equal(res.code, 0, res.out);
   assert.match(res.out, /#9001 RealCo — Role 1 \(4\.1\/5\)/);
   assert.match(res.out, /#9002 RealCo — Role 2 \(N\/A\)/);

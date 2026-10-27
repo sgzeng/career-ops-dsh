@@ -278,6 +278,8 @@ try {
   } else {
     fail(`rippling.fetch() should warn "raise max_pages" on a real cap stop, got: ${JSON.stringify(hugeErrors)}`);
   }
+  if (hugeJobs.ripplingTruncated === true) pass('rippling.fetch() tags a cap-truncated board ripplingTruncated');
+  else fail(`rippling cap-truncated board should carry ripplingTruncated, got ${hugeJobs.ripplingTruncated}`);
 
   // An explicit max_pages override stops the walk earlier than the default,
   // capped at the provider's own hard ceiling.
@@ -341,6 +343,11 @@ try {
     pass('rippling.fetch() does not warn "raise max_pages" on a fetch-error stop');
   } else {
     fail(`rippling.fetch() should not warn "raise max_pages" on a fetch-error stop, got: ${JSON.stringify(laterFailErrors)}`);
+  }
+  if (laterFail.ripplingTruncated === true) {
+    pass('rippling.fetch() tags a fetch-error stop ripplingTruncated');
+  } else {
+    fail(`rippling fetch-error stop should carry ripplingTruncated, got ${laterFail.ripplingTruncated}`);
   }
 
   // ── Detail enrichment (description / postedAt / salary) ─────────────────

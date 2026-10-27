@@ -119,7 +119,7 @@ try {
     const jobs = parsePlatsbankenResponse(response([ad()]));
     const job = jobs[0];
     if (jobs.length === 1 && job.title === 'Backend engineer' && job.company === 'Acme AB'
-      && job.location === 'Stockholm' && job.description === 'Build the thing.'
+      && job.location === 'Stockholm, Stockholms län, Sverige' && job.description === 'Build the thing.'
       && job.url === 'https://arbetsformedlingen.se/platsbanken/annonser/31581608'
       && job.externalId === '31581608') {
       pass('parsePlatsbankenResponse maps headline/employer/location/description/url/externalId');
@@ -148,11 +148,15 @@ try {
       fail(`unparseable date produced postedAt = ${JSON.stringify(undated.postedAt)}`);
     }
 
-    // Location falls back city → municipality → region → country, and is '' —
-    // never undefined — when the ad carries no address at all.
+    // Location is "{city or municipality}, {region}, {country}" from the parts
+    // the ad carries, so a location_filter entry for the country matches an
+    // ad from any town; repeated parts appear once, and it is '' — never
+    // undefined — when the ad carries no address at all.
     const fallbacks = [
-      [{ municipality: 'Göteborg', region: 'Västra Götalands län', country: 'Sverige' }, 'Göteborg'],
-      [{ region: 'Skåne län', country: 'Sverige' }, 'Skåne län'],
+      [{ municipality: 'Göteborg', region: 'Västra Götalands län', country: 'Sverige' }, 'Göteborg, Västra Götalands län, Sverige'],
+      [{ city: 'SOLLEFTEÅ', municipality: 'Sollefteå', region: 'Västernorrlands län', country: 'Sverige' }, 'SOLLEFTEÅ, Västernorrlands län, Sverige'],
+      [{ city: 'Gotland', region: 'Gotland', country: 'Sverige' }, 'Gotland, Sverige'],
+      [{ region: 'Skåne län', country: 'Sverige' }, 'Skåne län, Sverige'],
       [{ country: 'Sverige' }, 'Sverige'],
       [{}, ''],
     ];
@@ -161,7 +165,7 @@ try {
       const got = parsePlatsbankenResponse(response([ad({ workplace_address: address })]))[0].location;
       if (got !== expected) { locationOk = false; fail(`location fallback ${JSON.stringify(address)} = ${JSON.stringify(got)}, expected ${JSON.stringify(expected)}`); }
     }
-    if (locationOk) pass('parsePlatsbankenResponse falls back city → municipality → region → country → ""');
+    if (locationOk) pass('parsePlatsbankenResponse formats place, region, country without repeats, "" when absent');
 
     const noDescription = parsePlatsbankenResponse(response([ad({ description: null })]))[0];
     if (noDescription.description === undefined && !('description' in noDescription)) {
@@ -260,11 +264,18 @@ try {
     const withTmpCwd = async (setup, run) => {
       const tmp = mkdtempSync(join(tmpdir(), 'career-ops-platsbanken-fallback-'));
       const cwdBefore = process.cwd();
+      const rootEnvBefore = { root: process.env.CAREER_OPS_ROOT, dir: process.env.CAREER_OPS_DATA_DIR };
       try {
         setup(tmp);
         process.chdir(tmp);
+        process.env.CAREER_OPS_ROOT = tmp;
+        process.env.CAREER_OPS_DATA_DIR = '';
         return await run();
       } finally {
+        if (rootEnvBefore.root === undefined) delete process.env.CAREER_OPS_ROOT;
+        else process.env.CAREER_OPS_ROOT = rootEnvBefore.root;
+        if (rootEnvBefore.dir === undefined) delete process.env.CAREER_OPS_DATA_DIR;
+        else process.env.CAREER_OPS_DATA_DIR = rootEnvBefore.dir;
         process.chdir(cwdBefore);
         rmSync(tmp, { recursive: true, force: true });
       }

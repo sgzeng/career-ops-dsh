@@ -20,13 +20,21 @@ export const FULL_DESCRIPTION_CAP = 20000;
 // A tag ends at an unquoted `>`. Attribute values may contain angle brackets,
 // so the common `<[^>]+>` shortcut can stop midway through a tag and expose
 // the remaining attributes as description text. Requiring content between the
-// brackets preserves a literal `<>`, as the old matcher did. An unquoted `<`
-// ends the attempt: no real tag body contains one, and allowing it made the
-// regex quadratic on text with many `<` and no `>` (20k of them took 1.7 s,
-// long enough to stall a scan now that full JD bodies are stripped here).
-const HTML_TAG_RE = /<(?:[^<>"']|"[^"]*"|'[^']*')+>/g;
-// Same `<` exclusion in the opening tag: `<script ` repeated with no `>` took
-// 3.4 s for 80k chars before.
+// brackets preserves a literal `<>`, as the old matcher did.
+//
+// A tag also has to START like one: `<` followed by a letter, `/`, `!` or `?`,
+// the only openers an HTML tokenizer reads as markup. Without that, every
+// strip after a decode read prose as a tag: a JD saying `teams of &lt;10
+// engineers` decoded to `<10 engineers`, and everything from there to the
+// next `>` (a `&gt;150k` paragraphs later) was deleted, sponsorship sentence
+// included. `<script`, `</p`, `<!--` still match, so double-encoded active
+// markup stays inert.
+//
+// An unquoted `<` inside the tag body ends the attempt: no real tag body
+// contains one, and allowing it made the regex quadratic on text with many
+// `<` and no `>` (`<script ` repeated 10k times took seconds, long enough to
+// stall a scan now that full JD bodies are stripped here).
+const HTML_TAG_RE = /<(?=[a-z/!?])(?:[^<>"']|"[^"]*"|'[^']*')+>/gi;
 const HTML_MEDIA_RE = /<(script|style)\b(?:[^<>"']|"[^"]*"|'[^']*')*>[\s\S]*?<\/\1\s*>/gi;
 
 /** @param {string} content */
@@ -47,10 +55,14 @@ function stripMarkup(content) {
  * Exported for tests.
  *
  * @param {unknown} content
- * @param {number} [cap] - max output length; defaults to DESCRIPTION_CAP
+ * @param {number | {cap?: number}} [options] - `cap`: maximum length of the
+ *   result, DESCRIPTION_CAP by default. A provider that has always passed a JD
+ *   through whole passes `Infinity`. A bare number is read as the cap (the
+ *   fork's providers pass FULL_DESCRIPTION_CAP that way).
  * @returns {string}
  */
-export function htmlToText(content, cap = DESCRIPTION_CAP) {
+export function htmlToText(content, options = {}) {
+  const cap = typeof options === 'number' ? options : (options?.cap ?? DESCRIPTION_CAP);
   if (typeof content !== 'string' || !content) return '';
   // Strip literal markup before decoding: quote entities inside a quoted
   // attribute are data, and decoding them first would turn them into false
@@ -66,3 +78,22 @@ export function htmlToText(content, cap = DESCRIPTION_CAP) {
     .trim()
     .slice(0, cap);
 }
+
+/**
+ * Collapse a markup fragment to its visible text.
+ * Comments are stripped FIRST: the anchor bodies carry `<!-- d ico postulez -->`
+ * between the title and a spacer image, and a naive tag strip would leave the
+ * comment body sitting inside the title.
+ * @param {string} fragment
+ * @returns {string}
+ */
+export function visibleText(fragment) {
+  return decodeEntities(
+    String(fragment ?? '')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<[^>]+>/g, ' '),
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+

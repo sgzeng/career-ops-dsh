@@ -19,7 +19,8 @@ import { chromium } from 'playwright';
 import { execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { rejectPrivateOrInvalid, checkUrlLiveness, LIVENESS_CONTEXT_OPTIONS } from './liveness-browser.mjs';
-import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isClosureEvidence } from './liveness-core.mjs';
+import { getCareerOpsRoot, getProfilePath } from './path-resolver.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { TSV_ADDITION_HEADER } from './tracker-parse.mjs';
@@ -34,6 +35,7 @@ try {
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { withJdArchiveSection } from './lib/jd-archive-section.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
@@ -53,7 +55,8 @@ export const PATHS = {
   //
   // gemini-eval.mjs:89 and ollama-eval.mjs:56 both already use DATA_ROOT here.
   profile:     join(DATA_ROOT, 'modes', '_profile.md'),
-  profileYml:  join(DATA_ROOT, 'config', 'profile.yml'),
+  custom:      join(DATA_ROOT, 'modes', '_custom.md'),
+  profileYml:  getProfilePath(),
   reports:     join(DATA_ROOT, 'reports'),
   // DATA_ROOT, matching gemini-eval.mjs:93. These TSVs are the batch's OUTPUT —
   // one per evaluated offer, for merge-tracker.mjs to fold into the tracker —
@@ -103,13 +106,13 @@ function setupEnvironment() {
 
   const modelArg = process.argv.find(a => a.startsWith('--model='));
   const resolvedSpendTier = readSpendTier();
-  modelName = modelArg ? modelArg.split('=')[1] : spendTierToModel(resolvedSpendTier); // GitHub diff trigger
+  modelName = modelArg ? modelArg.split('=')[1] : spendTierToModel(resolvedSpendTier);
   const genAI = new GoogleGenerativeAI(apiKey);
   model = genAI.getGenerativeModel({
     model: modelName,
     generationConfig: { temperature: 0.4, maxOutputTokens: 8192 },
   });
-} // GitHub diff trigger for bot outdate
+}
 
 // --- File Helpers ---
 function readFile(path, label) {
@@ -120,7 +123,7 @@ function readFile(path, label) {
   return readFileSync(path, 'utf-8').trim();
 }
 
-async function nextReportNumber() { // outdate-bot
+async function nextReportNumber() {
   const { stdout } = await execFileAsync(process.execPath, [join(ROOT, 'reserve-report-num.mjs')], { encoding: 'utf-8' });
   return stdout.trim();
 }
@@ -134,6 +137,14 @@ function loadContext() {
   const cvContent      = readFile(PATHS.cv, 'cv.md');
   const profileContent = readFile(PATHS.profile, '_profile.md');
   const profileYml     = readFile(PATHS.profileYml, 'profile.yml');
+  // _custom.md is optional: an absent file is a valid end state, so no warning.
+  const customContent  = existsSync(PATHS.custom) ? readFileSync(PATHS.custom, 'utf-8').trim() : '';
+  const customSection  = customContent ? `
+═══════════════════════════════════════════════════════
+USER HOUSE RULES & SCORING RULES (_custom.md)
+═══════════════════════════════════════════════════════
+${customContent}
+` : '';
 
   systemPromptTemplate = `You are career-ops, an AI-powered job search assistant.
 You evaluate job offers against the user's CV using a structured A-G scoring system.
@@ -162,7 +173,7 @@ ${profileYml}
 USER ARCHETYPES & NARRATIVE (_profile.md)
 ═══════════════════════════════════════════════════════
 ${profileContent}
-
+${customSection}
 ═══════════════════════════════════════════════════════
 IMPORTANT OPERATING RULES FOR THIS CLI SESSION
 ═══════════════════════════════════════════════════════
@@ -231,7 +242,7 @@ async function evaluateWithRetry(jdText, retries = 5) {
       console.error(`⚠️ API Error (attempt ${attempt}/${retries}): ${err.message}`);
       const status = err?.status ?? err?.response?.status;
       const retryable = status === 429 || status === 503;
-      if (attempt >= retries || !retryable) throw err; // outdate-bot
+      if (attempt >= retries || !retryable) throw err;
       console.log(`⏳ Waiting ${delay/1000}s before retry...`);
       await new Promise(r => setTimeout(r, delay));
       delay *= 2; // Exponential backoff
@@ -264,7 +275,7 @@ export async function processOffer(browser, line, idx, _evaluate = evaluateWithR
     // Neither model output nor a failed scrape proves closure. Verify the URL
     // independently; active/uncertain results preserve pending work.
     const liveness = await _checkLiveness(browser, url);
-    if (liveness?.result !== 'expired' || liveness?.code === 'insufficient_content') {
+    if (!isClosureEvidence(liveness)) {
       return { line, processed: false, outcome: 'unconfirmed-dead-posting' };
     }
     const label = match[2] ? `${companyHint} | ${titleHint}` : url;
@@ -334,12 +345,12 @@ export async function processOffer(browser, line, idx, _evaluate = evaluateWithR
 **Date:** ${today}
 **URL:** ${url}
 **Archetype:** ${archetype}
-**Score:** ${score} <!-- outdate bot -->
-**Legitimacy:** ${legitimacy} <!-- GitHub diff trigger for bot outdate -->
+**Score:** ${score}
+**Legitimacy:** ${legitimacy}
 **PDF:** pending
 **Tool:** Gemini (${modelName})\n
 ---\n
-${evaluationText.replace(/---SCORE_SUMMARY---[\s\S]*?---END_SUMMARY---/, '').trim()}\n`;
+${withJdArchiveSection(evaluationText.replace(/---SCORE_SUMMARY---[\s\S]*?---END_SUMMARY---/, '').trim(), jdText).trimEnd()}\n`;
 
     writeFileSync(reportPath, reportContent, 'utf-8');
 
@@ -407,7 +418,7 @@ async function main() {
   const limitCount = limitArg ? parseInt(limitArg.split("=")[1], 10) : 0;
   
   const concArg = process.argv.find(a => a.startsWith("--concurrency="));
-  let CONCURRENCY = concArg ? parseInt(concArg.split("=")[1], 10) : 2; // outdate-bot
+  let CONCURRENCY = concArg ? parseInt(concArg.split("=")[1], 10) : 2;
   if (isNaN(CONCURRENCY) || CONCURRENCY < 1) CONCURRENCY = 2;
 
   if (!existsSync(PATHS.pipeline)) {

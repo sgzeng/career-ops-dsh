@@ -431,7 +431,10 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const dir = sandbox();
   try {
     portals(dir);
-    const failOut = scan(dir, ['--since', '14'], 'fail');
+    // A run whose only board fails now exits non-zero ("every scan target
+    // failed", upstream); the Backfill summary line is still printed first.
+    let failOut;
+    try { failOut = scan(dir, ['--since', '14'], 'fail'); } catch (err) { failOut = `${err.stdout || ''}${err.stderr || ''}`; }
     const emptyOut = scan(dir, ['--since', '14'], 'empty');
     (!existsSync(statePath(dir)) && /1 not recorded/.test(failOut) && /1 not recorded/.test(emptyOut))
       ? pass('e2e provider failure / empty board: no state row, so the next run backfills again')

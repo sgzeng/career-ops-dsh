@@ -316,7 +316,12 @@ export async function run(argv) {
   return jobs.filter((j) => (size += JSON.stringify(j).length) <= MAX_OUTPUT_CHARS);
 }
 
-if (isMainModule(import.meta.url)) {
+if (isMainModule(import.meta.url) && process.argv.slice(2).some((a) => a === '--help' || a === '-h')) {
+  // Before anything is fetched: an unhandled flag must never run the parser
+  // (tests/help-flag-handled.test.mjs). The usage block is this file's header.
+  const header = readFileSync(new URL(import.meta.url), 'utf-8').match(/\/\*\*([\s\S]*?)\*\//)?.[1] ?? '';
+  process.stdout.write(`${header.split('\n').map((l) => l.replace(/^ \* ?/, '')).join('\n').trim()}\n`);
+} else if (isMainModule(import.meta.url)) {
   run(process.argv.slice(2))
     .then((jobs) => process.stdout.write(JSON.stringify(jobs)))
     .catch((e) => {

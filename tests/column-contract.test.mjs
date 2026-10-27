@@ -13,7 +13,7 @@ import {
   enumProblem, RISK_LEVELS, workAuthFromHeader,
 } from '../lib/column-contract.mjs';
 import { setMachineSummaryScalar } from '../report-format.mjs';
-import { parseAmount } from '../salary-gap.mjs';
+import { parseAmount } from '../providers/_salary-text.mjs';
 import { buildRoleModel } from '../roles/roles-model.mjs';
 
 console.log('\ncolumn contract — each roles-view column holds only its own field');

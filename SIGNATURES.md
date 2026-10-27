@@ -197,3 +197,16 @@ public commit with a stated reason.
 - @hgomecre | 2026-10-09 | id:275106938 | src:https://github.com/career-ops-hq/career-ops/discussions/4881 | n:149
 - @ringo380 | Ryan Robson | 2026-10-11 | "Every claim on my resume traces back to something I actually did. That should be the floor, not the differentiator." | id:971764 | src:https://github.com/career-ops-hq/career-ops/pull/4988 | n:150
 - @hibakahack-cell | 2026-10-13 | id:283028898 | src:https://github.com/career-ops-hq/career-ops/discussions/5151 | n:151
+- @echooolin00 | 2026-10-14 | id:286250255 | src:https://github.com/career-ops-hq/career-ops/discussions/5243 | n:152
+- @mwangiiharun | Harun Mwangi | 2026-10-14 | "Hiring should be about showcasing skills. Not which LLM knows how to parse resume's better" | id:20253651 | src:https://github.com/career-ops-hq/career-ops/discussions/5252 | n:153
+- @Michos12 | Michael Veliz | 2026-10-15 | id:129358905 | src:https://github.com/career-ops-hq/career-ops/discussions/5328 | n:154
+- @Gwilymm | 2026-10-16 | "Real people applying for real jobs deserve real human consideration, not applications screened by AI and answered with automated replies." | id:22996166 | src:https://github.com/career-ops-hq/career-ops/discussions/5359 | n:155
+- @tuongkhang012 | Akane | 2026-10-17 | "It's only natural" | id:102443108 | src:https://github.com/career-ops-hq/career-ops/discussions/5403 | n:156
+- @tanyiwende19-source | 2026-10-18 | "Selina" | id:263991212 | src:https://github.com/career-ops-hq/career-ops/discussions/5444 | n:157
+- @AyunniZafirah | 2026-10-21 | id:149381795 | src:https://github.com/career-ops-hq/career-ops/discussions/5622 | n:158
+- @kunalg06 | Kunal Gaikwad | 2026-10-24 | "Help me fine Sponsorship jobs" | id:18356081 | src:https://github.com/career-ops-hq/career-ops/discussions/5808 | n:159
+- @LexLeontiev | Lex Leontiev | 2026-10-24 | "The first interview should always be human-to-human." | id:11589535 | src:https://github.com/career-ops-hq/career-ops/discussions/5816 | n:160
+- @tabishkhan72 | 2026-10-24 | id:84769629 | src:https://github.com/career-ops-hq/career-ops/discussions/5823 | n:161
+- @Priya-G-Prasad | 2026-10-25 | "Its helping me with my Job Search. Thanks" | id:174127723 | src:https://github.com/career-ops-hq/career-ops/discussions/5846 | n:162
+- @cluster2600 | Maxime Grenu | 2026-10-26 | id:69890511 | src:https://github.com/career-ops-hq/career-ops/pull/5802 | n:163
+- @ClintGallon | Clint Gallon | 2026-10-26 | "Quality over quantity" | id:12228649 | src:https://github.com/career-ops-hq/career-ops/discussions/5994 | n:164

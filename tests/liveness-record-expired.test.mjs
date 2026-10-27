@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { acquirePipelineLock } from '../pipeline-lock.mjs';
+import { describeSpawn } from './helpers/describe-spawn.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -83,7 +84,7 @@ test('--no-record is parsed as a flag, not as a URL to check', () => {
     encoding: 'utf-8',
     timeout: 20000,
   });
-  assert.equal(out.status, 1, `expected usage exit 1, got ${out.status}`);
+  assert.equal(out.status, 1, describeSpawn(out, `expected usage exit 1, got ${out.status}`));
   assert.match(out.stderr || '', /Usage:/);
 });
 
@@ -119,7 +120,7 @@ test('--help documents the opt-out', () => {
     encoding: 'utf-8',
     timeout: 20000,
   });
-  assert.equal(out.status, 0);
+  assert.equal(out.status, 0, describeSpawn(out));
   assert.match(out.stdout || '', /--no-record/);
 });
 
@@ -180,6 +181,21 @@ test('a planned row carries the known row’s portal, title, company and locatio
   assert.equal(row.title, 'Staff Engineer');
   assert.equal(row.company, 'Acme');
   assert.equal(row.location, 'Remote');
+});
+
+test('a title, company or location the writer escaped is not escaped a second time', async () => {
+  // The writer prefixes a cell that starts with = + - or @ with an apostrophe,
+  // and the planned row goes back through that writer. Reading the stored cell
+  // raw handed it the already-escaped text, which gained one more apostrophe on
+  // every record: "+1 Platform Engineer" came back as "'+1 Platform Engineer".
+  const { formatScanHistoryRow } = await import('../scan.mjs');
+  const { parseScanHistoryLine } = await import('../lib/scan-history-columns.mjs');
+  const offer = { url: DEAD, source: 'greenhouse', title: '+1 Platform Engineer', company: '@Home Health', location: '-Remote' };
+  const [row] = plan([HEADER, formatScanHistoryRow(offer, '2026-09-01')], [{ url: DEAD, result: 'expired' }]);
+  const rewritten = parseScanHistoryLine(formatScanHistoryRow(row, '2026-09-04', 'skipped_expired'));
+  assert.equal(rewritten.title, '+1 Platform Engineer');
+  assert.equal(rewritten.company, '@Home Health');
+  assert.equal(rewritten.location, '-Remote');
 });
 
 test('a URL already recorded dead is not recorded twice', () => {

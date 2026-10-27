@@ -163,7 +163,7 @@ Job posting を分析し、real, active opening かどうかを示す signals �
 - **Niche/executive roles:** Staff+、VP、Director、highly specialized roles は months open でも legitimate。Age thresholds を調整。
 - **Startup / pre-revenue:** Early-stage companies は role が genuinely undefined で JD が vague なことがある。Description vagueness の重みを下げる。
 - **No date available:** Posting age が判断できず、他に concerning signals がない場合、limited data の note 付きで default to "Proceed with Caution"。Evidence なしで "Suspicious" にしない。
-- **Recruiter-sourced (no public posting):** Freshness signals unavailable。Active recruiter contact 自体を positive legitimacy signal として note。
+- **Recruiter-sourced（posting link 付きの recruiter outreach も含む）:** Posting snapshot がない場合のみ Freshness signals unavailable。Recruiter が link した posting を確認した場合は date と Apply button state の findings を残す。Recruiter contact だけでは positive legitimacy signal にならない（Neutral）。Tier を決める前に recruiter の身元を確認する：(a) company 自身の careers page / public ATS board にこの role があるか、(b) 既知 brand に付いた未知の名前は別 entity として確認する、(c) recruiter の email domain または independent source が company とつながるか、(d) `"{name}" scam OR "fake recruiter" OR "fake job"` を 1 回だけ検索、(e) 送られた code の clone / install / run、その code を開いた状態での screen share、Telegram / WhatsApp / Discord への移動、何らかの支払いを求めていないか。(a) は lookup 1 回、(d) は検索 1 回まで。(b)、(c)、(e) は新しい検索をせず、pasted text、(a) と (d) の結果、既存の research だけを使う。Evidence がない check は Unknown（Neutral）とし、Concerning にしない。(a) か (d) が Concerning で、さらに 1 つ Concerning があれば "Suspicious"。この check で tier が "Suspicious" になった場合は、短く non-accusatory な recruiter identity note を付ける：Concerning になった check とその source、company 自身の email domain から role を確認すること、recruiter の code を実行しないこと。Recruiter が送った repository、archive、link は絶対に clone / install / open / execute しない。
 
 ---
 
@@ -297,8 +297,11 @@ Full evaluation を `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` に保存す�
 **URL:**
 **Archetype:** {detected}
 **Score:** {X/5}
+**決定:** {応募する | 検討する | 先に調べる | 見送る}
 **Legitimacy:** {High Confidence | Proceed with Caution | Suspicious}
 **PDF:** {path or pending}
+
+{`## 判定 (lead)` の一文をそのまま写す}
 
 ---
 
@@ -336,6 +339,51 @@ Full evaluation を `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` に保存す�
 
 ## Keywords extracted
 (list of 15-20 keywords from the JD for ATS optimization)
+
+## Keyword Coverage
+(`keyword-match.mjs` (1b) が生成 — coverage %、present、thin、missing)
+
+## Job Description (archived verbatim)
+(posting の全文を verbatim で貼る — 下の要件を参照)
+```
+
+**JD archival（必須、#2789）：** すべての report に `## Job Description (archived verbatim)` section を入れ、posting の全文をそのまま貼る。要約・言い換えはしない。見出しは英語のまま：`check-jd-archive.mjs` が名前で探す。`**URL:**` は archive ではない：posting が閉じると link は切れ、元の要件はもう取り戻せない。Section の 1 行目は source に表示されている掲載日（`Posted: {日付または表示どおりの相対表記}`、本当に無いときは `Posted: not visible in source`）で、report file 自体の日時で代用しない。JD が長すぎる、または全文を引用できないときは `archive-posting.mjs` (下の command) で capture し、section には `See jds/{filename} for the full archive (archive-posting.mjs --report={num}).` の一文**だけ**を書く。言い換えで代用しない。Rule 全体は `modes/oferta.md` の **JD archival** を参照。
+
+**Command arguments（#5853）：** posting の URL、company slug、report path を command line に直接書かない（引用符で囲んでも不可）。file tool で値を JSON file に書き（`{"url": "…", "company": "{company-slug}", "report": "{num}"}`）、下の command を実行する。この command は各値を検査し（slug は `^[a-z0-9-]+$` に一致すること）、shell を通さずに各値を独立した引数として script に渡す。検査に通らない値は実行を止める：直すのは値であり、検査ではない。Rule 全体は `modes/oferta.md` の **Command arguments** を参照。
+
+```bash
+node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const p = JSON.parse(readFileSync(process.argv[1] ?? 0, "utf8"));
+const fail = msg => { console.error("archive-posting: " + msg); process.exit(1); };
+if (p === null || typeof p !== "object" || Array.isArray(p)) fail("the JSON file must hold one object");
+if (typeof p.url !== "string" || !/^https?:\/\//i.test(p.url)) fail("url must be an http(s) URL");
+const args = ["archive-posting.mjs", p.url];
+if (p.company != null) { if (typeof p.company !== "string" || !/^[a-z0-9-]+$/.test(p.company)) fail("company must match ^[a-z0-9-]+$"); args.push("--company=" + p.company); }
+if (p.report != null) { if (!/^[0-9]+$/.test(String(p.report))) fail("report must be a report number"); args.push("--report=" + p.report); }
+process.exit(spawnSync(process.execPath, args, { stdio: "inherit" }).status ?? 1);
+' {json-file}
+```
+
+### 1b. ATS keyword coverage を埋め込む
+
+Report を保存したら `keyword-match.mjs` (下の command) を実行し、`## Keyword Coverage` block を `## Keywords extracted` の下に貼る（見出しは英語のまま）。診断用のみ：keyword は実際の経験を反映する場合だけ追加する。
+
+そのために `{"report": "reports/{###}-{company-slug}-{YYYY-MM-DD}.md"}` を JSON file に書き（上の **Command arguments** を参照）、次を実行する：
+
+```bash
+node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const p = JSON.parse(readFileSync(process.argv[1] ?? 0, "utf8"));
+const fail = msg => { console.error("keyword-match: " + msg); process.exit(1); };
+if (p === null || typeof p !== "object" || Array.isArray(p)) fail("the JSON file must hold one object");
+if (typeof p.report !== "string" || !/^reports\/[0-9]{3,}-[a-z0-9-]+-[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$/.test(p.report)) fail("report must be reports/{###}-{company-slug}-{YYYY-MM-DD}.md");
+const args = ["keyword-match.mjs", p.report];
+if (p.cv != null) { if (typeof p.cv !== "string" || p.cv === "" || p.cv.startsWith("-")) fail("cv must be a file path"); args.push("--cv", p.cv); }
+process.exit(spawnSync(process.execPath, args, { stdio: "inherit" }).status ?? 1);
+' {json-file}
 ```
 
 ### 2. Record in tracker

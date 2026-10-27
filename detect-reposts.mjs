@@ -62,7 +62,7 @@ import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 // Namespace import, not default: js-yaml 5.x drops the default export, and
 // #2656 migrated the rest of the repo for exactly that reason.
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 
 import { roleFuzzyMatch } from './role-matcher.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
@@ -196,16 +196,14 @@ export function companyKey(row) {
 // that card would be titled with the normalized key — "joinupch" rather than
 // "joinup.ch". Map.has() is identical to Set.has() on the matching path.
 // BOTH collections, not just tracked_companies. A multi-employer board is far
-// likelier to live under `job_boards` — that is what the section is for — and
-// the two entries this template ships the flag on (Founderful, joinup.ch) are
-// both there. Reading only one collection made the shipped default load ZERO
-// aggregators while looking configured, which is the worst version of this: a
-// flag the user can see in their own config and that silently does nothing.
+// likelier to live under `job_boards` — that is what the section is for — so
+// reading only one collection would leave a flag the user can see in their own
+// config silently doing nothing.
 export function loadAggregatorCompanies(portalsPath = PORTALS_PATH) {
   const found = new Map();
   try {
     if (!existsSync(portalsPath)) return found;
-    const doc = yaml.load(readFileSync(portalsPath, 'utf-8'));
+    const doc = loadYaml(readFileSync(portalsPath, 'utf-8'));
     for (const entries of [doc?.tracked_companies, doc?.job_boards]) {
       if (!Array.isArray(entries)) continue;
       for (const entry of entries) {

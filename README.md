@@ -20,12 +20,13 @@
   <a href="README.ar.md">العربية</a> |
   <a href="README.hi.md">हिन्दी</a> |
   <a href="README.tr.md">Türkçe</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
+  <a href="README.vi.md">Tiếng Việt</a> |
+  <a href="README.id.md">Bahasa Indonesia</a>
 </p>
 
 <!-- The non-breaking spaces (&nbsp;) and word joiners (&#8288;) below decide where each line wraps on a phone. Keep them when editing. -->
 
-<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;<a href="https://github.com/santifer"><strong>santifer</strong></a></p>
+<p align="center"><a href="https://github.com/santifer"><img src="docs/avatar-santifer.png" width="48" height="48" align="middle" alt="Santiago Fernández de Valderrama Aparicio"></a>&nbsp;&nbsp;Created by <a href="https://github.com/santifer"><strong>@santifer</strong></a>, with&nbsp;&nbsp;<a href="https://github.com/career-ops-hq/career-ops#builders"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/builders-stack-dark.svg"><img src="docs/builders-stack-light.svg" alt="" height="32" align="middle"></picture></a>&nbsp;&nbsp;<a href="https://github.com/career-ops-hq/career-ops#builders">700+ contributors</a></p>
 
 <p align="center">
 <strong>Months of sending CVs into&nbsp;silence.</strong><br>
@@ -117,11 +118,17 @@ The silence after you hit send is not about you. Enough people saw the same thin
   <a href="https://career-ops.org/manifesto?utm_source=readme"><img src="docs/manifesto-wall.svg" alt="Three signatures of the CareerOps manifesto, in their own words" width="800"></a>
 </p>
 
-<p align="center"><sub>Every signature is a commit you can audit. <a href="https://career-ops.org/manifesto?utm_source=readme">Read them all, or add yours →</a></sub></p>
+<p align="center"><sub>Every signature is a commit you can audit. <a href="https://career-ops.org/manifesto?utm_source=readme">Read them all, or add yours →</a> · <a href="https://career-ops.org/manifesto?utm_source=readme#what-is-ai-job-search">What is AI job search?</a></sub></p>
 
 <br>
 
-Hiring will not fix itself. The people going through it can, and they are already in the room, comparing notes and fixing each other's setups. [This is where the fix gets written](CONTRIBUTING.md). A room, not a club. **Let's build together.**
+Hiring will not fix itself. The people going through it can, and they are already in the room, comparing notes and fixing each other's setups.
+
+<a id="builders"></a>
+
+<p align="center"><a href="CONTRIBUTING.md"><img src="https://warpchart.dev/api/builders?lang=en" alt="Animated wall of contributors' GitHub avatars, filling in order of arrival since April 2026, with the next square left open." width="100%"></a></p>
+
+[This is where the fix gets written](CONTRIBUTING.md). A room, not a club. **Let's build together.**
 
 <p align="center"><a href="https://discord.gg/8pRpHETxa4"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Fv10%2Finvites%2F8pRpHETxa4%3Fwith_counts%3Dtrue&query=%24.approximate_member_count&label=Discord&suffix=%20members&color=5865F2&style=for-the-badge&labelColor=2b3137&logo=discord&logoColor=white" alt="Discord: live member count of the career-ops server"></a></p>
 
@@ -188,7 +195,7 @@ It reformulates your CV; it must never fabricate it. A check in code stops a PDF
 | **Pipeline Integrity**   | Automated merge, dedup, status normalization, health checks                                                                              |
 | **Interview Suite**      | Time-blocked prep plans, practice sessions with feedback, post-interview debriefs ([`interview/`](modes/interview/README.md)), and a company red-flag detector ([`interview-redflag`](modes/interview-redflag.md)) |
 | **Offer Stage**          | Contract reading companion -- clause walk plus a lawyer question list ([`offer-prep`](modes/offer-prep.md)) -- and a desired/advertised/actual salary-gap analyzer (`salary-gap.mjs`) |
-| **Follow-ups & Replies** | Follow-up cadence calculator and seeded reminders (`followup-cadence.mjs`, `followup-seed.mjs`); employer reply classification into tracker updates ([`reply-watch`](modes/reply-watch.md)) |
+| **Follow-ups & Replies** | Follow-up cadence calculator and seeded reminders (`followup-cadence.mjs`, `followup-seed.mjs`); turn them off with `follow_ups.enabled: false` in `config/profile.yml`; employer reply classification into tracker updates ([`reply-watch`](modes/reply-watch.md)) |
 | **Plugin System**        | Opt-in integrations (Gmail, Notion, Apify + a community registry), disabled by default -- see [docs/PLUGINS.md](docs/PLUGINS.md)        |
 
 </details>
@@ -203,7 +210,7 @@ npx @santifer/career-ops init
 
 > 💡 `npx` ships with [Node.js](https://nodejs.org): it runs the installer once,
 > without installing anything globally. No Node yet? Install it first.
-> (Already using a Claude Code / Gemini / Codex CLI? Then you already have it.)
+> (Already using a Claude Code / Codex CLI? Then you already have it.)
 
 This clones the latest release into `./career-ops` and installs dependencies. Then:
 
@@ -226,17 +233,8 @@ npx playwright install chromium   # only needed for PDF generation
 # your distro's package manager if PDF generation fails to launch the browser
 # (Playwright's own docs list the required libraries per platform).
 
-# 2. Check setup
-npm run doctor                     # Validates all prerequisites
-
-# 3. Configure
-cp config/profile.example.yml config/profile.yml  # Edit with your details
-cp templates/portals.example.yml portals.yml       # Customize companies
-
-# 4. Add your CV
-# Create cv.md in the project root with your CV in markdown
-
-# 5. Open your AI CLI in this directory
+# 2. Open your AI CLI in this directory. On first launch it walks you
+#    through setup (your CV, profile and target roles) by chatting
 claude   # or codex / opencode / qwen / agy / grok
 
 # Then ask your CLI to adapt the system to you:
@@ -245,7 +243,7 @@ claude   # or codex / opencode / qwen / agy / grok
 # "Add these 5 companies to portals.yml"
 # "Update my profile with this CV I'm pasting"
 
-# 6. Start using
+# 3. Start using
 # Paste a job URL or JD text to trigger auto-pipeline
 # If your CLI supports slash commands, use /career-ops (or its CLI-specific alias)
 # In Codex, ask for the same mode in plain language, e.g.:
@@ -269,11 +267,34 @@ Set this flag **only when the configured proxy itself blocks connections to priv
 npm i -g @santifer/career-ops
 ```
 
-This installs the `career-ops` binary globally so you can run it directly instead of via `npx`. Unlike `npx @santifer/career-ops init` (which bootstraps a project directory), the global install gives you a persistent `career-ops` command available anywhere in your terminal.
+This installs the `career-ops` binary globally, so you can run `career-ops init [folder]` without `npx`. `init` is its only command: it sets up a workspace, and everything after that happens inside your AI coding CLI (see Usage below), not through this binary.
 
 **Which one should you use?**
 - `npx @santifer/career-ops init`: best for first use; creates a dedicated project folder.
-- `npm i -g @santifer/career-ops`: best once you have a project folder and want to run career-ops commands directly.
+- `npm i -g @santifer/career-ops`: if you'd rather type `career-ops init` than the `npx` form. It adds no other commands.
+
+### Install as a Claude plugin (Claude desktop app)
+
+Install career-ops once and use it from any folder in the Claude desktop app's **Code** tab. You don't need to clone anything or open a career-ops folder.
+
+1. In the Claude desktop app, open **Customize → Plugins**.
+2. Select **Add → Add marketplace** and enter `career-ops-hq/career-ops`.
+3. Open **Discover**, find **career-ops**, and select **Add**.
+4. To get new versions without doing anything, open the marketplace you added and turn on **Sync automatically**. **Check for updates** pulls them right away. A new version means a new `version` in `.claude-plugin/plugin.json`. Pushes that leave it unchanged don't reach installs (see [docs/CLAUDE_PLUGIN.md](docs/CLAUDE_PLUGIN.md#updating)).
+5. Start a new session in the **Code** tab. The first start takes a few extra seconds while career-ops installs its Node packages. Then type `/career-ops:career-ops`, or paste a job URL. On first use it walks you through setup.
+
+By default, your CV, profile, tracker and reports are saved in `~/career-ops-data` (`CAREER_OPS_ROOT` or `CAREER_OPS_DATA_DIR` picks another folder). They are never saved inside the plugin: a folder inside it is refused, so plugin updates never touch your files.
+
+From the Claude Code CLI, the same install is two commands:
+
+```text
+/plugin marketplace add career-ops-hq/career-ops
+/plugin install career-ops@career-ops
+```
+
+> **Code tab and Claude Code only.** A plugin added in Customize also shows up in Chat and Cowork, but career-ops can't run there as a plugin: Chat has no access to your files, and Cowork can't install the plugin's packages. To use career-ops in Cowork, open a career-ops folder instead ([docs/COWORK.md](docs/COWORK.md)).
+
+Where everything lives, how updates work and how to pick another data folder: [docs/CLAUDE_PLUGIN.md](docs/CLAUDE_PLUGIN.md).
 
 > **The system is designed to be customized by your AI coding CLI itself.** Modes, archetypes, scoring weights, negotiation scripts -- just ask it to change them. It reads the same files it uses, so it knows exactly what to edit.
 
@@ -293,7 +314,7 @@ career-ops uses a shared command router. In CLIs that register slash commands, i
 /career-ops deep      → Deep research prompt about company
 /career-ops interview-prep → Generate company-specific interview prep doc
 /career-ops interview    → Interactive profile/CV onboarding interview
-/career-ops master-profile → Import, review, and validate your Master Career Profile
+/career-ops master-profile → Import, review, validate, and prepare selected Profile facts as CV bullets
 /career-ops eu-swe    → Calibrate a European SWE application before CV/apply/interview
 /career-ops interview/plan → Time-blocked prep plan for an upcoming interview
 /career-ops interview/practice → Practice interview, one question at a time with feedback
@@ -311,7 +332,7 @@ career-ops uses a shared command router. In CLIs that register slash commands, i
 /career-ops project   → Evaluate portfolio project idea
 /career-ops tracker   → Application status overview
 /career-ops agent-inbox → Queue/drain requests for the next session (data/agent-inbox.md)
-/career-ops apply     → Live application assistant (reads form + generates answers)
+/career-ops apply     → Live application assistant (Playwright from this checkout, does not submit)
 /career-ops scan      → Scan portals and discover new offers
 /career-ops discover  → Resolve a company list to scannable ATS boards + append to portals.yml (zero-token)
 /career-ops batch     → Batch processing with parallel workers
@@ -332,25 +353,7 @@ In Codex, slash commands are not guaranteed. Use the same mode names in a prompt
 
 ## How It Works
 
-```
-You paste a job URL or description
-        │
-        ▼
-┌──────────────────┐
-│  Archetype       │  Classifies: LLMOps / Agentic / PM / SA / FDE / Transformation
-│  Detection       │
-└────────┬─────────┘
-         │
-┌────────▼─────────┐
-│  A-H Evaluation  │  Match, gaps, comp research, STAR stories, legitimacy
-│  (reads cv.md)   │
-└────────┬─────────┘
-         │
-    ┌────┼────┐
-    ▼    ▼    ▼
- Report  PDF  Tracker
-  .md   .pdf  entry
-```
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/how-it-works-dark.svg"><img src="docs/how-it-works-light.svg" alt="How it works: you paste a job URL or description. Archetype Detection classifies it as LLMOps, Agentic, PM, SA, FDE or Transformation. The A-H Evaluation reads cv.md and covers match, gaps, comp research, STAR stories and legitimacy. It produces a report (reports/*.md), a PDF (output/*.pdf) and a tracker entry (data/applications.md)." width="760"></picture></p>
 
 ## Antigravity CLI Integration
 
@@ -509,7 +512,7 @@ npm run serve:dashboard   # launch the TUI
 npm run build:dashboard   # optional: build the standalone binary
 ```
 
-Features: 6 filter tabs, 4 sort modes, grouped/flat view, lazy-loaded previews, inline status changes.
+Features: 10 filter tabs, 8 sort modes, grouped/flat view, lazy-loaded previews, inline status changes.
 
 There is also an **experimental web UI** (alpha and opt-in: nothing runs unless you start it): see [`web/README.md`](web/README.md).
 
@@ -629,7 +632,7 @@ The Go dashboard TUI, Node.js scripts, and AI agent modes all automatically resp
 career-ops ([career-ops.org](https://career-ops.org), also known as **careerops**) is an open-source AI job search that runs locally in your AI coding CLI (Claude Code, Codex, OpenCode and others) and leaves every decision to you. It evaluates job offers against your CV, generates ATS-tailored PDFs, finds the right person to contact, and tracks everything in one place: you always have the final call. It is the first reference implementation of the [CareerOps Manifesto](https://career-ops.org/manifesto).
 
 **Can the tailored CV invent things?**
-It must not, and the prompts say so: reformulate, never fabricate. `generate-pdf` blocks a CV whose numbers or facts are missing from your sources, unless you pass `--skip-fact-check`. It does not yet check job titles or judge rewording. Two open issues track that: [#2677](https://github.com/career-ops-hq/career-ops/issues/2677) (job titles must match cv.md) and [#1411](https://github.com/career-ops-hq/career-ops/issues/1411) (fail-closed faithfulness check). Until they merge, read every CV before you send it. The [Legal Disclaimer](LEGAL_DISCLAIMER.md) says the same in longer words.
+It must not, and the prompts say so: reformulate, never fabricate. `generate-pdf` blocks a CV whose numbers or facts are missing from your sources, unless you pass `--skip-fact-check`. The `pdf` mode also runs `cv-title-check.mjs`, which compares each job title in the tailored CV with the title cv.md gives the same job (matched by company and dates) and asks you to keep or revert any that differ. It warns rather than blocks, because reframing a title is sometimes your call. Nothing judges rewording yet: [#1411](https://github.com/career-ops-hq/career-ops/issues/1411) (fail-closed faithfulness check) tracks that. Until then, read every CV before you send it. The [Legal Disclaimer](LEGAL_DISCLAIMER.md) says the same in longer words.
 
 **Can I run career-ops for free, or on a cheaper / local model?**
 Yes. career-ops is CLI-agnostic and runs on free and local models (OpenRouter free models, Ollama or any OpenAI-compatible endpoint), so you are not tied to a paid subscription. See [docs/RUNNING_ON_A_BUDGET.md](docs/RUNNING_ON_A_BUDGET.md) for the full setup.

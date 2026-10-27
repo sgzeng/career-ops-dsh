@@ -399,10 +399,8 @@ export default {
       try {
         json = await fetchJsonWithRetry(ctx, url, { redirect: 'error' }, RETRY_POLICY);
       } catch (err) {
-        // A failure on page 0 means the board itself is unreachable — propagate
-        // (scan.mjs records the entry as errored) instead of reporting a dead
-        // board as a healthy empty one. Only a LATER page's failure, after page
-        // 0 proved the board alive, truncates gracefully.
+        // Without a successful first page there is no partial board to keep;
+        // surface the failure so scan/portal-health do not record an empty board.
         if (probing || page === 0) throw err;
         const attempts = err?.attempts ?? RETRY_POLICY.retries + 1;
         console.error(`⚠️  rippling: ${entry.name} truncated at page ${page + 1} of ${pagesToFetch} after ${attempts} attempts (${rows.length} jobs): ${err.message}`);
@@ -433,7 +431,14 @@ export default {
     // Detail enrichment answers "what does this job say", not "is this
     // endpoint alive" — skip it entirely while probing (same rule as
     // smartrecruiters/vdab/workday), so the probe stays at one request.
-    if (probing) return rows.map((r) => r.job);
+    // Cap and fetch-error stops both leave the board partial; tag it (the workdayTruncated convention).
+    const truncated = stopReason === STOP_REASON.CAP || stopReason === STOP_REASON.FETCH_ERROR;
+    const tagged = (/** @type {any[]} */ jobs) => {
+      if (truncated) /** @type {any} */ (jobs).ripplingTruncated = true;
+      return jobs;
+    };
+
+    if (probing) return tagged(rows.map((r) => r.job));
 
     // One GET per distinct id: the list repeats a posting once per location
     // row, and every row of it gets the same detail.
@@ -472,9 +477,9 @@ export default {
       console.error(`ℹ️  rippling: ${entry.name} enriched ${details.size} of ${ids.length} posting(s)${unreadable}${capped}`);
     }
 
-    return rows.map((r) => {
+    return tagged(rows.map((r) => {
       const detail = r.id ? details.get(r.id) : undefined;
       return detail ? mergeRipplingDetail(r.job, detail) : r.job;
-    });
+    }));
   },
 };

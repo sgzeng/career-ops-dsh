@@ -245,7 +245,11 @@ const dupes = (list) => list.filter((u, i) => list.indexOf(u) !== i);
     } else {
       fail(`stop line / exit: status=${r.status} line=${stoppedLine?.[0]}\n${out.slice(0, 1500)}`);
     }
-    if (trailing >= SWEEP_REFUSAL_LIMIT && trailing <= SWEEP_REFUSAL_LIMIT + 5) {
+    // The gate resets its count when a healthy board's fetch RESOLVES, which can land a
+    // few refusals after that board's 200 appears in the log (the provider still parses
+    // the page), so the log can show up to one more batch of in-flight refusals than the
+    // gate counted. Exactly SWEEP_REFUSAL_LIMIT still trips it (asserted above).
+    if (trailing >= SWEEP_REFUSAL_LIMIT && trailing <= SWEEP_REFUSAL_LIMIT + 10) {
       pass(`after the host's last good answer it was asked ${trailing} more times and refused every one: the limit (${SWEEP_REFUSAL_LIMIT}) plus the workers already in flight, not the remaining ${BOARDS - HEALTHY} boards`);
     } else {
       fail(`unbroken refusals at the end of the log: ${trailing}`);

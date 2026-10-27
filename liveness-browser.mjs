@@ -5,8 +5,9 @@
  * Returns the same shape as classifyLiveness: { result, reason }.
  */
 
-import { classifyLiveness } from './liveness-core.mjs';
+import { classifyLiveness, jobIdToken, JOB_ID_PATTERN } from './liveness-core.mjs';
 import { BROWSER_LIKE_USER_AGENT } from './user-agent.mjs';
+import { SINKHOLE_ADDRESSES } from './providers/_ip-guard.mjs';
 
 const NAVIGATE_TIMEOUT_MS = 15_000;
 // Single-page-app ATS render the posting after domcontentloaded, so the page
@@ -27,6 +28,25 @@ const HYDRATING_CODES = new Set(['insufficient_content', 'no_apply_control']);
 // while such a frame is present.
 const FRAME_CONTENT_TIMEOUT_MS = 6_000;
 const FRAME_CONTENT_POLL_MS = 500;
+// A failed navigation is not over when page.goto rejects: Chromium commits its
+// error page (chrome-error://chromewebdata/) just after, 1-69 ms later over 36
+// failed loads (a host with no address, four kinds of TLS failure). Playwright
+// reports a goto that is still waiting when that commit lands as "interrupted
+// by another navigation" (microsoft/playwright#35944), and Chromium goes on
+// loading the URL that goto asked for, whose late commit then interrupts the
+// goto after it. On the one page that check-liveness and scan --verify share,
+// one such failure turned the checks after it into navigation_errors. So a
+// check whose navigation failed waits for that commit before it returns, up to
+// this long. A goto that timed out has nothing to wait for: no error page
+// commits, and the next goto cancels it.
+const FAILED_NAVIGATION_COMMIT_MS = 2_000;
+
+// The query parameters that carry a posting's own id, from the providers that
+// put it there: UltiPro's opportunityId, SchoolSpring's and Deutsche Bahn's
+// jobId, Tencent's postId, AppliTrack's AppliTrackJobId, Meituan's jobUnionId,
+// and gh_jid on a careers page that embeds Greenhouse. Any other query value,
+// such as a campaign or tracking number, is not the posting's id.
+const POSTING_ID_PARAMS = new Set(['opportunityid', 'jobid', 'postid', 'applitrackjobid', 'jobunionid', 'gh_jid']);
 
 // BambooHR's client bundle can throw during first paint — a failed
 // /globals/locale request followed by an uncaught TypeError reading
@@ -93,6 +113,33 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export function jitteredDelayMs(baseMs) {
   if (!baseMs || baseMs <= 0) return 0;
   return baseMs + Math.floor(Math.random() * baseMs);
+}
+
+// Per-host spacing for a browser batch. A WAF rate limit is per site, so a run
+// across many sites only needs to space out repeat visits to the SAME host
+// (exact hostname, `www.` ignored; careers.x.com and jobs.x.com count as two):
+// the gap since that host's last browser check ended counts toward its
+// jittered delay, and a host seen for the first time waits nothing. With a global gap, 641 URLs
+// over ~40 hosts cost 5-10 s each (~1.5 h); per host, only same-site runs wait.
+const hostKey = (url) => {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return String(url); }
+};
+
+export function createHostSpacer(baseMs, { now = Date.now, delay = jitteredDelayMs } = {}) {
+  const lastVisit = new Map();
+  return {
+    /** Milliseconds to wait before a browser check of `url`. */
+    waitBefore(url) {
+      if (!baseMs || baseMs <= 0) return 0;
+      const last = lastVisit.get(hostKey(url));
+      if (last == null) return 0;
+      return Math.max(0, delay(baseMs) - (now() - last));
+    },
+    /** Record that `url`'s host was just visited by the browser. */
+    visited(url) {
+      lastVisit.set(hostKey(url), now());
+    },
+  };
 }
 
 // Defensive guards: URLs come from ATS feeds (mostly trusted) but a misconfigured
@@ -261,14 +308,6 @@ async function resolveDnsCached(hostname) {
   }
 }
 
-// What a DNS filter answers for a name it blocks: 0.0.0.0 and ::. That is
-// Pi-hole's default, and what AdGuard DNS and Control D answered for the
-// trackers they blocked on 2026-10-11; hosts-file blocklists map names to
-// 0.0.0.0 too. No site is published at either address, so an answer whose only
-// private addresses are these is the user's own filter at work, not a host
-// resolving into private space. The request is blocked all the same.
-const SINKHOLE_ADDRESSES = new Set(['0.0.0.0', '::']);
-
 // Second layer of the egress guard: `rejectPrivateOrInvalid` only sees the
 // literal host, so a public hostname that *resolves* to private space still
 // gets through it. Resolve and re-check every address before the request is
@@ -298,6 +337,15 @@ export async function validateUrlSecurity(urlString) {
 
 // Rediscovery can navigate a newly created page before its first liveness
 // check. Install the same URL/DNS guards before that search as well.
+let suppressedSubresourceBlocks = 0;
+
+/** How many subresource requests were aborted for having no usable address since the last call (then resets). */
+export function takeSuppressedBlockCount() {
+  const n = suppressedSubresourceBlocks;
+  suppressedSubresourceBlocks = 0;
+  return n;
+}
+
 export async function installLivenessRouteGuard(page) {
   if (page && typeof page.route === 'function' && !page._routeInterceptorRegistered) {
     page._routeInterceptorRegistered = true;
@@ -313,7 +361,6 @@ export async function installLivenessRouteGuard(page) {
         await validateUrlSecurity(requestUrl);
         return route.continue();
       } catch (err) {
-        console.warn(`Blocked request to restricted destination (DNS): ${requestUrl} - ${err.message}`);
         // A host that resolves to nothing is a DEAD THIRD-PARTY SCRIPT, not a
         // statement about the posting. Measured 2026-08-14 over a 217-URL
         // recheck: 78 live postings were returned as `uncertain` because an
@@ -358,6 +405,12 @@ export async function installLivenessRouteGuard(page) {
           ? request.isNavigationRequest() && request.frame() === page.mainFrame()
           : true;
         const noUsableAddress = err?.livenessCode === 'dns_no_addresses' || err?.livenessCode === 'dns_sinkhole';
+        // A subresource with no usable address is counted, not logged: with a DNS
+        // filter on, every page logged a line per tracker request (440 lines over
+        // 142 postings on 2026-10-16) and buried the verdicts. Everything that
+        // bears on a verdict — the main document, a private address — still logs.
+        if (noUsableAddress && !isMainDocument) suppressedSubresourceBlocks++;
+        else console.warn(`Blocked request to restricted destination (DNS): ${requestUrl} - ${err.message}`);
         if (!noUsableAddress) {
           page._blockedByGuard = { code: 'blocked_host', reason: err.message };
         } else if (isMainDocument) {
@@ -369,7 +422,51 @@ export async function installLivenessRouteGuard(page) {
   }
 }
 
-export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
+// One navigation of the page (a goto or a reload). If it fails, wait for the
+// main frame to commit Chromium's error page, so the page is settled for
+// whatever navigates it next (see FAILED_NAVIGATION_COMMIT_MS). No other
+// navigation ends the wait: a child frame's, or the old page changing its own
+// URL (a fragment or history change fires framenavigated too), would let the
+// next goto start before the error page commits and interrupts it. A lighter
+// page double without waitForEvent skips the wait.
+async function navigateSettled(page, navigate) {
+  try {
+    return await navigate();
+  } catch (err) {
+    const canWait = typeof page.waitForEvent === 'function' && typeof page.mainFrame === 'function';
+    if (canWait && err?.name !== 'TimeoutError') {
+      await page
+        .waitForEvent('framenavigated', {
+          predicate: (frame) => frame === page.mainFrame() && frame.url().startsWith('chrome-error:'),
+          timeout: FAILED_NAVIGATION_COMMIT_MS,
+        })
+        .catch(() => {});
+    }
+    throw err;
+  }
+}
+
+// A navigation that times out is retried once with a longer budget. A slow
+// careers page (block.xyz took >15 s on a cold load) is live but was answered
+// `uncertain` and stayed unresolved in the queue. Only a timeout earns the retry:
+// a refused connection, a DNS failure or a guard block fails exactly the same way
+// the second time, and the guard verdict must win as before.
+export const NAVIGATE_RETRY_TIMEOUT_MS = 30_000;
+
+export async function gotoWithTimeoutRetry(page, url, {
+  timeoutMs = NAVIGATE_TIMEOUT_MS,
+  retryTimeoutMs = NAVIGATE_RETRY_TIMEOUT_MS,
+} = {}) {
+  const go = (timeout) => navigateSettled(page, () => page.goto(url, { waitUntil: 'domcontentloaded', timeout }));
+  try {
+    return await go(timeoutMs);
+  } catch (err) {
+    if (err?.name !== 'TimeoutError' || page?._blockedByGuard || !(retryTimeoutMs > timeoutMs)) throw err;
+    return go(retryTimeoutMs);
+  }
+}
+
+export async function checkUrlLiveness(page, url, { extraSettleMs = 0, timeoutRetry = true } = {}) {
   const guardError = rejectPrivateOrInvalid(url);
   if (guardError) {
     return { result: 'uncertain', code: guardError.code, reason: guardError.reason };
@@ -379,14 +476,56 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
   }
   await installLivenessRouteGuard(page);
   try {
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
+    const response = await gotoWithTimeoutRetry(page, url, timeoutRetry ? {} : { retryTimeoutMs: 0 });
     const status = response?.status() ?? 0;
 
     // extraSettleMs is slack for the headed retry, where a JS anti-bot
     // interstitial needs a moment to clear before the first read.
     if (extraSettleMs > 0) await page.waitForTimeout(extraSettleMs);
 
-    const extractApplyControls = () => {
+    const extractApplyControls = ({ postingId, postingSegment, pageUrl, idPattern }) => {
+      // Page chrome (nav, header, footer) is skipped because its links are the
+      // site's own: Jobs, Careers, Sign in. A link to this posting's own page,
+      // on the page's own origin, is not chrome, wherever it sits; a link to
+      // another site says nothing about this page's posting, even with its id
+      // in the path. Tech in Asia puts its only Apply control,
+      // "APPLY FOR JOB" -> /jobs/<id>/apply, in the page header: measured
+      // 2026-10-22, 20 of 20 live postings read no_apply_control without this,
+      // and 40 of 40 closed ones answer "Job not found" with no such link. Only
+      // the path counts, so a sign-in link that carries the posting in its
+      // return address (?returnUrl=/jobs/<id>) is still chrome, and so is a
+      // link back into this page under another query, fragment or trailing
+      // slash, such as a skip link to #main-content. A sign-in or sign-up page
+      // is chrome even under the posting's own path (/jobs/<id>/login): it is
+      // the site's sign-in, not the posting. In a frame, the page the
+      // frame sits in is this page too; its address is passed in, because a
+      // frame sandboxed without allow-same-origin cannot read window.top. The
+      // id has to be the link's own: its last path segment that carries an id,
+      // whole, so posting 12345 claims neither /jobs/123456/apply nor
+      // /jobs/job-12345/apply, nor /jobs/12345/related/67890/apply, whose own
+      // posting is 67890. A posting whose own segment carries the id with more
+      // around it claims that whole segment too: posting job-12345 claims
+      // /jobs/job-12345/apply.
+      const idBearing = new RegExp(idPattern, 'i');
+      const signIn = /^(?:log-?in|sign[-_]?(?:in|up)|register)(?:\.\w+)?$/;
+      const linksToPosting = (element) => {
+        const href = postingId && element.getAttribute('href');
+        if (!href) return false;
+        try {
+          const target = new URL(href, document.baseURI);
+          const pageKey = (u) => u.origin + u.pathname.replace(/\/+$/, '');
+          const thisPage = [location.href, pageUrl].map((u) => pageKey(new URL(u)));
+          if (thisPage.includes(pageKey(target))) return false;
+          if (target.origin !== new URL(pageUrl).origin) return false;
+          const segments = target.pathname.toLowerCase().split('/');
+          if (segments.some((s) => signIn.test(s))) return false;
+          const own = segments.filter((s) => idBearing.test(s)).pop();
+          return own === postingId || own === postingSegment;
+        } catch {
+          return false;
+        }
+      };
+
       // A design-system button is a custom element: UKG Pro (UltiPro) renders
       // Apply as <ukg-button>Apply now</ukg-button>, with no role on it. The
       // native <button> inside its shadow root has no text of its own (the
@@ -400,7 +539,7 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
 
       return candidates
         .filter((element) => {
-          if (element.closest('nav, header, footer')) return false;
+          if (element.closest('nav, header, footer') && !linksToPosting(element)) return false;
           if (element.closest('[aria-hidden="true"]')) return false;
 
           const style = window.getComputedStyle(element);
@@ -444,19 +583,55 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
             }
           });
 
+    // The posting's id, from the address of the page being read, so a posting
+    // reached through a redirect (/jobs/senior-engineer to /jobs/12345) is
+    // matched by the address it landed on. A page whose address lost the
+    // requested URL's id reads as off the posting whatever its controls (the
+    // redirect guard), and one whose own id is another posting's claims
+    // nothing in the chrome: /jobs/12345 that lands on
+    // /jobs/67890?returnUrl=/jobs/12345 passes the guard, but the page is
+    // posting 67890. The id in the last path segment, so a number in the
+    // query (?campaign=123456) is not taken for it. When that segment has
+    // none, the id in a query parameter that names the posting, and only then
+    // the last id in the path: on UltiPro,
+    // /JobBoard/{board}/OpportunityDetail?opportunityId={posting}, the path's
+    // only id is the board's, and every link under the board's path has it.
+    // The segment itself is kept only when the id came from it, so a generic
+    // last segment (/jobs/12345/details) claims nothing.
+    const postingIdentity = (address) => {
+      const postingUrl = new URL(address);
+      const lastSegment = postingUrl.pathname.split('/').filter(Boolean).pop() ?? '';
+      const queryId = [...postingUrl.searchParams]
+        .filter(([name]) => POSTING_ID_PARAMS.has(name.toLowerCase()))
+        .map(([, value]) => jobIdToken(value))
+        .find(Boolean);
+      return {
+        postingId: jobIdToken(lastSegment) ?? queryId ?? jobIdToken(postingUrl.pathname),
+        postingSegment: jobIdToken(lastSegment) ? lastSegment.toLowerCase() : null,
+      };
+    };
+    const requested = postingIdentity(url);
+
     // One reading of the page: the top-level document plus every same-origin
     // child frame, so a posting rendered inside a frame and one rendered inline
     // are judged the same way. A top-level read that throws propagates; a frame
     // that detaches or turns cross-origin mid-read is skipped.
     const readPage = async () => {
       const finalUrl = page.url();
+      const landed = postingIdentity(finalUrl);
+      const anotherPosting = requested.postingId && landed.postingId !== requested.postingId;
+      const walkArgs = {
+        ...(anotherPosting ? { postingId: null, postingSegment: null } : landed),
+        pageUrl: finalUrl,
+        idPattern: JOB_ID_PATTERN,
+      };
       let bodyText = await page.evaluate(() => document.body?.innerText ?? '');
-      let applyControls = await page.evaluate(extractApplyControls);
+      let applyControls = await page.evaluate(extractApplyControls, walkArgs);
       for (const frame of childFrames(finalUrl)) {
         try {
           const text = await frame.evaluate(() => document.body?.innerText ?? '');
           if (text && text.trim()) bodyText += '\n' + text;
-          applyControls = applyControls.concat(await frame.evaluate(extractApplyControls));
+          applyControls = applyControls.concat(await frame.evaluate(extractApplyControls, walkArgs));
         } catch {
           // detached or cross-origin mid-read; the rest of the reading still stands
         }
@@ -555,7 +730,8 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
       try { host = new URL(finalUrl || url).hostname; } catch { /* leave empty, retry test below just fails closed */ }
       if (isBambooHrHost(host)) {
         try {
-          const reloadResponse = await page.reload({ waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
+          const reloadResponse = await navigateSettled(page, () =>
+            page.reload({ waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS }));
           const reloadStatus = reloadResponse?.status() ?? status;
           const reloaded = await pollPage(reloadStatus);
           const reloadVerdict = classifyLiveness({ status: reloadStatus, requestedUrl: url, ...reloaded });
@@ -585,7 +761,8 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
     // iCIMS note above). Measured over 218 loads on 17 ATS: 18 were still empty
     // when the poll ended, 16 of them live postings. Only a body with no text at
     // all qualifies: a short page ("Page not found", a header and footer) keeps
-    // insufficient_content.
+    // insufficient_content, also `uncertain` but with a code that says the page
+    // did render something.
     if (verdict.code === 'insufficient_content' && !reading.bodyText.trim()) {
       verdict = {
         result: 'uncertain',
@@ -701,7 +878,9 @@ export async function checkUrlLivenessWithFallback(page, url, { getHeadedPage } 
   if (!headedPage) {
     return first;
   }
-  const second = await checkUrlLiveness(headedPage, url, { extraSettleMs: 3_000 });
+  // The headed retry is for an anti-bot wall, which loaded; it does not also
+  // earn the slow-page retry, which would push one URL past a minute.
+  const second = await checkUrlLiveness(headedPage, url, { extraSettleMs: 3_000, timeoutRetry: false });
   if (isChallengeResult(second)) {
     return { ...second, reason: `${second.reason} (headed retry also blocked)` };
   }

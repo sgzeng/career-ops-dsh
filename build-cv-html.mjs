@@ -37,19 +37,25 @@ import { existsSync, readFileSync, realpathSync } from 'fs';
 import { resolve, dirname, basename, join, extname, isAbsolute } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { stripEmptySections } from './cv-sections-core.mjs';
-import { getCareerOpsRoot } from './path-resolver.mjs';
-import { hasRequiredFields, validatePayload } from './lib/cv-payload-schema.mjs';
+import { getCareerOpsRoot, getProfilePath } from './path-resolver.mjs';
+import { validateLockedSections, sectionKey } from './generate-pdf.mjs';
+import { readLockedSections } from './theme-style.mjs';
+import { hasRequiredFields, templateSlotWarnings, validatePayload } from './lib/cv-payload-schema.mjs';
+import { resolveTrackerPath, resolveWorkspaceRoot } from './tracker-utils.mjs';
 import { PAGE_WIDTHS, resolvePageFormat } from './lib/page-format.mjs';
 import { PARTIAL_SECTIONS, declaredSections, parseMeta } from './lib/template-manifest.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
+const trackerPath = resolveTrackerPath(DATA_ROOT);
+const workspaceRoot = resolveWorkspaceRoot(trackerPath);
 const TEMPLATE_PATH = resolve(__dirname, 'templates', 'cv-template.html');
 const PLACEHOLDER_RE = /\{\{[A-Z_]+\}\}/g;
 const CONTACT_ROW_RE = /<div class="contact-row">[\s\S]*?<\/div>/;
 
-const PROFILE_PATH = resolve(DATA_ROOT, 'config', 'profile.yml');
+const PROFILE_PATH = getProfilePath();
 const PHOTO_MIME_BY_EXT = new Map([
   ['.png', 'image/png'],
   ['.jpg', 'image/jpeg'],
@@ -76,6 +82,14 @@ const DEFAULT_SECTION_TITLES = {
 // that change meaning in markup so tailored bullets containing &, <, >, quotes
 // (e.g. "R&D", "scaled 10x < budget", 'the "north star" metric') render as
 // literal text instead of breaking the document or injecting tags.
+//
+// Braces too, because they change meaning in the TEMPLATE: it is filled by
+// successive {{KEY}} replacements over the whole document, so escaped text is
+// scanned by every replacement after its own. A company of "Acme {{BULLETS}}
+// Corp" got the bullet list spliced into it, a summary naming {{SKILLS}} got
+// the skills grid, and a bullet about "{{FIRST_NAME}} merge fields" failed the
+// build as an unresolved placeholder. As entities they render the same and can
+// never read as a placeholder.
 function escapeHtml(text) {
   // Blank out only truly absent/structural values. A number or boolean scalar
   // (e.g. a payload with `year: 2024` instead of `"2024"`) must render its value,
@@ -87,7 +101,9 @@ function escapeHtml(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/'/g, '&#39;')
+    .replace(/\{/g, '&#123;')
+    .replace(/\}/g, '&#125;');
 }
 
 // Normalize a URL: only allow the schemes the template's contact row uses,
@@ -127,6 +143,34 @@ function sanitizeImageSrc(src) {
   return '';
 }
 
+// The payload is written by the tailoring model from an untrusted posting, so a
+// local photo path is honoured only when it is the one the user set in
+// config/profile.yml (#5094). data: and http(s) URLs carry no local read.
+function profilePhotoValue() {
+  try {
+    const doc = loadYaml(readFileSync(PROFILE_PATH, 'utf-8'));
+    const value = doc?.candidate?.photo;
+    return typeof value === 'string' ? value.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+// A relative candidate.photo comes from config/profile.yml, a user-layer file,
+// so it is read from the data root, where that file and the user's other files
+// live. It used to resolve against this script's directory, so with the user
+// layer moved out of the checkout (CAREER_OPS_ROOT, CAREER_OPS_DATA_DIR or a
+// .career-ops-data marker) the photo sitting next to the profile was never
+// found and the build failed. The checkout stays as a fallback, so a photo kept
+// there by an install that moved its data root still resolves. Without a data
+// root override the two are the same directory.
+function resolveProfileRelative(photo) {
+  const fromDataRoot = resolve(DATA_ROOT, photo);
+  if (existsSync(fromDataRoot)) return fromDataRoot;
+  const fromCheckout = resolve(__dirname, photo);
+  return existsSync(fromCheckout) ? fromCheckout : fromDataRoot;
+}
+
 async function prepareCandidatePhoto(candidate) {
   const c = candidate && typeof candidate === 'object' ? { ...candidate } : {};
   const photo = typeof c.photo === 'string' ? c.photo.trim() : '';
@@ -158,7 +202,11 @@ async function prepareCandidatePhoto(candidate) {
     throw new Error(`Unsupported profile photo URL scheme: ${photo.split(':', 1)[0]}`);
   }
 
-  const photoPath = isAbsolute(photo) ? photo : resolve(__dirname, photo);
+  if (photo !== profilePhotoValue()) {
+    throw new Error(`Profile photo path ${photo} does not match candidate.photo in config/profile.yml; a local photo path is read only from the profile`);
+  }
+
+  const photoPath = isAbsolute(photo) ? photo : resolveProfileRelative(photo);
   const mime = PHOTO_MIME_BY_EXT.get(extname(photoPath).toLowerCase());
   if (!mime) {
     throw new Error(`Unsupported profile photo format: ${photo} (expected PNG, JPEG, WebP, or GIF)`);
@@ -717,7 +765,7 @@ function renderReport(payload, partials) {
   const candidate = payload.candidate || {};
   // The sheet this body has to fit is chosen by generate-pdf.mjs, so both read
   // the same resolver rather than each keeping a fallback of their own.
-  const pageWidth = PAGE_WIDTHS[resolvePageFormat(payload.page_format, { profilePath: PROFILE_PATH })];
+  const pageWidth = PAGE_WIDTHS[resolvePageFormat(payload.page_format, { profilePath: PROFILE_PATH, country: payload.country })];
 
   const substitutions = {
     LANG: escapeHtml(payload.lang || 'en'),
@@ -800,6 +848,12 @@ async function writeAndReport(html, absOutput, payload, extra = {}) {
   const { warnings = [], ...rest } = extra;
   const outDir = dirname(absOutput);
   if (!existsSync(outDir)) await mkdir(outDir, { recursive: true });
+
+  const lockedKeys = readLockedSections(PROFILE_PATH, sectionKey);
+  const cvPath = resolve(workspaceRoot, 'cv.md');
+  const cvMarkdown = existsSync(cvPath) ? readFileSync(cvPath, 'utf-8') : '';
+  validateLockedSections(html, cvMarkdown, lockedKeys);
+
   await writeFile(absOutput, html, 'utf-8');
 
   const fileInfo = await stat(absOutput);
@@ -848,6 +902,22 @@ function mdJoin(parts, sep) {
 function mdUrl(url) {
   return normalizeUrl(url).replace(/[()<>\\\s]/g,
     c => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
+}
+
+// The {{TOKEN}} that renders each payload section, for templateSlotWarnings.
+// renderHtml fills the content slot; renderMarkdown keeps a section only where
+// the template places its title (templateSectionOrder below), and the consent
+// footer only where the template has one.
+const HTML_SECTION_SLOTS = {
+  summary: 'SUMMARY_TEXT', competencies: 'COMPETENCIES', experience: 'EXPERIENCE',
+  projects: 'PROJECTS', education: 'EDUCATION', certifications: 'CERTIFICATIONS',
+  awards: 'AWARDS', interests: 'INTERESTS', skills: 'SKILLS', consent: 'CONSENT',
+};
+function markdownSectionSlots() {
+  return {
+    ...Object.fromEntries(Object.keys(DEFAULT_SECTION_TITLES).map((key) => [key, `SECTION_${key.toUpperCase()}`])),
+    consent: 'CONSENT',
+  };
 }
 
 // Section keys in the order the template places their {{SECTION_*}} titles.
@@ -978,9 +1048,10 @@ async function runMarkdown(args) {
     console.error(JSON.stringify({ valid: false, errors, warnings }, null, 2));
     process.exit(1);
   }
+  const template = await readFile(templatePath, 'utf-8');
+  warnings.push(...templateSlotWarnings(payload, template, markdownSectionSlots(), basename(templatePath)));
   for (const message of warnings) console.error(`Warning: ${message}`);
   await mkdir(dirname(absOutput), { recursive: true });
-  const template = await readFile(templatePath, 'utf-8');
   await writeFile(absOutput, renderMarkdown(payload, template), 'utf-8');
   console.log(JSON.stringify({ file: basename(absOutput), path: absOutput, format: 'markdown', warnings, valid: true }, null, 2));
   process.exit(0);
@@ -1060,9 +1131,10 @@ async function main() {
     console.error(JSON.stringify({ valid: false, errors, warnings }, null, 2));
     process.exit(1);
   }
-  for (const message of warnings) console.error(`Warning: ${message}`);
 
   const template = await readFile(templatePath, 'utf-8');
+  warnings.push(...templateSlotWarnings(payload, template, HTML_SECTION_SLOTS, basename(templatePath)));
+  for (const message of warnings) console.error(`Warning: ${message}`);
 
   let html;
   try {

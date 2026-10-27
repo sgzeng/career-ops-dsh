@@ -41,8 +41,9 @@
 import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { renameSyncWithRetry } from './tracker-utils.mjs';
+import { withPipelineLock } from './pipeline-lock.mjs';
 
 import { makeHttpCtx, isRefusedRedirectError } from './providers/_http.mjs';
 import greenhouse from './providers/greenhouse.mjs';
@@ -60,10 +61,12 @@ import joinProvider from './providers/join.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { DEFAULT_SMALL_THRESHOLD, isSmallBoard, smallBoardDetail } from './lib/small-board.mjs';
+import { findBlacklistEntry, loadBlacklist } from './scan.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
 const PORTALS_PATH = process.env.CAREER_OPS_PORTALS || join(DATA_ROOT, 'portals.yml');
+const BLACKLIST_PATH = process.env.CAREER_OPS_BLACKLIST || join(DATA_ROOT, 'data', 'blacklist.md');
 
 // Safe charset for a slug that will be interpolated into an ATS URL. Consistent
 // with the SLUG_RE guard in scan-ats-full.mjs and seeds/vc-portfolios.mjs — a
@@ -245,7 +248,7 @@ export function parseCompanyInput(rawYaml, cliNames = []) {
   if (rawYaml && rawYaml.trim()) {
     let doc;
     try {
-      doc = yaml.load(rawYaml);
+      doc = loadYaml(rawYaml);
     } catch (err) {
       warnings.push(`input: malformed YAML — ${err.message}`);
       doc = null;
@@ -701,7 +704,7 @@ export function planPortalEntries(resolved, existingEntries) {
  */
 export function splicedCorrectly(text, expectedCount) {
   try {
-    const doc = yaml.load(text);
+    const doc = loadYaml(text);
     return Array.isArray(doc?.tracked_companies) && doc.tracked_companies.length === expectedCount;
   } catch {
     return false;
@@ -983,6 +986,43 @@ export async function resolveCompany(company, { vendors = VENDOR_ORDER, ctx, inc
   return { unresolved };
 }
 
+/**
+ * Split companies on the user's do-not-apply list (data/blacklist.md) away from
+ * the rest, using scan.mjs's own findBlacklistEntry so discovery and scanning
+ * agree on what is blacklisted. Before probing, a company is checked by name and
+ * by every URL it carries (a Workday URL hint AND `website`: either one can be
+ * the host a domain-scope entry names); after probing, `urlsOf` lets the caller
+ * re-check a resolved board's careers_url. A blacklisted company is never
+ * written to portals.yml: scan.mjs would drop every posting from it anyway.
+ *
+ * @returns {{allowed:any[], blacklisted:{name:string, entry:string, reason:string}[]}}
+ */
+export function partitionBlacklisted(companies, blacklist, urlsOf = (c) => [typeof c.workday === 'string' ? c.workday : null, c.website]) {
+  const allowed = [];
+  const blacklisted = [];
+  for (const c of companies) {
+    const urls = urlsOf(c).filter(Boolean).map(asBlacklistUrl);
+    let hit = null;
+    for (const url of urls.length ? urls : ['']) {
+      hit = findBlacklistEntry(blacklist, c.name, url);
+      if (hit) break;
+    }
+    if (hit) blacklisted.push({ name: c.name, entry: hit.company, reason: hit.reason });
+    else allowed.push(c);
+  }
+  return { allowed, blacklisted };
+}
+
+/**
+ * The input format documents a bare `website: mollie.com`, which `new URL()`
+ * inside findBlacklistEntry rejects, so a scheme-less value would never reach a
+ * domain-scope entry. Give it one; a value that already has a scheme is kept.
+ */
+function asBlacklistUrl(value) {
+  const v = String(value).trim();
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? v : `https://${v}`;
+}
+
 /** Bounded-concurrency map (mirrors scan-ats-full.mjs parallelEach; not exported there). */
 async function parallelEach(items, limit, fn) {
   let i = 0;
@@ -1016,10 +1056,10 @@ export async function runDiscovery(companies, { vendors = VENDOR_ORDER, ctx, con
 
 // ── Summary output ────────────────────────────────────────────────────
 
-function printSummary({ resolved, unresolved, duplicates, superseded = [], retired = [], written = false }) {
+function printSummary({ resolved, unresolved, duplicates, superseded = [], retired = [], written = false, blacklisted = [] }) {
   console.log(`\n${'='.repeat(78)}`);
   console.log('  ATS Discovery — career-ops');
-  console.log(`  resolved: ${resolved.length} | unresolved: ${unresolved.length} | duplicates skipped: ${duplicates.length}`);
+  console.log(`  resolved: ${resolved.length} | unresolved: ${unresolved.length} | duplicates skipped: ${duplicates.length} | blacklisted skipped: ${blacklisted.length}`);
   console.log(`${'='.repeat(78)}\n`);
 
   if (written && retired.length) {
@@ -1045,6 +1085,14 @@ function printSummary({ resolved, unresolved, duplicates, superseded = [], retir
     for (const u of unresolved) {
       const site = u.website ? ` [${u.website}]` : '';
       console.log(`    - ${u.name}${site}: ${u.reason}`);
+    }
+    console.log('');
+  }
+
+  if (blacklisted.length) {
+    console.log('  Skipped — on data/blacklist.md (never added):');
+    for (const b of blacklisted) {
+      console.log(`    - ${b.name} (matched "${b.entry}")${b.reason ? `: ${b.reason}` : ''}`);
     }
     console.log('');
   }
@@ -1181,7 +1229,7 @@ function runSelfTest() {
   check(inserted.startsWith('title_filter:\n  positive: [a]\n'), 'insert preserves leading bytes');
   check(inserted.includes('job_boards:\n  - name: Foo\n'), 'insert preserves trailing block');
   // idempotency via dedupe: the same board already present → nothing fresh → no insert
-  const parsed = yaml.load(inserted);
+  const parsed = loadYaml(inserted);
   const again = dedupeAgainstPortals([{ name: 'New', careers_url: 'https://jobs.lever.co/new' }], parsed.tracked_companies);
   check(again.fresh.length === 0, 'insert is idempotent through dedupe');
 
@@ -1199,7 +1247,7 @@ function runSelfTest() {
   check(rt.text.includes('job_boards:\n  - name: Foo\n'), 'retireWebsearchTwins preserves the trailing block');
   check(retireWebsearchTwins(twinDoc, ['real co']).retired.length === 0, 'retireWebsearchTwins skips a name that is not a websearch entry');
   check(retireWebsearchTwins(twinDoc, []).text === twinDoc, 'retireWebsearchTwins is a no-op with no names');
-  check(yaml.load(rt.text).tracked_companies.some((e) => e.name === 'Keep Me') && !yaml.load(rt.text).tracked_companies.some((e) => e.name === 'Semgrep'), 'retired twin disappears from parsed tracked_companies, siblings remain');
+  check(loadYaml(rt.text).tracked_companies.some((e) => e.name === 'Keep Me') && !loadYaml(rt.text).tracked_companies.some((e) => e.name === 'Semgrep'), 'retired twin disappears from parsed tracked_companies, siblings remain');
 
   // empty block
   const emptyBlock = insertIntoTrackedCompanies('tracked_companies:\njob_boards:\n  - name: Foo\n', [snippet]);
@@ -1350,85 +1398,102 @@ async function main() {
     // zero-company run gets the documented envelope, not undefined fields.
     const out = {
       metadata: {
-        resolved: 0, unresolved: 0, duplicatesSkipped: 0, fresh: 0, freshWritten: 0,
+        resolved: 0, unresolved: 0, duplicatesSkipped: 0, blacklistedSkipped: 0, fresh: 0, freshWritten: 0,
         written: false, previewOnly: true, portalsPath: PORTALS_PATH, warnings,
       },
-      resolved: [], unresolved: [],
+      resolved: [], unresolved: [], blacklisted: [],
     };
     if (opts.summary) printSummary({ resolved: [], unresolved: [], duplicates: [] });
     else console.log(JSON.stringify(out, null, 2));
     process.exit(0);
   }
 
-  const { resolved, unresolved } = await runDiscovery(companies, { vendors: opts.vendors, includeWorkday: opts.includeWorkday });
+  const blacklist = loadBlacklist(BLACKLIST_PATH);
+  const pre = partitionBlacklisted(companies, blacklist);
+  const discovered = await runDiscovery(pre.allowed, { vendors: opts.vendors, includeWorkday: opts.includeWorkday });
+  const unresolved = discovered.unresolved;
+  // A resolved board's host can hit a domain-scope entry the name did not
+  // (e.g. a company listed under a different name on a blacklisted host).
+  const post = partitionBlacklisted(discovered.resolved, blacklist, (r) => [r.careers_url]);
+  const resolved = post.allowed;
+  const blacklisted = [...pre.blacklisted, ...post.blacklisted];
   // Advisory only: resolution and exit codes are unchanged (#4772).
   flagSmallBoards(resolved, opts.smallThreshold);
 
-  // Dedupe resolved matches against the existing tracker.
-  let existingEntries = [];
-  let titleNets = null;
-  if (existsSync(PORTALS_PATH)) {
-    try {
-      const parsed = yaml.load(readFileSync(PORTALS_PATH, 'utf-8'));
-      existingEntries = Array.isArray(parsed?.tracked_companies) ? parsed.tracked_companies : [];
-      titleNets = parsed?.title_nets && typeof parsed.title_nets === 'object' ? parsed.title_nets : {};
-    } catch (err) {
-      warnings.push(`portals.yml: could not parse for dedupe — ${err.message}`);
+  // Hold the portals lock across dedupe and replacement so concurrent
+  // --write runs merge their discoveries instead of overwriting each other.
+  const updatePortals = () => {
+    // Dedupe resolved matches against the existing tracker.
+    let existingEntries = [];
+    let titleNets = null;
+    if (existsSync(PORTALS_PATH)) {
+      try {
+        const parsed = loadYaml(readFileSync(PORTALS_PATH, 'utf-8'));
+        existingEntries = Array.isArray(parsed?.tracked_companies) ? parsed.tracked_companies : [];
+        titleNets = parsed?.title_nets && typeof parsed.title_nets === 'object' ? parsed.title_nets : {};
+      } catch (err) {
+        warnings.push(`portals.yml: could not parse for dedupe — ${err.message}`);
+      }
     }
-  }
-  // Websearch placeholders are excluded from dedupe, and the ones a match
-  // supersedes hand it their tags (#2891; see planPortalEntries).
-  const { fresh, duplicates, entries, snippets, supersededNames } = planPortalEntries(resolved, existingEntries);
-  // A net portals.yml doesn't define is inert in scan.mjs and an error in
-  // validate-portals.mjs. Say so while the seed is still the obvious fix.
-  const unknownNets = titleNets
-    ? [...new Set(entries.map((e) => e.title_net).filter((n) => n && !Object.hasOwn(titleNets, n)))]
-    : [];
-  if (unknownNets.length) {
-    warnings.push(`title_net ${unknownNets.map((n) => `"${n}"`).join(', ')} names no portals.yml title_nets entry — scan.mjs ignores it; fix the seed or define the net`);
-  }
+    // Websearch placeholders are excluded from dedupe, and the ones a match
+    // supersedes hand it their tags (#2891; see planPortalEntries).
+    const { fresh, duplicates, entries, snippets, supersededNames } = planPortalEntries(resolved, existingEntries);
+    // A net portals.yml doesn't define is inert in scan.mjs and an error in
+    // validate-portals.mjs. Say so while the seed is still the obvious fix.
+    const unknownNets = titleNets
+      ? [...new Set(entries.map((e) => e.title_net).filter((n) => n && !Object.hasOwn(titleNets, n)))]
+      : [];
+    if (unknownNets.length) {
+      warnings.push(`title_net ${unknownNets.map((n) => `"${n}"`).join(', ')} names no portals.yml title_nets entry — scan.mjs ignores it; fix the seed or define the net`);
+    }
 
-  // Data-contract rule: portals.yml is a USER-LAYER file and is NEVER written
-  // unless the user explicitly opts in with --write. The default is preview —
-  // we print the entries we WOULD add and touch nothing. This mirrors how the
-  // rest of career-ops treats user files (see DATA_CONTRACT.md).
-  let written = false;
-  let writeSkipped = false;
-  let retiredTwins = [];
-  if (opts.write && fresh.length && existsSync(PORTALS_PATH)) {
-    const current = readFileSync(PORTALS_PATH, 'utf-8');
-    // Comment out any not-yet-probed websearch placeholder this run supersedes,
-    // THEN splice the real board in — same text so the next byte is preserved.
-    const { text: pruned, retired } = retireWebsearchTwins(current, supersededNames);
-    const next = insertIntoTrackedCompanies(pruned, snippets);
-    // Retired placeholders leave tracked_companies (they become comments), so
-    // the count the spliced file must parse to drops by that many (#5053).
-    const expectedCount = existingEntries.length - retired.length + fresh.length;
-    if (splicedCorrectly(next, expectedCount)) {
-      retiredTwins = retired;
-      // Write-to-temp-then-rename: atomic on the same filesystem, so a crash
-      // mid-write can't leave the user's portals.yml truncated.
-      const tmpPath = `${PORTALS_PATH}.tmp-${process.pid}`;
-      writeFileSync(tmpPath, next, 'utf-8');
-      renameSyncWithRetry(tmpPath, PORTALS_PATH);
-      written = true;
-    } else {
-      // A text splice cannot cover every way tracked_companies can be written.
-      // Rather than leave a portals.yml the scanner cannot parse, keep the file
-      // as it is and print the entries for the user to paste.
-      writeSkipped = true;
-      warnings.push(`--write skipped — splicing into ${PORTALS_PATH} would not leave it as valid YAML with ${expectedCount} tracked_companies entries; the file is unchanged and the entries are shown in pendingEntries to add by hand`);
+    // Data-contract rule: portals.yml is a USER-LAYER file and is NEVER written
+    // unless the user explicitly opts in with --write. The default is preview —
+    // we print the entries we WOULD add and touch nothing. This mirrors how the
+    // rest of career-ops treats user files (see DATA_CONTRACT.md).
+    let written = false;
+    let writeSkipped = false;
+    let retiredTwins = [];
+    if (opts.write && fresh.length && existsSync(PORTALS_PATH)) {
+      const current = readFileSync(PORTALS_PATH, 'utf-8');
+      // Comment out any not-yet-probed websearch placeholder this run supersedes,
+      // THEN splice the real board in — same text so the next byte is preserved.
+      const { text: pruned, retired } = retireWebsearchTwins(current, supersededNames);
+      const next = insertIntoTrackedCompanies(pruned, snippets);
+      // Retired placeholders leave tracked_companies (they become comments), so
+      // the count the spliced file must parse to drops by that many (#5053).
+      const expectedCount = existingEntries.length - retired.length + fresh.length;
+      if (splicedCorrectly(next, expectedCount)) {
+        retiredTwins = retired;
+        // Write-to-temp-then-rename: atomic on the same filesystem, so a crash
+        // mid-write can't leave the user's portals.yml truncated.
+        const tmpPath = `${PORTALS_PATH}.tmp-${process.pid}`;
+        writeFileSync(tmpPath, next, 'utf-8');
+        renameSyncWithRetry(tmpPath, PORTALS_PATH);
+        written = true;
+      } else {
+        // A text splice cannot cover every way tracked_companies can be written.
+        // Rather than leave a portals.yml the scanner cannot parse, keep the file
+        // as it is and print the entries for the user to paste.
+        writeSkipped = true;
+        warnings.push(`--write skipped — splicing into ${PORTALS_PATH} would not leave it as valid YAML with ${expectedCount} tracked_companies entries; the file is unchanged and the entries are shown in pendingEntries to add by hand`);
+      }
+    } else if (opts.write && fresh.length && !existsSync(PORTALS_PATH)) {
+      warnings.push(`--write given but portals.yml not found at ${PORTALS_PATH} — printing entries instead`);
+    } else if (!opts.write && fresh.length) {
+      warnings.push(`preview only — ${fresh.length} new entr${fresh.length === 1 ? 'y' : 'ies'} shown in pendingEntries; re-run with --write to append them to portals.yml`);
     }
-  } else if (opts.write && fresh.length && !existsSync(PORTALS_PATH)) {
-    warnings.push(`--write given but portals.yml not found at ${PORTALS_PATH} — printing entries instead`);
-  } else if (!opts.write && fresh.length) {
-    warnings.push(`preview only — ${fresh.length} new entr${fresh.length === 1 ? 'y' : 'ies'} shown in pendingEntries; re-run with --write to append them to portals.yml`);
-  }
+    return { fresh, duplicates, snippets, written, writeSkipped, retiredTwins, supersededNames };
+  };
+  const { fresh, duplicates, snippets, written, writeSkipped, retiredTwins, supersededNames } = opts.write
+    ? await withPipelineLock(PORTALS_PATH, updatePortals)
+    : updatePortals();
 
   const metadata = {
     resolved: resolved.length,
     unresolved: unresolved.length,
     duplicatesSkipped: duplicates.length,
+    blacklistedSkipped: blacklisted.length,
     fresh: fresh.length,
     freshWritten: written ? fresh.length : 0,
     supersededWebsearchTwins: supersededNames,
@@ -1451,9 +1516,9 @@ async function main() {
     // unattended: a mistyped seed title_net would otherwise drop the net silently,
     // and so would a --write that was skipped to keep portals.yml valid (#5053).
     for (const w of warnings.filter((x) => /title_net|^--write skipped/.test(x))) console.error(`⚠️  ${w}`);
-    printSummary({ resolved, unresolved, duplicates, superseded: writeSkipped ? [] : supersededNames, retired: retiredTwins, written });
+    printSummary({ resolved, unresolved, duplicates, superseded: writeSkipped ? [] : supersededNames, retired: retiredTwins, written, blacklisted });
   } else {
-    const out = { metadata, resolved, unresolved };
+    const out = { metadata, resolved, unresolved, blacklisted };
     // Show the would-be YAML whenever we didn't write it (preview, or --write
     // that couldn't find the file), so the user can paste it manually.
     if (!written) out.pendingEntries = snippets.join('');

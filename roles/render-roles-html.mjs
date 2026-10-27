@@ -24,7 +24,8 @@
 
 import { readFileSync, writeFileSync } from 'fs';
 import path from 'path';
-import * as yaml from 'js-yaml';
+import { loadYaml } from '../lib/yaml-document.mjs';
+import { getProfilePath } from '../path-resolver.mjs';
 import { buildRoleModel } from './roles-model.mjs';
 
 const args = process.argv.slice(2);
@@ -36,7 +37,7 @@ const OUT = path.resolve(flag('--out', '../roles.html'));
 // Candidate-specific text is read from config/profile.yml, never hardcoded here.
 // No profile yet → a generic title and no keyword chips.
 let profile = {};
-try { profile = yaml.load(readFileSync(path.join(ROOT, 'config/profile.yml'), 'utf-8')) ?? {}; } catch { /* generic page */ }
+try { profile = loadYaml(readFileSync(getProfilePath(), 'utf-8')) ?? {}; } catch { /* generic page */ }
 const strList = (v) => (Array.isArray(v) ? v.map((x) => String(x ?? '').trim()).filter(Boolean) : []);
 const targetRoles = strList(profile.target_roles?.primary);
 const PAGE_TITLE = targetRoles.length ? targetRoles.slice(0, 3).join(' · ') : 'Job Search Roles';

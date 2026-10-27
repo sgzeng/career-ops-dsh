@@ -161,12 +161,12 @@ export default {
  *   `url_comeet_hosted_page` (the Comeet-hosted page). Both are public, display-
  *   only URLs (recorded in the pipeline/history, never server-fetched here), so
  *   they are NOT host-locked. Require a well-formed https: URL; a position whose
- *   URL is missing/non-https/malformed is dropped (url is the dedup key).
+ *   two URLs are both missing/non-https/malformed is dropped (url is the dedup key).
  *   A `url_active_page` shared by several positions is a generic careers-index
  *   link, not a posting page (Noma Security: 16 of 28 positions carry
  *   "https://noma.security/careers/"). Used as the url it would dedup every
- *   later sibling away, so those positions use their per-position
- *   `url_comeet_hosted_page` instead.
+ *   later sibling away, so those positions try their per-position
+ *   `url_comeet_hosted_page` first.
  * - location: `location.name`, appending "Remote" when `location.is_remote`.
  * - description: from `details` (present because fetch() asks for
  *   details=true), see detailsToText. Omitted when no section has usable text.
@@ -189,14 +189,19 @@ export function parseComeetResponse(json, companyName) {
       // Resolve a display-only https URL; drop the position if none is usable.
       let url = '';
       const sharedActivePage = activePageCount.get(j.url_active_page) > 1;
-      const rawUrl = (sharedActivePage && j.url_comeet_hosted_page)
-        || j.url_active_page || j.url_comeet_hosted_page || '';
-      if (typeof rawUrl === 'string' && rawUrl) {
+      const candidates = sharedActivePage
+        ? [j.url_comeet_hosted_page, j.url_active_page]
+        : [j.url_active_page, j.url_comeet_hosted_page];
+      for (const rawUrl of candidates) {
+        if (typeof rawUrl !== 'string' || !rawUrl) continue;
         try {
           const parsed = new URL(rawUrl);
-          if (parsed.protocol === 'https:') url = parsed.href;
+          if (parsed.protocol === 'https:') {
+            url = parsed.href;
+            break;
+          }
         } catch {
-          // malformed URL → leave url = ''
+          // malformed active URL → try the hosted fallback
         }
       }
 

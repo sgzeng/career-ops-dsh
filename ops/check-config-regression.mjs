@@ -62,7 +62,7 @@ if (!existsSync(values.fixtures)) {
 // scan.mjs creates data/ relative to cwd at import time; pin cwd to the repo root.
 process.chdir(ROOT);
 const load = (rel) => import(pathToFileURL(join(ROOT, rel)).href);
-const yaml = await import('js-yaml');
+const { loadYaml } = await load('lib/yaml-document.mjs');
 const { classifyTier } = await load('classify-tier.mjs');
 const { buildLocationFilter, buildScanTitleFilter, buildVisaFilter } = await load('scan.mjs');
 const { buildLevelFilter } = await load('lib/level-filter.mjs');
@@ -70,7 +70,7 @@ const { buildLevelFilter } = await load('lib/level-filter.mjs');
 let config;
 let fixtures;
 try {
-  config = yaml.load(readFileSync(values.portals, 'utf-8'));
+  config = loadYaml(readFileSync(values.portals, 'utf-8'));
   fixtures = JSON.parse(readFileSync(values.fixtures, 'utf-8'));
 } catch (err) {
   console.error(`check-config-regression: ${err.message}`);
