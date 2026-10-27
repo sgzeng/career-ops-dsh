@@ -74,6 +74,7 @@ import { buildCompanyIdentity, isRedundantTitleQualifier } from './identity-key.
 import { withPipelineLock } from './pipeline-lock.mjs';
 import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldAccents } from './title-keywords.mjs';
 import { buildContentRescue, buildMustCatch } from './lib/content-rescue.mjs';
+import { buildCampusTrack } from './lib/campus-track.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
 import { fetchJobDescription } from './lib/jd-text.mjs';
 import {
@@ -4303,6 +4304,10 @@ async function main() {
   // content_rescue.must_catch: >= N distinct listed concepts in the description always pass
   // the title and content gates (lib/content-rescue.mjs buildMustCatch).
   const mustCatch = buildMustCatch(config.content_rescue?.must_catch);
+  // Optional (lib/campus-track.mjs): a new-grad / PhD-graduate title at a tracked
+  // company passes the title, tier, age/--since and content gates built for
+  // experienced hires. Title negatives and the location / visa gates still apply.
+  const campus = buildCampusTrack(config.campus_track, Date.now(), config.title_nets);
   const titleNotVetoed = buildTitleFilter({ negative: config.title_filter?.negative });
   // Optional (lib/level-filter.mjs): a Staff/Principal/Distinguished title is
   // dropped only when its JD requires level_filter.min_years+ or a team lead;
@@ -4492,6 +4497,10 @@ async function main() {
   let totalFound = 0;
   let totalFilteredTitle = 0;
   let totalContentRescued = 0;
+  let totalCampus = 0;
+  let totalCampusNetFiltered = 0;
+  let totalCampusDegreeFetched = 0;
+  const campusDegreeDropped = [];
   let totalFilteredLevel = 0;
   let totalLevelUnchecked = 0;
   let totalLevelFetched = 0;
@@ -4687,9 +4696,26 @@ async function main() {
         // pass the remaining declared fields.
         let failedField = null;
         let sawAbsentField = false;
+        // Per entry: `campus_track: false` turns the track off; `widen_only` keeps the
+        // normal title gate (title_filter + the entry's title_net) and only widens the
+        // later gates, for a big board whose every campus req would otherwise pass.
+        const campusMode = company.campus_track === false ? 'off' : company.campus_track === 'widen_only' ? 'widen_only' : 'full';
+        const campusMarker = campus && campusMode !== 'off' && !company._isBoard && titleNotVetoed(job.title) ? campus.match(job.title) : null;
+        // campus_track.company_nets: a campus title at a listed employer (ByteDance /
+        // TikTok, from any source) must hit that employer's title net, or it is dropped.
+        if (campusMarker && !campus.netGate(`${job.company || ''} ${company.name || ''}`, job.title)) {
+          totalCampusNetFiltered++;
+          totalFilteredTitle++;
+          continue;
+        }
+        if (campusMarker) {
+          totalCampus++;
+          job.campus = campusMarker;
+          job.note = typeof job.note === 'string' && job.note.trim() ? `${job.note} — campus: ${campusMarker}` : `campus: ${campusMarker}`;
+        }
         for (const field of declaredFields) {
           if (field === 'title') {
-            if (!titleFilter(job.title, company._isBoard ? undefined : company.title_net)) {
+            if (!(campusMarker && campusMode === 'full') && !titleFilter(job.title, company._isBoard ? undefined : company.title_net)) {
               const vetoOk = titleNotVetoed(job.title);
               const rescued = rescue && vetoOk ? rescue.check(job) : null;
               const mustHit = !rescued && rescue && vetoOk ? rescue.mustCatch(job) : null;
@@ -4715,9 +4741,12 @@ async function main() {
           continue;
         }
         if (sawAbsentField) totalPassedFieldAbsent++;
-        if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
-          totalFilteredTier++;
-          continue;
+        if (classifyTier) {
+          const tier = classifyTier(job.title);
+          if (skipTiers.includes(tier) && !(campusMarker && campus.keepsTier(tier))) {
+            totalFilteredTier++;
+            continue;
+          }
         }
         // job.title is passed so a role whose remoteness is stated in the title
         // ("Program Manager - Remote") isn't rejected for a city-only location.
@@ -4726,12 +4755,12 @@ async function main() {
           if (!dryRun) locationFilteredOffers.push({ ...job, source: sourceName });
           continue;
         }
-        if (!companyAgeFilter(job.postedAt)) {
+        if (campusMarker ? !campus.inWindow(job.postedAt) : !companyAgeFilter(job.postedAt)) {
           totalFilteredPostingAge++;
           if (!dryRun) ageFilteredOffers.push({ ...job, source: sourceName });
           continue;
         }
-        if (!companyDateFilter(job.postedAt)) {
+        if (!campusMarker && !companyDateFilter(job.postedAt)) {
           totalFilteredPostedDate++;
           continue;
         }
@@ -4739,7 +4768,29 @@ async function main() {
           totalFilteredSalary++;
           continue;
         }
-        if (!(mustCatch && mustCatch(job.description)) && !contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
+        if (campusMarker && campus.degree) {
+          // degree_filter: drop the undergrad-only campus channels. A listing with no
+          // JD is read once (budgeted, fail-open, skipped for a URL already seen);
+          // the visa gate below then reuses the text.
+          const degreeFetchMax = Number.isFinite(config.campus_track?.degree_filter?.fetch_jd_max_per_run)
+            ? config.campus_track.degree_filter.fetch_jd_max_per_run
+            : 60;
+          if (campus.degree.fetchJd && !(typeof job.description === 'string' && job.description.trim())
+              && totalCampusDegreeFetched < degreeFetchMax
+              && !seenUrls.has(normalizeUrlForDedup(job.url))) {
+            totalCampusDegreeFetched++;
+            let fetchedJd = null;
+            try { fetchedJd = await fetchJobDescription(job.url); } catch { /* keep */ }
+            if (typeof fetchedJd === 'string' && fetchedJd.trim()) job.description = fetchedJd;
+          }
+          const degree = campus.degree.verdict(job.title, job.description);
+          if (!degree.keep) {
+            campusDegreeDropped.push(`${job.company || company.name} | ${job.title} | ${job.url} — ${degree.reason}`);
+            continue;
+          }
+          if (degree.reason === 'JD unread') job.note = `${job.note} — campus-degree: JD unread`;
+        }
+        if (!(campusMarker && campus.bypassContent) && !(mustCatch && mustCatch(job.description)) && !contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
           continue;
         }
@@ -5084,6 +5135,16 @@ async function main() {
   if (contentRescue) {
     const rescuedNew = verifiedOffers.filter(o => o.contentRescue).length;
     console.log(`Content-rescued:       ${totalContentRescued} title misses kept on description evidence (${rescuedNew} new)`);
+  }
+  if (campus) {
+    const campusNew = verifiedOffers.filter(o => o.campus).length;
+    console.log(`Campus track:          ${totalCampus} new-grad/PhD titles matched (${campusNew} new, ${campus.windowDays}-day window)`);
+    if (totalCampusNetFiltered) console.log(`Campus net-filtered:   ${totalCampusNetFiltered} campus titles missed their employer's net (company_nets)`);
+    if (campus.degree) {
+      const fetched = totalCampusDegreeFetched ? ` — ${totalCampusDegreeFetched} JDs fetched` : '';
+      console.log(`Campus degree-filtered: ${campusDegreeDropped.length} undergrad-only removed${fetched}`);
+      for (const line of campusDegreeDropped) console.log(`  - ${line}`);
+    }
   }
   if (levelFilter) {
     const extra = [

@@ -18,6 +18,8 @@
 // recent slice. result_limit is fixed at 100 (the API's hard per-page max;
 // larger values return an empty `jobs`), and we page via `offset`.
 
+import { htmlToText, FULL_DESCRIPTION_CAP } from './_html-to-text.mjs';
+
 const PAGE_SIZE = 100; // amazon.jobs caps result_limit at 100
 const MAX_PAGES = 20; // safety cap — at most 2000 postings per entry
 const ORIGIN = 'https://www.amazon.jobs';
@@ -127,6 +129,15 @@ export default {
           company: j.company_name || entry.name,
           location: formatLocation(j),
           postedAt: toEpochMs(j),
+          // Fork-local, opt-in per entry: the list payload already carries the JD and
+          // qualifications. Off by default, because a description subjects the job to
+          // content_filter, which the security-query entries were never tuned for.
+          ...(entry.include_description === true ? {
+            description: htmlToText(
+              [j.description, j.basic_qualifications, j.preferred_qualifications].filter(Boolean).join('<br/>'),
+              FULL_DESCRIPTION_CAP,
+            ),
+          } : {}),
         });
       }
       if (fresh === 0) break; // API ignored offset / looped

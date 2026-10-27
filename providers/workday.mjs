@@ -842,8 +842,12 @@ export default {
         referer: `${ep.jobBase}/`,
       },
     };
-    const makeBody = (offset, appliedFacets) => JSON.stringify({ limit: PAGE_SIZE, offset, searchText: '', appliedFacets });
-    const sinceMs = typeof ctx?.sinceMs === 'number' ? ctx.sinceMs : null;
+    // Fork-local: `search_text` runs the board's own keyword search (e.g. "new
+    // college grad" on a 2,000-posting tenant). Results then come back by
+    // relevance, not date, so the posted-date early stop is off for that entry.
+    const searchText = typeof entry.search_text === 'string' ? entry.search_text.trim() : '';
+    const makeBody = (offset, appliedFacets) => JSON.stringify({ limit: PAGE_SIZE, offset, searchText, appliedFacets });
+    const sinceMs = typeof ctx?.sinceMs === 'number' && !searchText ? ctx.sinceMs : null;
     const maxPages = resolveMaxPages(entry);
 
     // Honor a context page cap — verify-portals' liveness probe sets
