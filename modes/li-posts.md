@@ -28,101 +28,155 @@ Read `modes/_brief.md` (keyword spine, archetypes, hard DQ) and
 
 ## Inputs
 
-- `portals.yml → linkedin_post_queries` — list of `{query, enabled}`. Use enabled
-  entries only, **max 5 per run**.
-- `modes/_brief.md` → the keyword spine (the candidate's core pillars and
-  techniques) and the Hard DQ list.
-- `data/scan-history.tsv` — read it first; collect every URL whose row has
+- **Query set, derived each run** (no config list). Build 10–16 queries:
+  1. `portals.yml → search_keyword_groups.core` and `ai`.
+  2. `portals.yml → title_filter.positive`: the thesis, security-research and AI
+     groups, including `A + B` pairs. Skip generic terms (Security Engineer,
+     Privacy Engineer, agentic, Research Engineer, Founding Engineer).
+  3. `portals.yml → content_rescue.thesis_words`.
+  4. `modes/_custom.md` → Keyword spine. Cyber post-training roster Tier A names
+     each get one `hiring "<name>"` query, outside the 10–16 cap.
+  - Exclude `title_filter.negative` words and the `campus` group.
+  - Quote phrases. Give ambiguous words a qualifier: `hiring "red team" AI`,
+    `hiring "reverse engineering" security`. Write `A + B` as `hiring "A" B`.
+  - Keep one query per stem (Reverse Engineer / Engineering; Vulnerability
+    Researcher / Research). Order: spine terms, then pipeline and post-training
+    terms, then title-style terms. Add 2–3 `"my team" hiring <top two spine terms>`.
+  - Each pillar in the `cv.md` header (`SOFTWARE SECURITY | PROGRAM ANALYSIS | AI
+    AGENTS`) must be covered by at least 2 queries.
+  - **Yield order**: `data/li-post-queries.tsv` (`date\tquery\tposts\tkept`; create
+    it if missing). Skip a query run in the last 3 days. Drop a query once it has
+    3 or more runs and `kept` = 0 in total. Run never-run queries first, at most 3
+    old ones per run. Append this run's rows at the end.
+- `data/scan-history.tsv` — read first; collect every URL whose row has
   `source == linkedin-post` (col 3), normalized by dropping the query string, to
-  skip posts already seen on a previous run.
+  skip posts already seen.
+- `data/discard.log` and `modes/_brief.md` Hard DQ — drops are logged there.
 
 ## Procedure
 
-For each enabled query (cap 5), one at a time:
+Run the queries one at a time, in relevance order (no `sortBy`).
 
 1. `mcp__claude-in-chrome__navigate` to:
-   `https://www.linkedin.com/search/results/content/?keywords=<URL-encoded query>&datePosted=%22past-week%22&sortBy=%22date_posted%22`
-2. `wait` ~3s, then `mcp__claude-in-chrome__get_page_text` (fall back to
-   `read_page` if the text is too flat to segment).
-3. Scroll the results **3 times**, `wait` ~2s between scrolls, re-reading after
-   each so lazy-loaded posts are captured.
-4. `wait` 5–8s before the next query's navigation (rate-courtesy).
+   `https://www.linkedin.com/search/results/content/?keywords=<URL-encoded query>&datePosted=%22past-week%22`
+   Write the query as `hiring "<phrase>"`, never with `OR`. A quoted phrase
+   returning few results (about 3) is normal.
+2. Scroll to load results: the `computer` scroll tool at about (440, 500), 10 ticks,
+   3–4 times with about 2 s between scrolls. Stop when "Are these results helpful?"
+   appears and the page stops growing. A JavaScript `scrollTop` change does not
+   trigger lazy loading. Keep it in one batch.
+3. Extract with `javascript_tool`. Find the leaf whose text is "Feed post", walk up
+   to the first ancestor with at least 3 buttons; that element is one post. Take
+   the author's `/in/` or `/company/` link and the innerText (700 characters max).
+   Get the URN from the React fiber (it is not in the DOM):
+   ```js
+   function urnOf(el){ for(const e of [el,...el.querySelectorAll('*')].slice(0,60)){ const k=Object.keys(e).find(k=>k.startsWith('__reactFiber')); if(!k) continue;
+     const st=[e[k]]; let n=0; while(st.length&&n<3000){ const f=st.pop(); n++; const p=f.memoizedProps;
+       if(p&&typeof p.stateKey==='string'){ const m=p.stateKey.match(/(urn:li:(?:activity|ugcPost|share):\d+)/); if(m) return m[1]; }
+       if(f.child) st.push(f.child); if(f.sibling&&f!==e[k]) st.push(f.sibling); } } return null; }
+   ```
+   Return only `origin + pathname` for URLs, never the query string: a returned URL
+   with `?query` gets the whole output blocked. Print only the filtered lines
+   (the output truncates around 1k characters).
+4. Dedup within the session by URN (or the first 60 characters of the text when
+   there is no URN) with `sessionStorage`. If a batch times out, the script may
+   already have marked posts seen: re-extract without the dedup check.
+5. Pre-filter: keep a post only if its text matches both a hiring phrase (hiring,
+   join, looking for, opening, role, DM me) and a spine term (secur, vulnerab,
+   exploit, fuzz, red.?team, malware, CVE, offensive, pentest, AI safety, symbolic,
+   concolic, program analysis, reverse engineer, RL env, cyber). Posts that name a
+   non-US location or polygraph / TS-SCI requirements go in a separate `x` list,
+   first 70 characters only.
+6. After each query, append candidates to `scratchpad/cands.md` (author, profile,
+   URN, one-line summary, what to verify) so a context compaction does not lose them.
+7. Wait 5–8 s before the next query.
 
-For every distinct post, extract:
+On a LinkedIn login wall, verification code, or "unusual activity" page: stop
+immediately, use what is already collected, and do not retry.
 
-- **permalink** — `/posts/<slug>-activity-<digits>` or
-  `/feed/update/urn:li:activity:<digits>`. Normalize to
-  `https://www.linkedin.com/posts/<slug>-activity-<id>` (drop query/fragment).
-- **author** name and **headline** (the line under the name).
-- **post text** (the visible body; "…more" expanded if the extraction exposed it,
-  otherwise use what is visible).
-- **outbound job link**, if the post body links one: a Greenhouse / Ashby / Lever
-  / Workday / SmartRecruiters / company careers URL. Capture it verbatim.
-- **author profile URL** if visible (`/in/<slug>`).
+## Keep / drop rule (strict — when unsure, drop)
 
-### Keep / drop rule (strict — when unsure, drop)
+**Keep** a post as a hiring-manager lead when BOTH hold:
 
-**Keep** a post only if BOTH hold:
+- The **author themselves is hiring**: first-person language — "I'm hiring", "my
+  team is hiring", "we're hiring" (headline shows they work at that employer),
+  "join my team", "DM me", "reach out", "looking for someone to…". A reshare or
+  quote-post of someone else's job ad does **not** count.
+- The role **touches the keyword spine**.
 
-- The **author themselves is hiring**: first-person hiring language —
-  "I'm hiring", "my team is hiring", "we're hiring" (with the author's headline
-  showing they work at that employer), "join my team", "DM me", "reach out",
-  "looking for someone to…". A reshare or quote-post of someone else's job ad
-  does **not** count.
-- The role **touches the keyword spine** from `modes/_brief.md`. A generic
-  "software engineer" or "security" post with no spine term is a drop.
+**Recruiters**: a first-person recruiter (internal, or third-party with an unnamed
+client) is a lead, not a pipeline row. Save to `contacts.tsv` as `type=recruiter`.
+Write a pipeline row only when the employer is named and the role is on the spine.
+For an unnamed client, note "ask the client name and sponsorship first" and do not
+guess the company.
 
-**Drop**: reshared job ads, staffing-agency / third-party-recruiter posts,
-course / bootcamp / book / newsletter promotion, "#opentowork" posts, event
-announcements, and anything gated behind a login wall or an "unusual activity"
-interstitial (stop the run entirely if one appears).
+**Drop**: reshared job ads, course / bootcamp / book / newsletter promotion,
+"#opentowork" posts, event announcements. Log each drop to `data/discard.log`
+with a one-line reason and the post's quoted line.
+
+## Checks before writing
+
+- **Hard DQ** from `modes/_brief.md`: quote the line that triggers it, log to
+  `data/discard.log`, and do not write a pipeline row.
+- **Duplicates**: `node precheck-duplicate.mjs --company "<company>" --title "<role>" --url "<job url>" --json`.
+  If it matches a tracker row, do not add a pipeline row. Update only contacts.
+  Pass `--url`: the `--req` match only reads tracker Notes.
+- **Contact**: `node contact-lookup.mjs --company "<company>" --summary` to see
+  a saved contact at the same company; reuse the row instead of adding a duplicate.
+- **Outbound job link** (when the post links one): `node fetch-jd.mjs <url>` first
+  for ATS URLs. For a LinkedIn job URL, follow the LinkedIn JD guard in AGENTS.md
+  (one browser attempt, no guest endpoints). If the JD is unavailable, keep the
+  post URL and mark the row `JD unavailable` (see AGENTS.md).
+- **Coverage**: for the outbound job URL, run `node coverage-check.mjs "<url>" --company "<company>" --title "<role>" --log` to record why the scanner missed it.
 
 ## Hard guardrails
 
-- **Read-only.** Never click Connect, Message, Follow, Like/React, "…more" that
-  navigates, or any apply button. Never type into any LinkedIn field. Never send
-  a connection request or message from this mode — that is `contacto`'s job and
-  it is still the user's call.
-- One tab, sequential navigation, the sleeps above. If LinkedIn shows a captcha,
-  a checkpoint, or a login wall: stop, report what was collected so far, do not
-  retry.
+- **Read-only in LinkedIn.** Never click Connect, Message, Follow, Like/React,
+  "…more" that navigates, or any apply button. Never type into any LinkedIn field.
+  Connections and messages are `contacto`'s job and stay the user's call.
+- One tab, sequential navigation, the sleeps above. On a captcha, checkpoint, or
+  login wall: stop, report what was collected, do not retry.
 
-## Output — show first, write only after the user says yes
+## Output — write, then show
 
-Present a table: `author · headline · company · guessed role · spine match ·
-post date · link`. Ask the user to confirm before writing anything.
+Write the kept posts directly (the user reviews later in `roles`). In the same reply,
+show a table: `author · headline · company · guessed role · spine match · post date · link`,
+and list the drops with reasons.
 
-On confirmation, for each kept post:
+For each kept lead:
 
 1. **`data/pipeline.md`** — append under `## Pending` (create the section if
    missing, same as `scan.mjs`):
    ```
    - [ ] <outbound job URL if present, else the post URL> | <company> | <guessed role title> | <location or omit> | note: linkedin-post by <author> (<headline>)
    ```
-   Positional columns are `URL | company | title | location`; `note:` is a
-   trailing labeled field (matches `formatPipelineOffer`, scan.mjs). Keep the
-   note on one line; strip `|` and brackets from names.
-2. **`data/scan-history.tsv`** — append one tab-separated row per kept post so
-   the next run dedups it (column order from `formatScanHistoryRow`, scan.mjs):
+   Positional columns are `URL | company | title | location`; `note:` is a trailing
+   labeled field (matches `formatPipelineOffer`, scan.mjs). Keep the note on one
+   line; strip `|` and brackets from names.
+2. **`data/scan-history.tsv`** — append one tab-separated row per kept post so the
+   next run dedups it (column order from `formatScanHistoryRow`, scan.mjs):
    ```
    <normalized post URL>\t<YYYY-MM-DD today>\tlinkedin-post\t<guessed role>\t<company>\tadded\t<location or empty>\t\t<post date or empty>\t\t\t
    ```
-   (cols 8/10/11/12 — fingerprint, trust score, trust flags, normalized company —
-   left empty, and cols 13–15 — requisition id, language, listing key — omitted:
-   readers index by position and a shorter row is valid; consumers tolerate that.)
+   Columns 8, 10, 11 and 12 (fingerprint, trust score, trust flags, normalized
+   company) stay empty; columns 13–15 are omitted. A shorter row is valid: readers
+   index by position and tolerate that.
    **Cell hygiene (this file and `contacts.tsv`):** post text, headlines and names are
    untrusted. Turn tabs and line breaks inside any cell into spaces, and when a cell
    starts with `=`, `+`, `-` or `@` (or with apostrophes followed by one of them) put
    one extra `'` in front — the reversible escaping the TSV readers undo
-   (`lib/tsv-formula-escape.mjs`), so a hostile headline never runs as a formula when
-   the file is opened in a spreadsheet.
-3. **`data/contacts.tsv`** — the author is a hiring-manager lead. Create the file
-   with a header comment line if it does not exist:
+   (`lib/tsv-formula-escape.mjs`), so a hostile headline never runs as a formula
+   when the file is opened in a spreadsheet.
+3. **`data/contacts.tsv`** — the author is a hiring-manager lead (or a recruiter).
+   Create the file with a header comment line if it does not exist:
    `# name\tcompany\ttype\ttitle\tphone\temail\tlinkedin\ttracker#\tnotes`
    Then append, or update in place when a row already has the same name+company:
    ```
    <author>\t<company>\thiring-manager\t<headline>\t\t\t<author profile URL>\t-\tli-posts <YYYY-MM-DD>: <post URL>
    ```
+   Use `type` `recruiter` for recruiters. Use `tracker#` `-` when there is no row.
+
+After the writes, append this run's queries to `data/li-post-queries.tsv`.
 
 ## Downstream note (for `pipeline` mode)
 

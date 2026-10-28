@@ -6,6 +6,9 @@
 #
 #   1. scan.mjs           — the curated watchlist in portals.yml → tracked_companies.
 #   2. verify-portals.mjs — re-probes every tracked slug (silent-404 catcher).
+#      Then a read-only health digest (detect-reposts, stats; monthly on the
+#      first week: filter-audit, close-stale dry run, reeval-candidates,
+#      audit-portals). Advisory only: a failure logs WARN and never stops the scan.
 #   3. discover-ats.mjs against data/seeds/*.yml — resolves any seed list
 #      (e.g. conference sponsors, a VC portfolio) to real ATS boards and
 #      promotes the ones that resolve into portals.yml → tracked_companies, so
@@ -139,6 +142,32 @@ digits_or() {
   echo "--- slug sweep: verify-portals.mjs ---"
   node verify-portals.mjs
   echo "verify-portals.mjs exit=$?"
+
+  # Health digest. Every tool here only reads (close-stale without --confirm is
+  # a dry run), so a failure is a WARN line and nothing else. The monthly block
+  # runs in the first week of the month; CAREER_OPS_MONTHLY_DIGEST=1 forces it.
+  echo "--- health digest: detect-reposts ---"
+  node detect-reposts.mjs --summary || echo "WARN: detect-reposts.mjs failed"
+  echo "--- health digest: stats ---"
+  node stats.mjs --summary || echo "WARN: stats.mjs failed"
+  if [ "$(date +%d)" -le 7 ] || [ "${CAREER_OPS_MONTHLY_DIGEST:-0}" = "1" ]; then
+    echo "--- monthly digest: filter-audit ---"
+    node filter-audit.mjs --summary || echo "WARN: filter-audit.mjs failed"
+    echo "--- monthly digest: close-stale (dry run) ---"
+    node close-stale.mjs --summary || echo "WARN: close-stale.mjs failed"
+    echo "--- monthly digest: reeval-candidates ---"
+    node reeval-candidates.mjs --status Evaluated,Applied --summary || echo "WARN: reeval-candidates.mjs failed"
+    echo "--- monthly digest: audit-portals (network, one fetch per enabled board) ---"
+    audit_prev="data/portal-audit.json"
+    audit_args=(--json)
+    [ -f "$audit_prev" ] && audit_args+=(--baseline "$audit_prev")
+    if node audit-portals.mjs "${audit_args[@]}" > "$audit_prev.tmp"; then
+      mv "$audit_prev.tmp" "$audit_prev"
+    else
+      rm -f "$audit_prev.tmp"
+      echo "WARN: audit-portals.mjs failed; baseline kept at $audit_prev"
+    fi
+  fi
 
   # Resolve any seed list in data/seeds/ (e.g. Black Hat sponsors) against live
   # ATS boards and promote hits into portals.yml. --write is additive and

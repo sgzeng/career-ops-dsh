@@ -195,7 +195,7 @@ const KNOWN_TOP_LEVEL = new Set([
   'scan_history', 'location_filter', 'visa_filter', 'country_eligibility_filter',
   'max_posting_age_days', 'trust_filter', 'skip_tiers', 'title_filter',
   'title_filter_full', 'title_filter_overrides', 'title_nets', 'content_filter', 'content_rescue', 'campus_track', 'level_filter', 'salary_filter', 'search_keyword_groups',
-  'search_queries', 'linkedin_post_queries', 'tracked_companies', 'job_boards',
+  'search_queries', 'tracked_companies', 'job_boards',
   'interamt_searches', 'hn_hiring', 'first_scan_backfill',
   'field_filters', 'company_aliases', 'portal_health_threshold', // upstream: scan.mjs #3438 field gates, aliasing, health
   'domain_filter', // upstream: scan-ats-full.mjs board gate (#3105), validated in the domain_filter block below
