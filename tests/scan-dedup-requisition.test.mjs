@@ -63,6 +63,8 @@ const trackerWith = (notes, { company = 'UBC', role = 'Programmer Analyst I' } =
     [{ text: 'req REQ-2026-10' }, ['REQ-2026-10'], 'a two-digit tail on a hyphenated base is part of the ID: one form (#3882)'],
     [{ url: 'https://careers.walmart.com/us/en/job/R-2593225' }, [], 'non-Workday URL is not parsed as a requisition'],
     [{ url: 'https://job-boards.greenhouse.io/acme/jobs/4244715009' }, [], 'generic board posting id is not a requisition'],
+    [{ url: 'https://www.google.com/about/careers/applications/jobs/results/142151103343928006' }, ['142151103343928006'], 'Google careers job id in the URL path is the requisition'],
+    [{ url: 'https://www.google.com/about/careers/applications/jobs/results/106411382320046790-software-engineer' }, ['106411382320046790'], 'Google slugged URL yields the same id as the id-only form'],
     [{ text: 'remote Canada; base CAD 140K' }, [], 'unlabelled note'],
   ];
   for (const [input, want, label] of cases) {

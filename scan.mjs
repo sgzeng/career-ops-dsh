@@ -2951,6 +2951,15 @@ export function requisitionIdsForDedup({ url, text, requisitionId } = {}) {
   const suppliedId = typeof requisitionId === 'string' ? requisitionId.trim() : '';
   const workdayKey = !suppliedId && typeof url === 'string' ? workdayDedupKey({ url }) : null;
   if (suppliedId) return [normalizeScanScalar(suppliedId).toUpperCase()];
+  // Fork-local. Google's job id is its requisition id and lives only in the URL
+  // path. Without this, a role Google re-lists under a new id (same title, same
+  // city) was dropped as a duplicate of the old posting for good — even when the
+  // old one had been triaged on a title with no JD text (Software Engineer,
+  // Program Analysis, Mobile Threat Analysis Platform, 2026-10-28).
+  const googleId = !suppliedId && typeof url === 'string'
+    ? url.match(/^https?:\/\/(?:www\.)?google\.com\/about\/careers\/applications\/jobs\/results\/(\d+)/i)?.[1]
+    : null;
+  if (googleId) return [googleId];
   let raws;
   if (workdayKey) {
     // `workday:{hostname}:{reqId}` — a hostname has no colon, so the ID is
