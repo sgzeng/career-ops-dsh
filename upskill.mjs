@@ -113,6 +113,7 @@ const LOW_FIT_SCORE = 4.0;
 import { extractSkills } from './skill-extract.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { matchMachineSummary, stripArchivedJd } from './report-format.mjs';
+import { browserLaunchOptions } from './lib/browser-launch.mjs';
 export { extractSkills };
 
 // --- Known-skills text assembly ---
@@ -895,7 +896,7 @@ if (isMain) {
         try {
           const secureUrl = await validateUrlSecurity(inputSource);
           const { chromium } = await import('playwright');
-          browser = await chromium.launch({ headless: true });
+          browser = await chromium.launch(browserLaunchOptions({ headless: true }));
           const page = await browser.newPage();
 
           await page.route('**/*', async (route) => {

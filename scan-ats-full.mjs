@@ -60,6 +60,7 @@
  *   node scan-ats-full.mjs --help               # print this usage block and exit
  */
 
+import { captureWorkplaceEvidence } from './providers/_country.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, unlinkSync } from 'fs';
 import { createHash } from 'crypto';
 import path from 'path';
@@ -87,7 +88,7 @@ import {
   normalizeUrlForDedup, appendToPipeline, appendToScanHistory, findBlacklistEntry, loadBlacklist, parseSinceDays,
   buildCompanyCanonicalizer, companyRoleDedupKey, matchesSeenCompanyRole, requisitionIdsForDedup, languageFormsForDedup,
   recordForms, recordLanguages, resolveDedupIncludeLocation, resolveDedupIncludeLanguage, scanHistoryPolicy,
-  PORTALS_PATH, PIPELINE_PATH, SCAN_HISTORY_PATH,
+  BROWSER_PROCESS_ENV, DATA_ROOT as SCAN_DATA_ROOT, PORTALS_PATH, PIPELINE_PATH, SCAN_HISTORY_PATH,
 } from './scan.mjs';
 import { buildMustCatch } from './lib/content-rescue.mjs';
 import { classifyTier } from './classify-tier.mjs';
@@ -100,7 +101,7 @@ import {
   classifyProbeError, createHostGate, createSeedRunState, emptyUnreachable, formatUnreachable, newSeedStats, observeCtx,
   probeSeedCompany, resolveSeedGapMs, saveSeedState, unreachableTotal,
 } from './seeds/seed-probe.mjs';
-import { validateFlags } from './lib/cli-flags.mjs';
+import { validateFlags, flagValue, hasFlag } from './lib/cli-flags.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { boardKey, loadDeadBoards, recordBoardFailure, recordBoardResult, saveDeadBoards, shouldSkipDeadBoard } from './dead-boards.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
@@ -109,6 +110,7 @@ import { KNOWN_ATS_VENDORS } from './ats-vendor.mjs';
 import { loadHistoryAtsSeeds } from './history-ats-seeds.mjs';
 import { classifyUnknownHostSeeds, makeHeadProbe } from './branded-successfactors.mjs';
 import { loadProviders } from './providers/_registry.mjs';
+import { browserLaunchOptions } from './lib/browser-launch.mjs';
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -651,7 +653,29 @@ export function parseArgs(argv) {
     process.exit(1);
   }
   const sinceDays = sinceArg.days ?? 3;
-  const limit = Number(valueOf('--limit')) || Infinity;
+  // The same rule --since follows (#2498): a malformed operand is an error,
+  // never a silent default. `Number(...) || Infinity` turned `--limit abc`,
+  // `--limit 0`, a typo like `--limit 1O`, and a bare `--limit` into an
+  // UNBOUNDED sweep, the slowest and most network-hungry run this script has,
+  // while the user believed they had capped it. The pattern alone is not
+  // enough: a long enough run of digits passes it and converts to Infinity,
+  // the same sweep, so the value must also be a safe integer.
+  let limit = Infinity;
+  if (hasFlag(args, '--limit')) {
+    // Two caps are refused, as two --since windows are: which one applied
+    // depended on how each was spelled, not on the order typed.
+    const occurrences = args.filter((a) => a === '--limit' || a.startsWith('--limit='));
+    if (occurrences.length > 1) {
+      console.error(`Error: --limit given ${occurrences.length} times; pass it once`);
+      process.exit(1);
+    }
+    const raw = String(flagValue(args, '--limit') ?? '').trim();
+    if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      console.error(`Error: --limit expects a positive whole number of companies, got ${raw ? `"${raw}"` : 'no value'}`);
+      process.exit(1);
+    }
+    limit = Number(raw);
+  }
   const atsArg = valueOf('--ats');
   // --seeds: optional comma-separated VC portfolio sources (e.g. yc,a16z).
   // When set, the seed companies are fetched and probed via the ATS providers
@@ -1022,7 +1046,7 @@ export function firstRejectingFilter(job, { titleFilter, tierFilter, locationFil
   // job.url is passed so the location filter can fall back to the URL's own
   // location segment when the provider reports a rolled-up "N Locations" string;
   // job.title so a title-stated remote role survives a city-only location.
-  if (!locationFilter(job.location, job.url, job.title)) return 'location';
+  if (!locationFilter(job.location, job.url, job.title, job)) return 'location';
   if (contentFilter && !contentFilter(job.description, matchedTitleKeywords(job.title, titleFilterConfig))) return 'content';
   if (countryFilter && !countryFilter(job.description)) return 'country';
   if (visaFilter && !visaFilter(job.description)) return 'visa';
@@ -1149,6 +1173,7 @@ export function formatLiveOfferLine(job, source) {
     title: job.title,
     url: job.url,
     location: job.location || null,
+    ...(job.geographyEvidence ? { geographyEvidence: job.geographyEvidence } : {}),
     postedAt,
     source: source || job.source || '',
   });
@@ -1176,7 +1201,7 @@ export function emitLiveOffer(job, source, { json } = {}) {
 }
 
 export function keepAndMaybeEmit(job, source, sink, blacklist, opts) {
-  const kept = { ...job, source, dateStatus: job.postedAt ? 'dated' : 'unknown' };
+  const kept = { ...job, ...(opts.workplacePolicy ? { geographyEvidence: captureWorkplaceEvidence(job) } : {}), source, dateStatus: job.postedAt ? 'dated' : 'unknown' };
   sink.push(kept);
   const live = filterBlacklistedOffers([kept], blacklist, { includeBlacklisted: opts.includeBlacklisted });
   if (live.offers.length) emitLiveOffer(live.offers[0], source, { json: opts.json });
@@ -1584,7 +1609,10 @@ async function filterLive(offers) {
     );
   }
   console.error(`\nVerifying liveness of ${offers.length} match(es) with Playwright (sequential)...`);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(browserLaunchOptions(
+    { headless: true },
+    { projectRoot: SCAN_DATA_ROOT, processEnv: BROWSER_PROCESS_ENV },
+  ));
   const live = [];
   try {
     const page = await newLivenessPage(browser);
@@ -1664,6 +1692,7 @@ async function main() {
   // a Staff+ title is dropped only when its JD requires min_years+ or a team lead.
   opts.levelGate = makeLevelGate(buildLevelFilter(config?.level_filter, { fetchJd: fetchJobDescription }));
   const locationFilter = buildLocationFilter(config?.location_filter);
+  opts.workplacePolicy = config?.location_filter?.workplace_policy;
   // Same content_filter (incl. by_title_keyword scoping) scan.mjs applies —
   // see #1846. Built once here from the same portals.yml config.
   const baseContentFilter = buildContentFilter(config?.content_filter);
@@ -1978,6 +2007,7 @@ async function main() {
           title: o.title,
           url: o.url,
           location: o.location || null,
+          ...(o.geographyEvidence ? { geographyEvidence: o.geographyEvidence } : {}),
           postedAt: isoDay(o.postedAt),
           dateStatus: o.dateStatus || (o.postedAt ? 'dated' : 'unknown'),
           source: o.source,
@@ -2038,7 +2068,7 @@ async function main() {
       // Enrich first, then let the undated policy decide.
       if (dateClass === 'undated' && provider.enrichDate
           && titleFilter(job.title, companySlug) && (!gates.tierFilter || gates.tierFilter(job.title))
-          && locationFilter(job.location, job.url, job.title)) {
+          && locationFilter(job.location, job.url, job.title, job)) {
         try { await provider.enrichDate(job, ctx); } catch { /* stays undated */ }
         if (!shouldContinue()) return;
         dateClass = classifyPostingDate(job, cutoff);
@@ -2744,6 +2774,7 @@ async function main() {
         title: o.title,
         url: o.url,
         location: o.location || null,
+        ...(o.geographyEvidence ? { geographyEvidence: o.geographyEvidence } : {}),
         postedAt: o.postedAt ? new Date(o.postedAt).toISOString().slice(0, 10) : null,
         dateStatus: o.dateStatus || (o.postedAt ? 'dated' : 'unknown'),
         blacklisted: Boolean(o.blacklisted),
