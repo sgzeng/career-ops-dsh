@@ -94,6 +94,7 @@ import { buildMustCatch } from './lib/content-rescue.mjs';
 import { classifyTier } from './classify-tier.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
 import { fetchJobDescription } from './lib/jd-text.mjs';
+import { resolveJdCacheConfig, enrichOffersWithJd, writeJdCaches, formatJdCacheSummary, MIN_JD_CHARS } from './lib/jd-cache.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { SEED_SOURCES, prioritizeSeedCompanies } from './seeds/vc-portfolios.mjs';
@@ -1739,6 +1740,7 @@ async function main() {
   // skip_tiers, visa_filter and country_eligibility_filter: the gates scan.mjs
   // applies that this scanner used to leave out (see buildQualityGates).
   const gates = buildQualityGates(config, { candidateCountry });
+  const jdCacheCfg = resolveJdCacheConfig(config?.jd_cache);
   opts.gates = gates;
 
   // User-layer history is an opt-in additive board directory. It fills vendors
@@ -1930,6 +1932,9 @@ async function main() {
         mkdirSync(path.dirname(PIPELINE_PATH), { recursive: true });
         writeFileSync(PIPELINE_PATH, '# Pipeline\n\n## Pendientes\n', 'utf-8');
       }
+      // Fork-local: save each JD under jds/stage1/ and label the note. A stop
+      // signal lands here too; it fetches nothing, it only caches listing text.
+      if (jdCacheCfg.enabled) writeJdCaches(list, jdCacheCfg, { root: SCAN_DATA_ROOT, date });
       await appendToPipeline(list);
       await appendToScanHistory(list, date);
     })();
@@ -2588,6 +2593,23 @@ async function main() {
   let offers = blacklistResult.offers;
   if (offers.length && opts.liveness) offers = await filterLive(offers);
   offers.sort((a, b) => (b.postedAt || 0) - (a.postedAt || 0));
+  // Fork-local stage-1 JD cache (lib/jd-cache.mjs), as in scan.mjs: fetch the
+  // JD of each match that has none, re-run the visa gate on it, and (in
+  // persistOffers) save it under jds/stage1/ for stage 2.
+  let jdCacheLine = '';
+  if (offers.length && !opts.dryRun && jdCacheCfg.enabled) {
+    const { kept, visaDropped: jdVisaDrops, stats } = await enrichOffersWithJd(offers, jdCacheCfg, {
+      fetchJd: fetchJobDescription,
+      visaFilter: gates.visaFilter,
+    });
+    offers = kept;
+    gateCounts.visa += jdVisaDrops.length;
+    const withJd = offers.filter((o) => (o.description?.trim().length ?? 0) >= MIN_JD_CHARS).length;
+    jdCacheLine = formatJdCacheSummary(stats, { written: withJd, unread: offers.length - withJd }, jdVisaDrops.length);
+    for (const { offer, verdict } of jdVisaDrops) {
+      jdCacheLine += `\n  - visa (JD read by the JD cache): ${offer.company} | ${offer.title} | ${offer.url} — ${verdict.category || 'visa'}: ${verdict.sentence || verdict.reason}`;
+    }
+  }
 
   printScanSummaryHeader('Reverse ATS Scan', date, log);
   log(`Companies scanned:  ${totalCompaniesScanned}${capHit ? ` of ${totalCompaniesAvailable} (capped)` : ''}`);
@@ -2663,6 +2685,7 @@ async function main() {
     log(`Level-filtered:     ${gate.dropped.length} (Staff+ title AND JD requires ${gate.filter.minYears}+ yrs or team lead)${extra ? ` — ${extra}` : ''}`);
     for (const line of gate.dropped) log(`  - ${line}`);
   }
+  if (jdCacheLine) log(jdCacheLine);
   log(`New matches:        ${offers.length}`);
 
   if (offers.length) {

@@ -80,6 +80,7 @@ import { buildContentRescue, buildMustCatch } from './lib/content-rescue.mjs';
 import { buildCampusTrack } from './lib/campus-track.mjs';
 import { buildLevelFilter } from './lib/level-filter.mjs';
 import { fetchJobDescription } from './lib/jd-text.mjs';
+import { resolveJdCacheConfig, enrichOffersWithJd, writeJdCaches, formatJdCacheSummary } from './lib/jd-cache.mjs';
 import {
   resolveBackfillConfig, makeBackfillPlanner, loadBackfillState, appendBackfillState, formatBackfillSummary,
   isTruncatedFetch, resolveBackfillPath,
@@ -1196,9 +1197,16 @@ const EXPORT_LICENSE_SPONSORSHIP_RE = /sponsorship for (?:an? )?(?:u\.s\. )?expo
 // with the keep cases (below, tests/visa-work-auth.test.mjs) still kept.
 export const DEFAULT_VISA_PATTERNS = Object.freeze([
   // Clearance — a qualifier/requirement must be present, not just the noun.
-  { category: 'clearance', pattern: /\b(?:active|current|valid|required|must have|must possess|must obtain|ability to obtain|eligible to obtain|secret|top secret|ts|ts\/sci|dod|dhs|public trust|personnel security)\b[^.;]{0,40}\bclearance\b/ },
+  { category: 'clearance', pattern: /\b(?:active|current|valid|required|must have|must possess|must obtain|ability to obtain|eligible to obtain|secret|top secret|ts|ts\/sci|dod|dow|doe|dhs|public trust|personnel security)\b[^.;]{0,40}\bclearance\b/ },
   { category: 'clearance', pattern: /\bclearance\b\s*(?:is|:|-)?\s*(?:required|mandatory|a condition of employment)\b/ },
-  { category: 'clearance', pattern: /\b(?:ability|eligible|eligibility|able|required)\s+to\s+(?:obtain|maintain|hold)\b[^.;]{0,60}\b(?:security\s+)?clearance\b/ },
+  { category: 'clearance', pattern: /\b(?:ability|eligible|eligibility|able|required|need|needs)\s+to\s+(?:obtain|maintain|hold|receive)\b[^.;]{0,60}\b(?:security\s+)?clearance\b/ },
+  // 2026-11-05 additions, each from a stage-2 hard blocker the patterns above
+  // missed (data/discard.log): "Active Secret required", "Clearance: Active
+  // Secret", "... Researcher with Security Clearance", "polygraph clearance".
+  { category: 'clearance', pattern: /\b(?:active|current)\s+(?:secret|top secret|ts)\b\s*(?:clearance\s*)?(?:is\s+)?required\b/ },
+  { category: 'clearance', pattern: /\bclearance\s*:\s*(?:active\s+|current\s+)?(?:secret|top secret|ts)\b/ },
+  { category: 'clearance', pattern: /\bwith\s+(?:an?\s+)?(?:active\s+)?(?:security|secret|top secret|ts\/sci|polygraph)\s+clearance\b/ },
+  { category: 'clearance', pattern: /\bpolygraph\b/ },
   { category: 'clearance', pattern: /\brequires?\b[^.;]{0,30}\b(?:security\s+)?clearance\b/ },
   { category: 'clearance', pattern: /\bts\s*\/\s*sci\b/ },
   { category: 'clearance', pattern: /\b(?:public trust|dhs entry on duty|dhs eod|sci eligibility|entry on duty)\b/ },
@@ -1210,11 +1218,39 @@ export const DEFAULT_VISA_PATTERNS = Object.freeze([
   { category: 'citizenship', pattern: /\b(?:must|required to|need to)\s+be\s+(?:a\s+)?(?:us\s+)?citizen\b/ },
   { category: 'citizenship', pattern: /\b(?:us\s+)?citizens?\s+only\b/ },
   { category: 'citizenship', pattern: /\b(?:us\s+)?citizens?\s+and\s+(?:lawful\s+)?permanent residents?\s+only\b/ },
+  // 2026-11-05 additions (data/discard.log stage-2 blockers): "requires that
+  // the candidate selected be a US Citizen", "U.S. Citizenship, Lawful
+  // Permanent Residency, Or Refugee/Asylee Status Required", "U.S. citizenship
+  // and eligibility for ... clearance", "open to US Citizens and Green Card
+  // Holders", and the ITAR/EAR "must be a U.S. Person" family. A U.S. person
+  // sentence that offers an export-license route instead is vetoed by a keep
+  // pattern below.
+  { category: 'citizenship', pattern: /\brequires?\s+that\s+(?:the\s+)?(?:selected\s+)?candidates?\s+(?:selected\s+)?(?:be|is|are)\s+(?:a\s+)?us\s+citizens?\b/ },
+  { category: 'citizenship', pattern: /\bus citizenship\s*(?:,|or|and|\/)\s*(?:lawful\s+)?permanent residen\w*/ },
+  { category: 'citizenship', pattern: /\bus citizenship\s+and\s+(?:the\s+)?(?:ability|eligibility)\b/ },
+  { category: 'citizenship', pattern: /\bopen\s+(?:only\s+)?to\s+(?:us\s+)?citizens?\s+(?:and|or)\s+(?:green card holders|(?:lawful\s+)?permanent residents?)\b/ },
+  { category: 'citizenship', pattern: /\b(?:must|required to|need to)\s+(?:be|qualify as)\s+(?:an?\s+)?['"]?us[- ]persons?\b/ },
+  { category: 'citizenship', pattern: /\bonly\b[^.;]{0,40}\bus[- ]persons?\b[^.;]{0,80}\beligible\b/ },
   // Sponsorship refusal.
-  { category: 'no_sponsorship', pattern: /\bno\s+(?:visa\s+|work\s+visa\s+|h-?1b\s+)?sponsorship\b/ },
+  { category: 'no_sponsorship', pattern: /\bno\s+(?:(?:visa|work visa|h-?1b|immigration|employment)\s+)?sponsorship\b/ },
   { category: 'no_sponsorship', pattern: /\b(?:will not|won't|cannot|can not|unable to|not able to|does not|do not|is not able to|is unable to)\s+(?:be\s+)?(?:providing|provide|offering|offer|sponsoring|sponsor)\b[^.;]{0,40}\b(?:visa|visas|sponsorship|h-?1b|work visa)\b/ },
   { category: 'no_sponsorship', pattern: /\bsponsorship\b\s*(?:is\s+)?not\s+(?:available|offered|provided)\b/ },
-  { category: 'no_sponsorship', pattern: /\bnot\s+(?:eligible|available)\s+for\s+(?:visa\s+)?sponsorship\b/ },
+  { category: 'no_sponsorship', pattern: /\bnot\s+(?:eligible|available)\s+for\s+(?:[\w-]+\s+){0,3}sponsorship\b/ },
+  // 2026-11-05 additions (data/discard.log stage-2 blockers): "is not
+  // sponsoring visas", "not currently considering new visa sponsorship",
+  // "H-1B and STEM OPT candidates cannot be supported", "not eligible for F1
+  // and J1 students", "Do not apply ... if you will need ... sponsorship",
+  // "authorized to work ... without employer sponsorship" (any verb, not just
+  // "must be"), "... on a permanent basis", "unrestricted U.S. work
+  // authorization".
+  { category: 'no_sponsorship', pattern: /\bnot\s+(?:currently\s+)?sponsoring\s+(?:new\s+)?(?:visas?|h-?1-?b|work visas?|immigration|employment visas?)\b/ },
+  { category: 'no_sponsorship', pattern: /\bnot\s+currently\s+considering\b[^.;]{0,30}\bsponsorship\b/ },
+  { category: 'no_sponsorship', pattern: /\b(?:h-?1-?b|stem opt|opt\/cpt|cpt\/opt|f-?1|j-?1)\b[^.;]{0,50}\b(?:not supported|cannot be supported|not be supported|are ineligible|not eligible|will not be considered|not accepted)\b/ },
+  { category: 'no_sponsorship', pattern: /\bnot\s+eligible\s+for\s+(?:f-?1|j-?1|opt|stem opt|h-?1-?b)\b/ },
+  { category: 'no_sponsorship', pattern: /\bdo not apply\b[^.;]{0,80}\b(?:need|require)\b[^.;]{0,40}\bsponsorship\b/ },
+  { category: 'no_sponsorship', pattern: /\bauthori[sz]ed\s+to\s+work\b[^.;]{0,80}\bwithout\b[^.;]{0,40}\b(?:sponsorship|employer support)\b/ },
+  { category: 'no_sponsorship', pattern: /\bauthori[sz]ed\s+to\s+work\b[^.;]{0,60}\bon\s+a\s+permanent\s+basis\b/ },
+  { category: 'no_sponsorship', pattern: /\bunrestricted\b[^.;]{0,20}\b(?:us\s+)?work authori[sz]ation\b/ },
   { category: 'no_sponsorship', pattern: /\bwithout\s+(?:requiring\s+|the need for\s+)?(?:current or future\s+)?(?:visa\s+|work\s+visa\s+|h-?1b\s+)?sponsorship\b/ },
   { category: 'no_sponsorship', pattern: /\brequire(?:s|d|ing)?\b[^.;]{0,30}\bsponsorship\s+(?:of|for)\s+(?:a\s+)?visa\b/ },
   { category: 'no_sponsorship', pattern: /\bmust\s+(?:already\s+)?be\s+(?:legally\s+)?authorized\s+to\s+work\b[^.;]{0,60}\bwithout\b[^.;]{0,30}\bsponsorship\b/ },
@@ -1234,11 +1270,72 @@ export const DEFAULT_VISA_KEEP_PATTERNS = Object.freeze([
   // "preferred", not required. Deliberately permissive: a rare contradiction
   // that keeps one job costs a stage-2 read, while dropping a "clearance
   // preferred" role loses it for good.
-  { pattern: /\b(?:clearance|ts\s*\/\s*sci|top secret)\b[^.;]{0,40}\b(?:preferred|desired|a plus|nice to have)\b/ },
-  { pattern: /\b(?:preferred|desired|a plus|nice to have)\b[^.;]{0,40}\b(?:clearance|ts\s*\/\s*sci)\b/ },
+  { pattern: /\b(?:clearance|ts\s*\/\s*sci|top secret|polygraph)\b[^.;]{0,40}\b(?:preferred|desired|a plus|nice to have)\b/ },
+  { pattern: /\b(?:preferred|desired|a plus|nice to have)\b[^.;]{0,40}\b(?:clearance|ts\s*\/\s*sci|polygraph)\b/ },
+  { pattern: /\b(?:no|not|without|does not require|do not require)\b[^.;]{0,20}\bpolygraph\b/ },
   { pattern: /\b(?:us\s+)?citizenship\b\s*(?:is\s+)?not\s+required\b/ },
   { pattern: /\bcitizenship\b\s*(?:is|:|-)?\s*not\s+required\b/ },
+  // An export-control sentence that names a license route ("must either be (A)
+  // a U.S. person or (B) eligible for an export license") is not a citizenship
+  // gate: the employer can apply for the license.
+  { pattern: /\bus[- ]persons?\b[^.;]{0,160}\b(?:or|unless)\b[^.;]{0,80}\blicen[cs]e/ },
+  { pattern: /\beither\s+(?:be\s+)?(?:\(a\)\s+)?(?:an?\s+)?['"]?us[- ]persons?\b/ },
 ]);
+
+// A keep pattern vetoes only a drop match whose text it overlaps. Slack is 0 on
+// purpose: in "Active Secret required, TS/SCI preferred" the keep clause sits
+// two characters from the drop and must not reach it. Until 2026-11-05 any keep match anywhere in the
+// JD vetoed every drop, so "Active Secret required, TS/SCI preferred, U.S.
+// citizenship" and "U.S. citizenship and eligibility for clearance (active
+// clearance not required)" were both kept: the "preferred" / "not required"
+// clause about one requirement waived an unrelated one.
+const KEEP_VETO_SLACK = 0;
+
+function globalCopy(re) {
+  return new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+}
+
+function keepSpans(text, keepPatterns) {
+  const spans = [];
+  for (const rule of keepPatterns) {
+    const re = globalCopy(rule.pattern);
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      spans.push([m.index, m.index + m[0].length]);
+      if (m[0].length === 0) re.lastIndex++;
+    }
+  }
+  return spans;
+}
+
+function vetoedBy(spans, start, end) {
+  return spans.some(([a, b]) => a <= end + KEEP_VETO_SLACK && b >= start - KEEP_VETO_SLACK);
+}
+
+// Section context the span veto cannot see: a requirement listed under a
+// "Preferred Qualifications" heading is preferred even when its own bullet says
+// nothing ("- Active security clearance or eligibility (e.g., secret
+// clearance)", Anthropic Cyber Evaluations Engineer, applied 2026-09). The
+// text is whitespace-collapsed, so a heading is just the nearest cue phrase
+// before the match: a preferred cue within PREFERRED_SECTION_REACH characters,
+// with no other section heading between it and the match, keeps the posting.
+const PREFERRED_SECTION_REACH = 600;
+const PREFERRED_SECTION_CUE = /\b(?:preferred (?:qualifications|skills|experience|requirements)|nice[- ]to[- ]haves?|bonus points|desired (?:qualifications|skills)|pluses|it'?s a plus if|strong candidates (?:may|will) also)\b/g;
+const OTHER_SECTION_CUE = /\b(?:minimum qualifications|basic qualifications|required qualifications|requirements|responsibilities|what you(?:'ll| will) do|what you(?:'ll)? need|about (?:the role|you|us)|benefits|compensation|salary|education|security requirements|clearance requirements|eligibility requirements|work authori[sz]ation|additional information|equal (?:employment )?opportunity)\b/g;
+
+function inPreferredSection(text, index) {
+  const from = Math.max(0, index - PREFERRED_SECTION_REACH);
+  const window = text.slice(from, index);
+  let lastPreferredEnd = -1;
+  for (const m of window.matchAll(PREFERRED_SECTION_CUE)) lastPreferredEnd = m.index + m[0].length;
+  if (lastPreferredEnd < 0) return false;
+  // Measured from the cue's END: "preferred requirements" must not read as a
+  // preferred heading followed by a "requirements" heading.
+  for (const m of window.matchAll(OTHER_SECTION_CUE)) {
+    if (m.index >= lastPreferredEnd) return false;
+  }
+  return true;
+}
 
 // Below this many characters a description is a teaser, not a JD — the same
 // threshold lib/level-filter.mjs uses before it spends a fetch.
@@ -1262,6 +1359,9 @@ export function normalizeVisaText(input) {
   return input
     .toLowerCase()
     .replace(EXPORT_LICENSE_SPONSORSHIP_RE, 'export license')
+    // The federal "Employee Polygraph Protection Act" poster is EEO
+    // boilerplate on many US postings (Elastic), not a polygraph requirement.
+    .replace(/employee polygraph protection act/g, 'eppa')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/[\u2018\u2019\u02bc]/g, "'")
     // Explicit dotted forms only, and no trailing \s anywhere: "U.S.
@@ -1278,7 +1378,14 @@ export function normalizeVisaText(input) {
 // sentence parser: JD bullets are often flattened onto one line, so this takes
 // the nearest '.' boundaries and clips to a readable width.
 function sentenceAt(text, index) {
-  const start = Math.max(0, text.lastIndexOf('.', index) + 1);
+  let start = Math.max(0, text.lastIndexOf('.', index) + 1);
+  // LinkedIn JDs come flattened with few periods: a "sentence" can start
+  // hundreds of characters before the match, and the 240-char clip then cut
+  // the match itself out of the quote. Start near the match instead.
+  if (index - start > 120) {
+    const space = text.indexOf(' ', index - 100);
+    start = space >= 0 && space < index ? space + 1 : index - 100;
+  }
   let end = text.indexOf('.', index);
   if (end < 0) end = text.length;
   const sentence = text.slice(start, Math.min(end + 1, start + 240)).trim();
@@ -1331,12 +1438,14 @@ export function buildVisaFilter(visaFilter) {
       return { pass: !requireMention, category: null, reason: '', sentence: '' };
     }
     const text = normalizeVisaText(description);
-    for (const rule of keepPatterns) {
-      if (rule.pattern.test(text)) return { pass: true, category: null, reason: '', sentence: '' };
-    }
+    const spans = keepSpans(text, keepPatterns);
     for (const rule of negativePatterns) {
-      const match = rule.pattern.exec(text);
-      if (match) {
+      const re = globalCopy(rule.pattern);
+      let match;
+      while ((match = re.exec(text)) !== null) {
+        if (match[0].length === 0) { re.lastIndex++; continue; }
+        if (vetoedBy(spans, match.index, match.index + match[0].length)) continue;
+        if (inPreferredSection(text, match.index)) continue;
         return {
           pass: false,
           category: rule.category,
@@ -1345,10 +1454,13 @@ export function buildVisaFilter(visaFilter) {
         };
       }
     }
-    if (negative.length > 0) {
-      const hit = negative.find(k => text.includes(k));
-      if (hit) {
-        return { pass: false, category: 'visa', reason: hit, sentence: sentenceAt(text, text.indexOf(hit)) };
+    for (const hit of negative) {
+      let at = text.indexOf(hit);
+      while (at >= 0) {
+        if (!vetoedBy(spans, at, at + hit.length) && !inPreferredSection(text, at)) {
+          return { pass: false, category: 'visa', reason: hit, sentence: sentenceAt(text, at) };
+        }
+        at = text.indexOf(hit, at + 1);
       }
     }
     if (!requireMention) return { pass: true, category: null, reason: '', sentence: '' };
@@ -5528,6 +5640,25 @@ async function main() {
     verifiedOffers = acceptedOffers;
   }
 
+  // 5.55. Fork-local stage-1 JD cache (lib/jd-cache.mjs): read the JD of every
+  // new offer that has none (paced, budgeted), re-run the visa gate on what was
+  // fetched, and save each JD under jds/stage1/ so stage 2 reads a local file.
+  // Written into the notes in step 6; a dry run fetches and writes nothing.
+  const jdCacheCfg = resolveJdCacheConfig(config.jd_cache);
+  let jdCacheStats = null;
+  if (!dryRun && jdCacheCfg.enabled && verifiedOffers.length > 0) {
+    const { kept, visaDropped: fetchedVisaDrops, stats } = await enrichOffersWithJd(verifiedOffers, jdCacheCfg, {
+      fetchJd: fetchJobDescription,
+      visaFilter: visaEnabled ? visaFilter : null,
+    });
+    verifiedOffers = kept;
+    for (const { offer, verdict } of fetchedVisaDrops) {
+      totalFilteredVisa++;
+      visaDropped.push(`${offer.company} | ${offer.title} | ${offer.url} — ${verdict.category || 'visa'}: ${verdict.sentence || verdict.reason} (JD read by the JD cache)`);
+    }
+    jdCacheStats = { stats, dropped: fetchedVisaDrops.length };
+  }
+
   // 5.6. Experience filter: read each new offer's stated years. Only a required
   // overall bar whose lowest reading is beyond the band drops (action: drop);
   // an unread JD, or one with no such bar, is kept and labelled.
@@ -5559,6 +5690,10 @@ async function main() {
 
   // 6. Write results
   if (!dryRun && verifiedOffers.length > 0) {
+    if (jdCacheCfg.enabled) {
+      const writes = writeJdCaches(verifiedOffers, jdCacheCfg, { root: DATA_ROOT, date });
+      if (jdCacheStats) jdCacheStats.writes = writes;
+    }
     await appendToPipeline(verifiedOffers);
     await appendToScanHistory(verifiedOffers, date);
   }
@@ -5722,6 +5857,9 @@ async function main() {
     ].filter(Boolean).join(', ');
     console.log(`Filtered by visa:      ${totalFilteredVisa} removed (clearance / citizenship / no sponsorship)${extra ? ` — ${extra}` : ''}`);
     for (const line of visaDropped) console.log(`  - ${line}`);
+  }
+  if (jdCacheStats?.writes) {
+    console.log(formatJdCacheSummary(jdCacheStats.stats, jdCacheStats.writes, jdCacheStats.dropped));
   }
   if (Object.keys(windows).length > 0 || totalFilteredCooldown > 0) {
     console.log(`Filtered by cooldown:  ${totalFilteredCooldown} removed`);

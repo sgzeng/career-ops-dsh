@@ -204,6 +204,7 @@ const KNOWN_TOP_LEVEL = new Set([
   'domain_filter', // upstream: scan-ats-full.mjs board gate (#3105), validated in the domain_filter block below
   'dayforce_boards', 'portal_health_stale_days', 'portal_prune_quiet_days', // upstream: scan-dayforce.mjs / stats.mjs read these top-level keys
   'preferred_languages', // upstream: scan.mjs language versions, validated below
+  'jd_cache', // fork-local: lib/jd-cache.mjs stage-1 JD cache, validated below
   'experience_filter', // upstream: scan.mjs jd-years gate, validated below
 ]);
 
@@ -705,6 +706,27 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
 
   // Fork-local (lib/first-scan-backfill.mjs): `false`, or { enabled, window_days }.
   // scan.mjs fails closed (backfill off) on every value rejected here.
+  // Fork-local (lib/jd-cache.mjs): `false`, or { enabled, dir, fetch_max_per_run,
+  // fetch_budget_secs, linkedin_gap_ms, gap_ms }. Bad numbers fall back to the
+  // defaults at run time; they are errors here so a typo is seen.
+  if (config.jd_cache !== undefined && config.jd_cache !== false) {
+    const jc = config.jd_cache;
+    if (!isObject(jc)) {
+      add(errors, 'jd_cache', 'must be false or an object { enabled, dir, fetch_max_per_run, fetch_budget_secs, linkedin_gap_ms, gap_ms }');
+    } else {
+      if (jc.enabled !== undefined && typeof jc.enabled !== 'boolean') add(errors, 'jd_cache.enabled', 'must be a boolean when set');
+      if (jc.dir !== undefined && (typeof jc.dir !== 'string' || !jc.dir.trim() || jc.dir.includes('..') || jc.dir.startsWith('/'))) {
+        add(errors, 'jd_cache.dir', 'must be a relative path inside the data root (no "..", no leading "/")');
+      }
+      for (const key of ['fetch_max_per_run', 'fetch_budget_secs', 'linkedin_gap_ms', 'gap_ms']) {
+        if (jc[key] !== undefined && !(Number.isInteger(jc[key]) && jc[key] >= 0)) add(errors, `jd_cache.${key}`, 'must be a non-negative integer when set');
+      }
+      for (const key of Object.keys(jc)) {
+        if (!['enabled', 'dir', 'fetch_max_per_run', 'fetch_budget_secs', 'linkedin_gap_ms', 'gap_ms'].includes(key)) add(warnings, `jd_cache.${key}`, 'unknown jd_cache field');
+      }
+    }
+  }
+
   if (config.first_scan_backfill !== undefined && typeof config.first_scan_backfill !== 'boolean') {
     const fb = config.first_scan_backfill;
     if (!isObject(fb)) {

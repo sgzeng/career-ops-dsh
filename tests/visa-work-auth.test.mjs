@@ -42,6 +42,33 @@ const DROPS = [
   ['no_sponsorship', 'Must already be authorized to work in the United States on a full-time, permanent basis without requiring current or future visa sponsorship.'],
   ['no_sponsorship', 'Location: Remote - US based candidates only, no visa sponsorship available'],
   ['no_sponsorship', 'We are unable to sponsor visas for this role.'],
+  // 2026-11-05: stage-2 hard blockers from data/discard.log the patterns missed.
+  ['citizenship', 'Must be a U.S. person (citizen or green card holder).'],
+  ['citizenship', 'This position requires that the candidate selected be a US Citizen.'],
+  ['citizenship', 'U.S. Citizenship, Lawful Permanent Residency, Or Refugee/Asylee Status Required'],
+  ['citizenship', 'U.S. citizenship and the ability to satisfy personnel-security requirements for a Non-Sensitive/High-Risk position.'],
+  ['citizenship', 'This role is open to US Citizens and Green Card Holders'],
+  ['citizenship', "This position requires access to information subject to ITAR. All applicants must be 'U.S. Persons'"],
+  ['citizenship', 'Applicants must be a U.S. Person as defined under 22 CFR 120.62'],
+  ['clearance', 'You will be subject to a background check and will need to obtain and maintain a Department of War (DoW) security clearance.'],
+  ['clearance', 'Must be eligible to receive US Security Clearance'],
+  ['clearance', 'Clearance: Active Secret'],
+  ['clearance', 'Nightwing is hiring Vulnerability Researchers with a polygraph clearance in Maryland'],
+  ['no_sponsorship', 'SpyCloud is not sponsoring visas at this time'],
+  ['no_sponsorship', 'This job is not eligible for employment sponsorship.'],
+  ['no_sponsorship', 'This role is not eligible for employment-based immigration sponsorship.'],
+  ['no_sponsorship', 'H1-B or STEM OPT candidates are not supported'],
+  ['no_sponsorship', 'This position is not eligible for F1 and J1 students. It is not available for any work sponsorship.'],
+  ['no_sponsorship', 'We are not currently considering new visa sponsorship, including new H-1B petitions, or candidates in OPT/CPT status.'],
+  ['no_sponsorship', 'Do not apply for this role if you will need GM immigration sponsorship now or in the future (e.g., H1-B, OPT, STEM OPT, CPT, TN, J-1, etc).'],
+  ['no_sponsorship', 'Candidates must reside and be authorized to work in the United States without employer sponsorship.'],
+  ['no_sponsorship', 'Applicants must be currently authorized to work in the United States on a fulltime basis without the need for employer support or sponsorship now or in the future.'],
+  ['no_sponsorship', 'Candidates for positions with Latitude AI must be legally authorized to work in the United States on a permanent basis.'],
+  ['no_sponsorship', 'You must currently possess valid and unrestricted U.S. work authorization.'],
+  // A keep clause about ONE requirement no longer waives another one.
+  ['clearance', 'Active Secret required, TS/SCI preferred, U.S. citizenship.'],
+  ['citizenship', 'U.S. citizenship and eligibility for U.S. government security clearance (active clearance not required).'],
+  ['citizenship', 'Security clearance preferred. U.S. citizenship required.'],
 ];
 
 for (const [category, text] of DROPS) {
@@ -77,9 +104,15 @@ const KEEPS = [
   ['sponsors visas', 'We will sponsor H-1B visas for this role.'],
   ['bare ITAR mention', 'Familiarity with ITAR and export-control processes is a plus.'],
   ['citizenship not required', 'U.S. citizenship is not required for this position.'],
-  ['US person, citizen or GC', 'Must be a U.S. person (citizen or green card holder).'],
   ['export license boilerplate', 'The role is controlled under these U.S. export laws without sponsorship for an export license.'],
   ['no sponsorship needed by role', 'This position does not require sponsorship; it is open to candidates with existing work authorization.'],
+  // 2026-11-05
+  ['US person OR export license', 'To conform to U.S. Government export regulations, applicant must either be (A) a U.S. person or (B) eligible for an export license.'],
+  ['polygraph preferred', 'Full Scope Polygraph preferred.'],
+  ['no polygraph required', 'No polygraph is required for this role.'],
+  ['EEO polygraph poster', 'Applicants have rights under federal employment laws: Family and Medical Leave Act (FMLA) poster; Employee Polygraph Protection Act (EPPA) poster.'],
+  ['clearance under Preferred Qualifications', 'Minimum Qualifications - Python proficiency - CTF experience. Preferred Qualifications - Offensive security research - Detection content authoring (e.g., Sigma, YARA) - Active security clearance or eligibility (e.g., secret clearance)'],
+  ['clearance under Nice to have', 'Requirements: 3+ years of security research. Nice to have: experience with fuzzing; an active TS/SCI clearance.'],
 ];
 
 for (const [label, text] of KEEPS) {
