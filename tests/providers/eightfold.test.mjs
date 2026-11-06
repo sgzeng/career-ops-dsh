@@ -326,6 +326,24 @@ try {
     return { calls, ctx: { transport: 'http', sleep: async () => {}, fetchText: async () => { throw new Error('no fetchText'); }, fetchJson: async (url, opts) => { const c = { url, opts, n: calls.length }; calls.push(c); return respond(c); } } };
   };
 
+  // eightfold.queries: one server-side search per query on the detected API,
+  // rows deduped across searches; no queries = the whole-board walk above.
+  {
+    const { ctx, calls } = recording((c) => {
+      if (c.url.includes('/api/apply/v2/jobs')) throw httpErr(403, 'Not authorized for PCSX');
+      const q = new URL(c.url).searchParams.get('query');
+      if (q === 'fuzzing') return pcsxPage([position('1', 'Fuzzing Engineer'), position('2', 'Security Researcher')], 2);
+      if (q === 'vulnerability') return pcsxPage([position('2', 'Security Researcher'), position('3', 'Vuln Researcher')], 2);
+      return pcsxPage([], 0);
+    });
+    const jobs = await ef.fetch({ ...TENANT, eightfold: { queries: ['fuzzing', ' vulnerability ', 'fuzzing', 7] } }, ctx);
+    const queried = calls.filter((c) => c.url.includes('/api/pcsx/search')).map((c) => new URL(c.url).searchParams.get('query'));
+    jobs.length === 3 && JSON.stringify(queried) === '["fuzzing","vulnerability"]'
+      && calls.filter((c) => c.url.includes('/api/apply/v2/jobs')).length === 1
+      ? pass('eightfold.queries runs each distinct query once on PCSX and dedupes rows across them (3 jobs)')
+      : fail(`queries: ${jobs.length} jobs, pcsx queries ${JSON.stringify(queried)}, calls ${calls.length}`);
+  }
+
   // v2 403 -> one PCSX probe on the same host -> paging continues on PCSX.
   {
     const { ctx, calls } = recording((c) => {

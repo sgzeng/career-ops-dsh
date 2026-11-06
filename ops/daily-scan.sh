@@ -20,6 +20,8 @@
 #      curated surface. One invocation per ATS under a hard time limit.
 #   5. scan-ats-full.mjs --seeds yc,a16z — reverse discovery over the YC and
 #      a16z portfolios, same filters.
+#   6. ops/stage1-liveness.mjs — zero-token liveness over pending non-LinkedIn
+#      rows: dead ones to Processed, live ones tagged for stage 2 to skip.
 #
 # All of them append to data/pipeline.md and data/scan-history.tsv.
 #
@@ -218,6 +220,12 @@ digits_or() {
   echo "--- node scan-ats-full.mjs --seeds yc,a16z (reverse discovery, not limited to the watchlist) ---"
   node scan-ats-full.mjs --seeds yc,a16z --since 10
   echo "scan-ats-full.mjs exit=$?"
+
+  # Zero-token liveness over every pending non-LinkedIn row, after all writers
+  # above: dead postings move to Processed, live ones get `liveness active
+  # <date>` in their note so stage 2 skips its own sweep for them today.
+  echo "--- stage-1 liveness: ops/stage1-liveness.mjs ---"
+  node ops/stage1-liveness.mjs || echo "WARN: stage1-liveness.mjs failed — stage 2 runs its own sweep"
 
   echo "--- pipeline.md now has $(grep -c '^\- \[ \]' data/pipeline.md 2>/dev/null || echo 0) unprocessed entries ---"
   echo "=== done $(date '+%H:%M:%S') ==="

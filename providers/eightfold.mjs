@@ -70,6 +70,10 @@ const PAGE_SIZE = 10;
 const DEFAULT_MAX_PAGES = 200;
 // Hard ceiling even for an explicit override (10,000 postings).
 const MAX_PAGES_CAP = 1000;
+// Upper bound on `eightfold.queries` searches per entry.
+const MAX_QUERIES = 25;
+// Same-host pause between two searches of one entry.
+const INTER_QUERY_DELAY_MS = 1_500;
 // Same-host pacing between pages inside one tenant's own pagination loop.
 // Eightfold's edge rate-limits bursts, and a 616-job board is 62 requests.
 const INTER_PAGE_DELAY_MS = 250;
@@ -177,11 +181,13 @@ export function resolveTenant(entry) {
  * @param {{host: string, domain?: (string|null)}} tenant
  * @param {number} [start] - Row offset (0-based).
  * @param {number} [num]   - Requested page size; the server caps it at 10.
+ * @param {string} [query] - Optional server-side keyword search (see resolveQueries).
  * @returns {string}
  */
-export function buildApiUrl(tenant, start = 0, num = PAGE_SIZE) {
+export function buildApiUrl(tenant, start = 0, num = PAGE_SIZE, query = '') {
   const params = new URLSearchParams();
   if (tenant.domain) params.set('domain', tenant.domain);
+  if (query) params.set('query', query);
   params.set('start', String(start));
   params.set('num', String(num));
   return `https://${tenant.host}/api/apply/v2/jobs?${params.toString()}`;
@@ -202,11 +208,13 @@ export function buildApiUrl(tenant, start = 0, num = PAGE_SIZE) {
  *
  * @param {{host: string, domain?: (string|null)}} tenant
  * @param {number} [start] - Row offset (0-based).
+ * @param {string} [query] - Optional server-side keyword search (see resolveQueries).
  * @returns {string}
  */
-export function buildPcsxUrl(tenant, start = 0) {
+export function buildPcsxUrl(tenant, start = 0, query = '') {
   const params = new URLSearchParams();
   if (tenant.domain) params.set('domain', tenant.domain);
+  if (query) params.set('query', query);
   params.set('start', String(start));
   return `https://${tenant.host}/api/pcsx/search?${params.toString()}`;
 }
@@ -361,6 +369,33 @@ export function parseEightfoldResponse(json, tenant, companyName) {
 }
 
 /**
+ * Server-side keyword searches from `eightfold.queries` on the entry, trimmed,
+ * deduped, at most MAX_QUERIES. Empty list = walk the whole board (default).
+ *
+ * Why: a large PCSX tenant cannot be walked whole from one IP. Microsoft
+ * (~2,400 postings) answered 429 after 280 rows on 2026-11-05, and Qualcomm
+ * (2,075) took 244s and hit the page cap. Both answer `query=` server-side
+ * (Microsoft: "vulnerability" 68 rows, "fuzzing" 7), so a few targeted
+ * searches cover the relevant postings in a handful of pages each.
+ * title_filter / location_filter still apply to every row afterwards.
+ *
+ * @param {any} entry
+ * @returns {string[]}
+ */
+export function resolveQueries(entry) {
+  const raw = entry?.eightfold?.queries;
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const q of raw) {
+    if (typeof q !== 'string') continue;
+    const t = q.trim().slice(0, 100);
+    if (t && !out.includes(t)) out.push(t);
+    if (out.length >= MAX_QUERIES) break;
+  }
+  return out;
+}
+
+/**
  * Resolve the page cap: a positive integer `max_pages` on the entry, capped
  * at MAX_PAGES_CAP; then narrowed further by ctx.maxPages when the caller is
  * only probing (verify-portals.mjs's health check passes 1).
@@ -408,126 +443,151 @@ export default {
     // A probe's ctx.maxPages below the entry's own cap is the probe's budget,
     // not a max_pages cut: such a stop is neither warned about nor tagged.
     const probeLimited = maxPages < resolveMaxPages(entry);
-    const all = [];
-    /** @type {number|null} */
-    let total = null;
     // Which API this tenant serves, decided once per fetch and reused for every
-    // page: 'v2' unless its FIRST page answers 403, then 'pcsx' if the PCSX
-    // endpoint answers with a well-formed page. A 403 after v2 has served pages
-    // is not a migration signal, and switching mid-walk would splice two
-    // endpoints' orderings together (duplicated or skipped postings).
+    // page of every search: 'v2' unless its FIRST page answers 403, then 'pcsx'.
     let api = 'v2';
-    let rateLimited = false;
+    const queries = resolveQueries(entry);
+    /** @type {any[]} */
+    const merged = [];
+    const seen = new Set();
+    let truncatedAny = false;
 
-    for (let page = 0; page < maxPages; page++) {
-      const start = page * PAGE_SIZE;
-      if (page > 0) await sleep(api === 'pcsx' ? PCSX_INTER_PAGE_DELAY_MS : INTER_PAGE_DELAY_MS, ctx);
+    /** Walk one search, or the whole board when query is ''. */
+    const walk = async (/** @type {string} */ query) => {
+      const label = query ? `${entry.name} [query "${query}"]` : entry.name;
+      const all = [];
+      /** @type {number|null} */
+      let total = null;
+      // Which API this tenant serves, decided once per fetch and reused for every
+      // page: 'v2' unless its FIRST page answers 403, then 'pcsx' if the PCSX
+      // endpoint answers with a well-formed page. A 403 after v2 has served pages
+      // is not a migration signal, and switching mid-walk would splice two
+      // endpoints' orderings together (duplicated or skipped postings).
+      let rateLimited = false;
 
-      /** One request on whichever API this tenant is on. */
-      const request = async (/** @type {string} */ which) => {
-        const url = which === 'pcsx' ? buildPcsxUrl(tenant, start) : buildApiUrl(tenant, start, PAGE_SIZE);
-        assertEightfoldUrl(url, branded); // SSRF guard before every fetch
-        return /** @type {any} */ (await fetchJsonWithRetry(
-          /** @type {any} */ (ctx),
-          url,
-          {
-            // redirect:'error' prevents SSRF via a server-side redirect; with
-            // assertEightfoldUrl above it guarantees the final hostname stays
-            // inside *.eightfold.ai or the entry's own eightfold_host.
-            redirect: 'error',
-            headers: { 'User-Agent': BROWSER_LIKE_USER_AGENT, Accept: 'application/json' },
-          },
-          which === 'pcsx' ? PCSX_RETRY_POLICY : RETRY_POLICY,
-        ));
-      };
+      for (let page = 0; page < maxPages; page++) {
+        const start = page * PAGE_SIZE;
+        if (page > 0) await sleep(api === 'pcsx' ? PCSX_INTER_PAGE_DELAY_MS : INTER_PAGE_DELAY_MS, ctx);
 
-      let json;
-      try {
-        json = await request(api);
-      } catch (err) {
-        const status = /** @type {any} */ (err)?.status;
-        // A 403 on the classic endpoint is how a migrated tenant announces
-        // itself. It is deterministic, never retried (RFC 9110 §15.5.4, and
-        // _http.mjs's isRetryableError agrees), so it is a safe point to switch
-        // APIS ONCE rather than to give up: before this, every PCSX tenant read
-        // as the WAF case (module header) and the board silently returned zero postings.
-        if (api === 'v2' && page === 0 && status === 403) {
-          let pcsxJson = null;
-          try {
-            pcsxJson = await request('pcsx');
-          } catch (probeErr) {
-            // PCSX refusing too (403), or simply not existing on this host
-            // (404/410), makes the original 403 the real story: a WAF or
-            // datacenter-IP block. Surfacing the probe's 404 instead read as
-            // "board gone" to dead-boards.mjs, which skips a board after three
-            // misses. Any other probe failure (a 429, a 5xx, a network error) is
-            // its own problem, and reporting the v2 403 in its place would read
-            // as a deterministic block when the tenant is only busy or down.
-            if ([403, 404, 410].includes(/** @type {any} */ (probeErr)?.status)) throw err;
-            throw probeErr;
+        /** One request on whichever API this tenant is on. */
+        const request = async (/** @type {string} */ which) => {
+          const url = which === 'pcsx' ? buildPcsxUrl(tenant, start, query) : buildApiUrl(tenant, start, PAGE_SIZE, query);
+          assertEightfoldUrl(url, branded); // SSRF guard before every fetch
+          return /** @type {any} */ (await fetchJsonWithRetry(
+            /** @type {any} */ (ctx),
+            url,
+            {
+              // redirect:'error' prevents SSRF via a server-side redirect; with
+              // assertEightfoldUrl above it guarantees the final hostname stays
+              // inside *.eightfold.ai or the entry's own eightfold_host.
+              redirect: 'error',
+              headers: { 'User-Agent': BROWSER_LIKE_USER_AGENT, Accept: 'application/json' },
+            },
+            which === 'pcsx' ? PCSX_RETRY_POLICY : RETRY_POLICY,
+          ));
+        };
+
+        let json;
+        try {
+          json = await request(api);
+        } catch (err) {
+          const status = /** @type {any} */ (err)?.status;
+          // A 403 on the classic endpoint is how a migrated tenant announces
+          // itself. It is deterministic, never retried (RFC 9110 §15.5.4, and
+          // _http.mjs's isRetryableError agrees), so it is a safe point to switch
+          // APIS ONCE rather than to give up: before this, every PCSX tenant read
+          // as the WAF case (module header) and the board silently returned zero postings.
+          if (api === 'v2' && page === 0 && seen.size === 0 && status === 403) {
+            let pcsxJson = null;
+            try {
+              pcsxJson = await request('pcsx');
+            } catch (probeErr) {
+              // PCSX refusing too (403), or simply not existing on this host
+              // (404/410), makes the original 403 the real story: a WAF or
+              // datacenter-IP block. Surfacing the probe's 404 instead read as
+              // "board gone" to dead-boards.mjs, which skips a board after three
+              // misses. Any other probe failure (a 429, a 5xx, a network error) is
+              // its own problem, and reporting the v2 403 in its place would read
+              // as a deterministic block when the tenant is only busy or down.
+              if ([403, 404, 410].includes(/** @type {any} */ (probeErr)?.status)) throw err;
+              throw probeErr;
+            }
+            const page0 = normalizePcsxPage(pcsxJson);
+            if (!page0) {
+              // A 200 that is not a PCSX page means the endpoint moved again.
+              // Fail loudly with the 403 attached rather than returning nothing.
+              throw new Error(
+                `eightfold: ${entry.name} answered 403 on /api/apply/v2/jobs and an unrecognized body on /api/pcsx/search — neither API is readable`,
+                { cause: err },
+              );
+            }
+            api = 'pcsx';
+            json = { positions: page0.positions, ...(page0.count === undefined ? {} : { count: page0.count }) };
+          } else if (status === 429 && all.length > 0) {
+            // Large PCSX tenants rate-limit a sustained walk (measured: Microsoft
+            // 429s after ~20 pages at 1 req/s even with backoff). Keep the pages
+            // already collected and say the board is partial — never silently.
+            rateLimited = true;
+            break;
+          } else {
+            throw err;
           }
-          const page0 = normalizePcsxPage(pcsxJson);
-          if (!page0) {
-            // A 200 that is not a PCSX page means the endpoint moved again.
-            // Fail loudly with the 403 attached rather than returning nothing.
-            throw new Error(
-              `eightfold: ${entry.name} answered 403 on /api/apply/v2/jobs and an unrecognized body on /api/pcsx/search — neither API is readable`,
-              { cause: err },
-            );
+        }
+
+        // `in` throws on null or a primitive, so shape-check first: a PCSX page
+        // that decodes to `null` must reach the descriptive error below.
+        if (api === 'pcsx' && !(json && typeof json === 'object' && 'positions' in json)) {
+          const normalized = normalizePcsxPage(json);
+          if (!normalized) {
+            throw new Error(`eightfold: ${entry.name} returned an unrecognized /api/pcsx/search body at start=${start}`);
           }
-          api = 'pcsx';
-          json = { positions: page0.positions, ...(page0.count === undefined ? {} : { count: page0.count }) };
-        } else if (status === 429 && all.length > 0) {
-          // Large PCSX tenants rate-limit a sustained walk (measured: Microsoft
-          // 429s after ~20 pages at 1 req/s even with backoff). Keep the pages
-          // already collected and say the board is partial — never silently.
-          rateLimited = true;
-          break;
-        } else {
-          throw err;
+          json = { positions: normalized.positions, ...(normalized.count === undefined ? {} : { count: normalized.count }) };
         }
-      }
 
-      // `in` throws on null or a primitive, so shape-check first: a PCSX page
-      // that decodes to `null` must reach the descriptive error below.
-      if (api === 'pcsx' && !(json && typeof json === 'object' && 'positions' in json)) {
-        const normalized = normalizePcsxPage(json);
-        if (!normalized) {
-          throw new Error(`eightfold: ${entry.name} returned an unrecognized /api/pcsx/search body at start=${start}`);
+        all.push(...parseEightfoldResponse(json, tenant, entry.name));
+
+        const positions = Array.isArray(json?.positions) ? json.positions : [];
+        if (total === null && typeof json?.count === 'number' && Number.isFinite(json.count)) {
+          total = json.count;
         }
-        json = { positions: normalized.positions, ...(normalized.count === undefined ? {} : { count: normalized.count }) };
+
+        // Stop conditions, in the order they can be trusted:
+        //   - an empty or short page is the end of the board;
+        //   - once we have paged past `count` there is nothing left to ask for.
+        // `count` alone is not enough: it is the pre-filter total on some
+        // tenants, so a short page has to win.
+        if (positions.length === 0 || positions.length < PAGE_SIZE) break;
+        if (total !== null && start + PAGE_SIZE >= total) break;
       }
 
-      all.push(...parseEightfoldResponse(json, tenant, entry.name));
-
-      const positions = Array.isArray(json?.positions) ? json.positions : [];
-      if (total === null && typeof json?.count === 'number' && Number.isFinite(json.count)) {
-        total = json.count;
+      if (rateLimited) {
+        console.error(`⚠️  eightfold: ${label} stopped early on HTTP 429 (${all.length}${total === null ? '' : ` of ${total}`} jobs) — the board is partial, not empty`);
+        // Tagged on the array, as workday.mjs (workdayTruncated) and
+        // adp-workforcenow.mjs (adpTruncated) do, so a caller can tell this
+        // board from a complete one without reading stderr.
+        /** @type {any} */ (all).eightfoldTruncated = true;
+      } else if (!probeLimited && total !== null && all.length < total && maxPages * PAGE_SIZE < total) {
+        console.error(`⚠️  eightfold: ${label} truncated at max_pages=${maxPages} (${all.length} of ${total} jobs) — raise max_pages on this entry for more`);
+        // Same tag as the 429 branch above: the page cap cuts a board short just
+        // as a rate limit does (2,000 of 2,083 on a real tenant), and a caller
+        // that cannot see the stderr line must still be able to tell.
+        /** @type {any} */ (all).eightfoldTruncated = true;
       }
+      return { all, truncated: Boolean(/** @type {any} */ (all).eightfoldTruncated) };
+    };
 
-      // Stop conditions, in the order they can be trusted:
-      //   - an empty or short page is the end of the board;
-      //   - once we have paged past `count` there is nothing left to ask for.
-      // `count` alone is not enough: it is the pre-filter total on some
-      // tenants, so a short page has to win.
-      if (positions.length === 0 || positions.length < PAGE_SIZE) break;
-      if (total !== null && start + PAGE_SIZE >= total) break;
+    for (const [qi, query] of (queries.length ? queries : ['']).entries()) {
+      if (qi > 0) await sleep(INTER_QUERY_DELAY_MS, ctx);
+      const { all, truncated } = await walk(query);
+      truncatedAny ||= truncated;
+      for (const job of all) {
+        if (seen.has(job.url)) continue;
+        seen.add(job.url);
+        merged.push(job);
+      }
     }
-
-    if (rateLimited) {
-      console.error(`⚠️  eightfold: ${entry.name} stopped early on HTTP 429 (${all.length}${total === null ? '' : ` of ${total}`} jobs) — the board is partial, not empty`);
-      // Tagged on the array, as workday.mjs (workdayTruncated) and
-      // adp-workforcenow.mjs (adpTruncated) do, so a caller can tell this
-      // board from a complete one without reading stderr.
-      /** @type {any} */ (all).eightfoldTruncated = true;
-    } else if (!probeLimited && total !== null && all.length < total && maxPages * PAGE_SIZE < total) {
-      console.error(`⚠️  eightfold: ${entry.name} truncated at max_pages=${maxPages} (${all.length} of ${total} jobs) — raise max_pages on this entry for more`);
-      // Same tag as the 429 branch above: the page cap cuts a board short just
-      // as a rate limit does (2,000 of 2,083 on a real tenant), and a caller
-      // that cannot see the stderr line must still be able to tell.
-      /** @type {any} */ (all).eightfoldTruncated = true;
-    }
-
-    return all;
+    if (truncatedAny) /** @type {any} */ (merged).eightfoldTruncated = true;
+    return merged;
   },
 };
+
