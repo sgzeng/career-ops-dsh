@@ -93,7 +93,7 @@ import { isMainModule } from './lib/is-main-module.mjs';
 import { SCAN_HISTORY_COLUMNS, parseScanHistoryLine, scanHistoryDataLines } from './lib/scan-history-columns.mjs';
 import { escapeFormulaCell } from './lib/tsv-formula-escape.mjs';
 import { sectionKind } from './lib/pipeline-sections.mjs';
-import { promoteKnownFragmentIdentity, LANGUAGE_PARAMS, languageSubtag } from './url-key.mjs';
+import { promoteKnownFragmentIdentity, canonicalizeKnownPostingUrl, LANGUAGE_PARAMS, languageSubtag } from './url-key.mjs';
 import { getCareerOpsRoot, getProfilePath, hasProfileOverride } from './path-resolver.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { resolveExperienceFilter, applyExperienceFilter } from './jd-years.mjs';
@@ -2207,6 +2207,7 @@ export function normalizeUrlForDedup(url) {
     }
   }
   promoteKnownFragmentIdentity(parsed);
+  canonicalizeKnownPostingUrl(parsed);
   parsed.hash = '';
   parsed.pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase() || '/';
   return parsed.toString();

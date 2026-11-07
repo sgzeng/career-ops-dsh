@@ -302,4 +302,13 @@ ok('two known, different languages are distinct; the same language (any region) 
   assert.equal(postingUrlRelation('https://acme.recruitee.com/o/a?lang=de', 'https://acme.recruitee.com/o/a?lang=en'), 'distinct');
   assert.equal(postingUrlRelation('https://acme.recruitee.com/o/a?lang=en-GB', 'https://acme.recruitee.com/o/a?lang=en'), 'same');
   assert.equal(postingUrlRelation('http://acme.recruitee.com/o/a/?utm_source=x', 'https://acme.recruitee.com/o/a'), 'same');
+});ok('one Microsoft requisition keys the same whether the job path or the Eightfold pid form wrote it', () => {
+  assert.equal(
+    normalizeUrl('https://apply.careers.microsoft.com/careers/job/1970393556995459'),
+    normalizeUrl('https://apply.careers.microsoft.com/careers?pid=1970393556995459&domain=microsoft.com&hl=en'),
+  );
+  assert.notEqual(
+    normalizeUrl('https://apply.careers.microsoft.com/careers?pid=1970393556995459&domain=microsoft.com'),
+    normalizeUrl('https://apply.careers.microsoft.com/careers?pid=1970393556988227&domain=microsoft.com'),
+  );
 });

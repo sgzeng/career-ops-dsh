@@ -287,6 +287,30 @@ export function promoteKnownFragmentIdentity(url) {
 }
 
 /**
+ * Give one Microsoft requisition one URL shape. Microsoft's careers site serves
+ * a posting at `/careers/job/<pid>` (linkedin-post rows and older manual rows)
+ * and at `/careers?pid=<pid>&domain=microsoft.com` (the Eightfold feed, and every
+ * row it wrote since). Without this the two keys differ, so a posting already in
+ * the tracker in one shape is added again from the feed in the other.
+ *
+ * The pid is the posting's own id, so everything else in the query is dropped.
+ * Mutates the URL object used for the comparison key only.
+ *
+ * @param {URL} url
+ */
+export function canonicalizeKnownPostingUrl(url) {
+  if (url.hostname.toLowerCase() !== 'apply.careers.microsoft.com') return;
+  const m = /^\/careers(?:\/job\/([0-9]+))?\/?$/i.exec(url.pathname);
+  if (!m) return;
+  const pid = m[1] ?? url.searchParams.get('pid');
+  if (!pid || !/^[0-9]+$/.test(pid)) return;
+  url.pathname = '/careers';
+  url.search = '';
+  url.searchParams.set('pid', pid);
+  url.searchParams.set('domain', 'microsoft.com');
+}
+
+/**
  * Reduce a posting URL to a stable comparison key.
  *
  * @param {string} raw - A posting URL (or any string) from a tracker row / TSV.
@@ -316,6 +340,7 @@ export function normalizeUrl(raw) {
   u.protocol = 'https:';            // http vs https is the same posting
   u.hostname = foldHostname(u.hostname);
   promoteKnownFragmentIdentity(u);
+  canonicalizeKnownPostingUrl(u);
   u.hash = '';                      // unrecognized fragments do not identify it
 
   // Drop tracking params, keep functional ones, sort for order-independence.
