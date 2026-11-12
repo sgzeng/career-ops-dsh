@@ -16,6 +16,9 @@ import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { pass, fail, rmSync, ROOT, NODE } from '../helpers.mjs';
 
+// The shared cross-process limiter (lib/linkedin-limiter.mjs) would wait out a scripted 429 for ~100 s.
+process.env.CAREER_OPS_NO_LI_LIMITER = '1';
+
 console.log('\nParser — linkedin-jobs paging and partial results');
 
 const mod = await import(pathToFileURL(join(ROOT, 'scripts/parsers/linkedin-jobs.mjs')).href);

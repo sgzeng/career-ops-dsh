@@ -25,7 +25,8 @@
  *   --pages N          max guest requests per keyword, 10 cards each (default 5,
  *                      i.e. the top ~50 results; paging stops early at the end)
  *   --location STR     LinkedIn location filter (default "United States")
- *   --throttle-ms N    delay between requests (default 3500, mirrors liveness-api)
+ *   --throttle-ms N    average gap between requests across ALL LinkedIn callers (default 4500; the
+                      shared limiter spaces them, see lib/linkedin-limiter.mjs)
  *   --dry-run          also print a human table to stderr
  *   --fixture FILE     parse a saved HTML file instead of fetching (one page); for tests
  *   --dump DIR         write each fetched page to DIR/<kw>-<start>.html for debugging
@@ -48,6 +49,7 @@ import { parseArgs } from 'node:util';
 import { isMainModule } from '../../lib/is-main-module.mjs';
 import { BROWSER_LIKE_USER_AGENT } from '../../user-agent.mjs';
 import { decodeEntities } from '../../providers/_html-entities.mjs';
+import { acquireLinkedInSlot, reportLinkedInBlock, reportLinkedInOk, LI_GAP_MS } from '../../lib/linkedin-limiter.mjs';
 
 const GUEST_SEARCH_URL =
   'https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search';
@@ -174,6 +176,10 @@ export async function collectJobs(keywords, opts) {
   const { pages, throttleMs, dump } = opts;
   const getPage = opts.fetchPage || fetchPage;
   const wait = opts.sleep || sleep;
+  // Real network runs share one request budget with every other LinkedIn caller
+  // (lib/linkedin-limiter.mjs). Tests inject fetchPage/sleep, or set CAREER_OPS_NO_LI_LIMITER=1 for a
+  // child process, and keep the plain throttle.
+  const shared = opts.sharedLimiter ?? (!opts.fetchPage && !opts.sleep && !process.env.CAREER_OPS_NO_LI_LIMITER);
   const seen = new Set();
   const jobs = [];
   let requests = 0;
@@ -186,15 +192,35 @@ export async function collectJobs(keywords, opts) {
     const seenForKeyword = new Set();
     let start = 0;
     for (let p = 0; p < pages; p++) {
-      if (requests > 0) await wait(throttleMs);
+      if (!shared && requests > 0) await wait(throttleMs);
       requests++;
       let html;
-      try {
-        html = await getPage(keyword, { ...opts, start });
-      } catch (err) {
-        if (!err.fatal || jobs.length === 0) throw err;
-        partial = { keyword, start, keywordIndex, keywordCount: keywords.length, error: err };
-        break keywordLoop;
+      // A 429 is waited out once (the shared cooldown, ~100 s: recovery was measured at <= 90 s)
+      // and the same page is retried; a second 429 in a row ends the run as a partial result.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          if (shared) {
+            const slot = await acquireLinkedInSlot({ gapMs: throttleMs, ...opts.limiterDeps });
+            if (!slot.ok) {
+              const e = new Error(`linkedin-jobs: shared limiter cooldown open for another ${Math.round(slot.blockedMs / 1000)}s for "${keyword}" (start=${start}) — rate-limited or blocked`);
+              e.fatal = true;
+              throw e;
+            }
+          }
+          html = await getPage(keyword, { ...opts, start });
+          if (shared) await reportLinkedInOk(opts.limiterDeps);
+          break;
+        } catch (err) {
+          const blocked = err.fatal && /HTTP (429|403|999)/.test(err.message);
+          if (shared && blocked) {
+            const b = await reportLinkedInBlock(opts.limiterDeps);
+            err.message += ` (cooldown ${Math.round(b.cooldownMs / 1000)}s, strike ${b.strikes})`;
+            if (attempt === 0 && b.strikes === 1) continue; // wait it out via the next slot, retry once
+          }
+          if (!err.fatal || jobs.length === 0) throw err;
+          partial = { keyword, start, keywordIndex, keywordCount: keywords.length, error: err };
+          break keywordLoop;
+        }
       }
       if (dump) {
         try {
@@ -250,7 +276,7 @@ const USAGE = `Usage:
   --pages N          max guest requests per keyword, 10 cards each; stops early at
                      the end of the results (default 5, the top ~50)
   --location STR     LinkedIn location filter (default "United States")
-  --throttle-ms N    delay between requests (default 3500)
+  --throttle-ms N    average gap between requests across all LinkedIn callers (default 4500)
   --dry-run          also print a human table to stderr
   --fixture FILE     parse a saved HTML file instead of fetching (one page); for tests
   --dump DIR         write each fetched page to DIR/<kw>-<start>.html (start = result offset)
@@ -275,7 +301,7 @@ async function main() {
         'since-days': { type: 'string', default: '7' },
         pages: { type: 'string', default: String(DEFAULT_PAGES) },
         location: { type: 'string', default: 'United States' },
-        'throttle-ms': { type: 'string', default: '3500' },
+        'throttle-ms': { type: 'string', default: String(LI_GAP_MS) },
         'dry-run': { type: 'boolean', default: false },
         fixture: { type: 'string' },
         dump: { type: 'string' },
@@ -292,7 +318,7 @@ async function main() {
     sinceDays,
     pages: Math.max(1, Math.floor(Number(parsed.values.pages)) || DEFAULT_PAGES),
     location: parsed.values.location,
-    throttleMs: Math.max(0, Number(parsed.values['throttle-ms']) || 3500),
+    throttleMs: Math.max(0, Number(parsed.values['throttle-ms']) || LI_GAP_MS),
     dump: parsed.values.dump,
   };
 

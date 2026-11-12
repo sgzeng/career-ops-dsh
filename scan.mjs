@@ -5107,6 +5107,12 @@ async function main() {
       writeRunFailureRow('failed');
       process.exit(130);
     });
+    // daily-scan.sh runs this under a wall-clock limit (timeout/perl alarm
+    // send SIGTERM/SIGALRM-style kills): record the aborted run the same way.
+    process.once('SIGTERM', () => {
+      writeRunFailureRow('failed');
+      process.exit(143);
+    });
   }
 
   // Values providers resolve once and reuse on later scans (provider-id-cache.mjs).
@@ -6173,5 +6179,18 @@ if (isMainModule(import.meta.url)) {
     console.error('Fatal:', err.message);
     writeRunFailureRow('failed');
     process.exitCode = 1;
+  }).then(async () => {
+    // Force the exit once main() has returned: every result is already written
+    // (scan-runs.tsv, pipeline.md, scan-history.tsv), but a keep-alive socket
+    // left ref'd by an abandoned response body (seen 2026-11-11: an
+    // api.ashbyhq.com TLS socket after the OpenAI board overflowed maxBytes)
+    // kept the event loop alive for hours and blocked every later step of
+    // daily-scan.sh. Flush stdout/stderr first so a piped log is complete.
+    const lingering = process.getActiveResourcesInfo().filter(r => r !== 'Timeout' && r !== 'TTYWrap');
+    if (lingering.length > 0) {
+      console.error(`scan: forcing exit, ${lingering.length} handle(s) still open (${[...new Set(lingering)].join(', ')})`);
+    }
+    await Promise.all([process.stdout, process.stderr].map(s => new Promise(resolve => s.write('', resolve))));
+    process.exit(process.exitCode ?? 0);
   });
 }

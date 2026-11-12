@@ -44,6 +44,7 @@ import { VEJ_KEY_MONITOR } from './providers/vdab.mjs';
 import { PATH_BREAKING_CHAR, PATH_BREAKING_CHAR_ENCODED_ONCE } from './providers/arbeitsagentur.mjs';
 import { atsVendorOf } from './ats-vendor.mjs';
 import { linkedInJobId, linkedInGuestUrl } from './lib/linkedin-url.mjs';
+import { acquireLinkedInSlot } from './lib/linkedin-limiter.mjs';
 
 const TIMEOUT_MS = 8_000;
 // Arbeitsagentur: the hexadecimal digits of an encoded character can be in either case.
@@ -640,6 +641,11 @@ const nextRequestAt = new Map();
  */
 export async function throttleProviderRequest(providerId, intervalMs) {
   if (!intervalMs) return 0;
+  // LinkedIn calls share one request budget with the search parsers and the JD cache
+  // (lib/linkedin-limiter.mjs): the guest endpoints limit per IP on the aggregate rate.
+  if (providerId === 'linkedin' && !process.env.CAREER_OPS_NO_LI_LIMITER) {
+    return (await acquireLinkedInSlot({ maxWaitMs: 150_000 })).waitedMs;
+  }
   const now = Date.now();
   const earliest = Math.max(now, nextRequestAt.get(providerId) ?? 0);
   nextRequestAt.set(providerId, earliest + intervalMs);

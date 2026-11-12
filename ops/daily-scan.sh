@@ -136,13 +136,23 @@ digits_or() {
   # (Mac asleep) or a skipped week must not leave jobs unreachable. Overlap is
   # free — only `added` rows reach scan-history.tsv, so re-seen jobs dedup.
   echo "--- node scan.mjs --since 14 (curated watchlist) ---"
-  node scan.mjs --since 14 --quiet
-  echo "scan.mjs exit=$?"
+  # Hard 25-minute limit (CAREER_OPS_SCAN_TIMEOUT_SECS): 20 logged runs took
+  # 170-542s (median 324s) before the shared LinkedIn limiter (lib/linkedin-limiter.mjs)
+  # spaced every LinkedIn request ~4.5s apart (a heavy day adds ~10 min), so 1500s. On 2026-11-11 scan.mjs
+  # finished its work but never exited (a leaked keep-alive socket), and since
+  # nothing bounded it, every later step waited behind it for hours.
+  run_limited "$(digits_or "${CAREER_OPS_SCAN_TIMEOUT_SECS:-}" 1500)" node scan.mjs --since 14 --quiet
+  scan_rc=$?
+  echo "scan.mjs exit=$scan_rc"
+  case "$scan_rc" in
+    124|137|142|143) echo "WARN: scan.mjs hit the time limit (exit $scan_rc) — continuing with the next step" ;;
+  esac
 
   # Re-probe every tracked slug so a silently-404ing board gets caught.
   # This script runs weekly (Mondays), so this runs once a week.
   echo "--- slug sweep: verify-portals.mjs ---"
-  node verify-portals.mjs
+  # Limit CAREER_OPS_VERIFY_TIMEOUT_SECS (default 900s; a normal run is ~270s).
+  run_limited "$(digits_or "${CAREER_OPS_VERIFY_TIMEOUT_SECS:-}" 900)" node verify-portals.mjs
   echo "verify-portals.mjs exit=$?"
 
   # Health digest. Every tool here only reads (close-stale without --confirm is
