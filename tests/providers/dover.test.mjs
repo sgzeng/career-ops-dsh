@@ -372,6 +372,8 @@ try {
     } else {
       fail(`dover.fetch() endless: ${pages} pages, ${jobs.length} jobs, stderr ${JSON.stringify(errors)}`);
     }
+    if (jobs.truncated?.reason === 'page-cap' && jobs.truncated?.fetched === 10) pass('dover.fetch(): a board stopped by max_pages carries jobs.truncated');
+    else fail(`dover.fetch() page-cap flag: ${JSON.stringify(jobs.truncated)}`);
 
     const ctx2 = makeCtx([[slugUrl, clientDoc], [(u) => u.includes('/jobs?'), endless], [(u) => u.includes('/inbound/'), (u) => ({ id: u.split('/').pop() })]]);
     await captureConsoleErrors(() => dover.fetch({ ...entry, max_pages: 2 }, ctx2));
@@ -400,6 +402,8 @@ try {
     } else {
       fail(`dover.fetch() page-2 failure: ${jobs.length} jobs, ${page2Attempts} attempts, stderr ${JSON.stringify(errors)}`);
     }
+    if (jobs.truncated?.reason === 'fetch-error' && jobs.truncated?.fetched === 1) pass('dover.fetch(): a board cut short by a later-page failure carries jobs.truncated');
+    else fail(`dover.fetch() fetch-error flag: ${JSON.stringify(jobs.truncated)}`);
   }
 
   // ── Probe cooperation (ctx.maxPages) ────────────────────────────────
@@ -411,7 +415,7 @@ try {
     const { result: jobs, errors } = await captureConsoleErrors(() => dover.fetch(entry, ctx));
     const listCalls = ctx.calls.filter((c) => c.url.includes('/jobs?')).length;
     const detailCalls = ctx.calls.filter((c) => c.url.includes('/inbound/')).length;
-    if (jobs.length === 2 && listCalls === 1 && detailCalls === 0 && ctx.calls.length === 2 && errors.length === 0) {
+    if (jobs.length === 2 && listCalls === 1 && detailCalls === 0 && ctx.calls.length === 2 && errors.length === 0 && !jobs.truncated) {
       pass('dover.fetch() with ctx.maxPages=1: one list request, no enrichment, no warning');
     } else {
       fail(`dover.fetch() probe: ${jobs.length} jobs, ${listCalls} list, ${detailCalls} detail, ${ctx.calls.length} total, stderr ${JSON.stringify(errors)}`);

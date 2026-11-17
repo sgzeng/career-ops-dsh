@@ -19,6 +19,10 @@ Resolve the inbox file once, before the liveness sweep, and use it for every sea
 
 Name the inbox in your first line of output (`Inbox: data/pipeline.bridge.md`) when it is not `data/pipeline.md`, so the user can see which lane is being processed. If that file does not exist, say so and stop. Do not fall back to `data/pipeline.md`: that is the other lane's inbox.
 
+## Session title
+
+In an interactive session, apply the router's **Session Title** rule (`SKILL.md`, #5303) when the host allows it. A run on one URL uses the single-evaluation titles. A run that follows a scan keeps the scan's `{remaining}/{found}` counter: `checking` through the liveness sweep and the pre-screen gate, `evaluating` from the first full evaluation, and one count down for each removal of a posting the scan counted. An `unreadable` posting the scan counted is an unconfirmed link: it stays in Pending, but it leaves this run's count, once. A `needs_confirmation` posting is on hold, not removed, so it stays counted. Older pending entries that this run also processes do not move the counter, so track the counted URLs the scan returned with its counts (a delegated run is handed them). A worker running this mode never renames anything. It ends its result with `Title counts: {remaining}/{found}`, plus the role, employer and end state (evaluated or on hold) of the last posting when one remains.
+
 ## Liveness sweep
 
 **Run this before processing any URLs.** Inbox entries are usually unchecked: `scan.mjs` adds postings without checking that each one is still open unless it ran with `--verify`, and a URL the user pasted was never checked at all. Without a sweep, dead postings reach evaluation one tab at a time, burning time and tokens on phantom roles (a single inbox of 8 stale URLs produces 8 wasted evaluations).
@@ -41,7 +45,7 @@ Read `spend_tier` from `config/profile.yml` (see `modes/_shared.md` -- Spend Tie
 - **`economy` tier:** No gate. The tier is already the cheapest available. Every surviving pending URL goes straight to the full evaluation.
 - This gate only applies to pipeline/batch processing. It never applies to a single interactive evaluation.
 
-**Discard log (auditable):** Every posting the gate filters out MUST be logged with a one-line reason so pre-filtering is never a silent black box. Append one line to `data/discard.log` (create the file if absent) in the format `{ISO8601 timestamp}\t{url}\t{reason}` (three tab-separated fields — interactive pipeline mode has no batch job ID, so the `id` field is omitted here; batch mode's `batch/batch-runner.sh` uses a separate `batch/logs/discard.log` with a four-field format that includes the job ID), in addition to the `skipped` entry already written to "Processed" above. This log is the visible, auditable record of what the gate discarded and why -- review it periodically to tune the North Star archetypes if the gate is too aggressive or too lax. `node discard-analytics.mjs` summarizes it: counts by reason, domain and day, plus the most frequent `title_mismatch` URLs to check by hand.
+**Discard log (auditable):** Every posting the gate filters out MUST be logged with a one-line reason so pre-filtering is never a silent black box. Append one line to `data/discard.log` (create the file if absent) in the format `{ISO8601 timestamp}\t{url}\t{reason}` (three tab-separated fields — interactive pipeline mode has no batch job ID, so the `id` field is omitted here; batch mode's `batch/batch-runner.sh` uses a separate `batch/logs/discard.log` with a four-field format that includes the job ID), in addition to the `skipped` entry already written to "Processed" above. This log is the visible, auditable record of what the gate discarded and why -- review it periodically to tune the North Star archetypes if the gate is too aggressive or too lax. `node discard-analytics.mjs` summarizes it: counts by reason, domain and day, plus the most-discarded URLs with their latest reason, to check by hand. To tune title keywords, use `node filter-audit.mjs`: the scanner's title filter records its drops in `data/scan-history.tsv`, not here.
 
 ## Workflow
 
@@ -56,7 +60,7 @@ Read `spend_tier` from `config/profile.yml` (see `modes/_shared.md` -- Spend Tie
 
    **Choosing the CV output:** This step is `modes/auto-pipeline.md` → Step 3, not a second rule. Read `config/profile.yml` → `cv.output_format` and route on it: `"latex"` → `modes/latex.md`, `"text"` → `modes/text.md`, otherwise (default) → `modes/pdf.md`. The `latex` and `text` routes never produce HTML or a PDF, whatever the score — mark PDF ❌ in the tracker and the summary table. The PDF gate below narrows the default route only; it is not a way to override the format the candidate configured.
 
-   **About the PDF gate (configurable, default route only):** Read `config/profile.yml` → `auto_pdf_score_threshold`. If the key does not exist, default to `3.0` (this mode's original gate). If the evaluation score is less than the threshold, skip PDF generation: write the report normally, show in the header `**PDF:** not generated — run /career-ops pdf {company-slug} to create on demand`, and mark PDF ❌ in the tracker. If the score is ≥ threshold, generate the PDF as usual.
+   **About the PDF gate (configurable, default route only):** Read `config/profile.yml` → `auto_pdf_score_threshold`. If the key does not exist, default to `3.0` (`PDF_GATE_DEFAULT` in `lib/score-action.mjs`, the floor of the Maybe band). If the evaluation score is less than the threshold, skip PDF generation: write the report normally, show in the header `**PDF:** not generated — run /career-ops pdf {company-slug} to create on demand`, and mark PDF ❌ in the tracker. If the score is ≥ threshold, generate the PDF as usual.
 
    **Tuning it:** Generating a tailored PDF costs ~30–60s per entry (Playwright launch + HTML render) and produces files that often go unused — most roles score in the 2.x/3.x range and never reach the application stage. Raise `auto_pdf_score_threshold` (e.g. `4.0`) to write only the report for marginal offers and produce the PDF on demand via `/career-ops pdf {slug}`; set `0` to generate one for every offer. Both modes (Path A `/career-ops pipeline` and Path B `batch/batch-runner.sh`) read the same key, so behavior is identical regardless of which path processes an offer.
 3. **Concurrency is conditional on the extraction tool.** If the surviving URLs will use browser-backed Playwright/MCP (`browser_navigate` + `browser_snapshot`), process them **one at a time**: multiple workers must never share one browser session, because navigation and snapshots can cross-contaminate and evaluate the wrong posting. If every worker uses the isolated CLI extractor or non-browser fallback, **and** the orchestrator can guarantee independent process/session state, 3+ URLs may use `run_in_background`, at most one URL per worker. Each worker is a **single-pass worker**: it evaluates its one URL and must **not** spawn further subagents or invoke other skills; its company/comp research stays inline and bounded (see `modes/_shared.md` → Subagent delegation). When in doubt, use the sequential path.
@@ -75,6 +79,8 @@ List `unreadable` items separately too, with URL and a reason code, when the JD 
 ```
 | # | Company | Role | Score | PDF | Recommended action |
 ```
+
+5. **Then, once per run (interactive runs only):** if the run saved at least one report, finish with `node community-asks.mjs next` and follow AGENTS.md → "Community asks".
 
 ## Format of pipeline.md
 

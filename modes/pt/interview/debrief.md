@@ -22,7 +22,7 @@ Após uma entrevista real, registre o que foi perguntado, avalie o que funcionou
 6. **Story bank** em `interview-prep/story-bank.md` — adicione novas histórias se surgirem
 7. **CV** em `cv.md` + `article-digest.md` (se existir) — para ancorar respostas sugeridas em experiência real
 8. **Alegações retiradas** em `interview-prep/retracted-claims.md` (se existir) — barreira rígida; nunca use uma alegação retirada em uma resposta sugerida, mesmo que o candidato a tenha dito na entrevista
-9. **Arquivo de preparação específico da vaga** — acrescente as notas do debrief; corrija no próprio local qualquer fato existente que a entrevista contradiga diretamente (veja Step 1b)
+9. **Arquivo de preparação específico da vaga** — acrescente as notas do debrief (ou substitua a entrada desta rodada ao refazer, veja Step 1d); corrija no próprio local qualquer fato existente que a entrevista contradiga diretamente (veja Step 1b)
 
 ---
 
@@ -52,6 +52,8 @@ Se a memória estiver incompleta, faça perguntas direcionadas:
 - "O entrevistador fez algum acompanhamento sobre algo — isso normalmente significa que ele queria mais?"
 
 Defina o marcador de origem explícito: **`input_source: recall`**.
+
+**Formato e tom (ambos os caminhos, uma pergunta curta, opcional).** Pergunte uma vez: "Uma rápida sobre o clima da rodada: qual foi o formato (recruiter screen / 1:1 / panel / group / take-home review), quantas pessoas estavam na chamada, como você descreveria o tom (relaxed-conversational / structured-formal / rapid-fire / adversarial) e quão confortável você se sentiu (1-5, ou algumas palavras suas)?" Se uma transcrição mostrar o formato, o número de pessoas ou o tom, ofereça-os como sugestão para confirmar. **Nunca deduza nem preencha o conforto pelo candidato**: é a avaliação subjetiva dele, então registre-a apenas com as palavras dele e deixe-a de fora se ele pular. Se ele pular a pergunta inteira, não escreva nenhum dos quatro valores.
 
 Qualquer que seja o caminho que produziu os dados de pergunta/resposta, os Steps 2 em diante operam sobre eles de forma idêntica — avaliação honesta, fechamento de lacunas e atualizações no banco de perguntas/story bank não distinguem entre um debrief com `input_source: transcript` e um com `input_source: recall`. O próprio marcador é levado adiante inalterado para que o Step 9 possa lê-lo.
 
@@ -90,6 +92,17 @@ Enquanto registra o que foi perguntado, capture também o que o entrevistador di
 - **Alegações do candidato estão fora de escopo.** Apenas as declarações do entrevistador sobre a função pertencem a este ponto, não qualquer coisa que o candidato tenha dito sobre si mesmo.
 
 Leve a lista para o Step 6 e o Step 8, e para o Step 9 apenas para entrada de transcrição.
+
+---
+
+## Step 1d — Check for an Earlier Debrief of This Round
+
+Antes de salvar qualquer coisa (o Step 8 e o Step 9 dependem da resposta), verifique se este debrief refaz um já salvo. Assim que empresa, vaga, tipo de rodada e data forem conhecidos (pergunte, se não forem), liste todos os arquivos de sessão existentes para eles em `interview-prep/sessions/`: o nome base `{company-slug}-{role-slug}-{round}-{YYYY-MM-DD}.md` e quaisquer variantes `-2`, `-3`, ..., mesmo quando o próprio nome base estiver ausente.
+
+- **Nenhum arquivo:** procure em `interview-prep/{company-slug}-{role-slug}.md` uma entrada `## Round [N] Debrief — [YYYY-MM-DD]` para esta rodada e data, que uma execução anterior deixa quando parou depois do Step 8. Se houver, pergunte se este debrief a refaz; se sim, o Step 8 substitui essa entrada. Caso contrário, é uma rodada nova e o Step 8 acrescenta. Em ambos os casos, o Step 9 escreve o nome base.
+- **Um ou mais arquivos:** nunca sobrescreva em silêncio. Mostre os arquivos com o `interviewer_role` e a primeira pergunta de cada um, e pergunte ao candidato se este debrief refaz um deles ou é uma rodada separada. Liste também como opção adicional qualquer entrada `## Round [N] Debrief — [YYYY-MM-DD]` desta data no arquivo de preparação que não corresponda a nenhum dos arquivos (uma execução que parou depois do Step 8 deixa uma): se o candidato a escolher, o Step 8 substitui essa entrada e o Step 9 escreve o próximo contador livre. Mostre cada uma dessas entradas com suas linhas `**Interviewer:**` e `**Round type:**`, para que o candidato distinga a entrada interrompida de um debrief concluído de outro tipo de rodada na mesma data.
+  - **Refazer:** anote o arquivo que o candidato escolher. O Step 8 substitui a entrada dessa rodada no arquivo de preparação em vez de acrescentar uma segunda, e o Step 9 atualiza no lugar o arquivo escolhido segundo sua regra de refazer.
+  - **Rodada separada:** o Step 8 acrescenta como de costume, e o Step 9 escreve o próximo contador livre (`-2`, `-3`, ...) antes de `.md`.
 
 ---
 
@@ -175,7 +188,7 @@ Seja honesto. Uma faixa de probabilidade com raciocínio claro é mais útil do 
 
 ## Step 8 — Save Debrief
 
-Acrescente a `interview-prep/{company-slug}-{role-slug}.md`:
+Acrescente a `interview-prep/{company-slug}-{role-slug}.md`. **Se o Step 1d confirmou que é um refazer**, substitua em vez disso a entrada `## Round [N] Debrief — [YYYY-MM-DD]` existente dessa rodada (o título e tudo até o próximo título `## `), para que uma entrevista mantenha uma única entrada; acrescente só quando o arquivo não tiver entrada para essa rodada e data.
 
 ```markdown
 ## Round [N] Debrief — [YYYY-MM-DD]
@@ -203,17 +216,26 @@ Acrescente a `interview-prep/{company-slug}-{role-slug}.md`:
 **Timeline:** [quaisquer datas ou prazos mencionados]
 **Other candidates:** [se divulgado]
 **Next steps:** [o que o entrevistador disse que acontece a seguir e até quando]
+
+### Interview Format and Tone (qualquer rodada — omita se o candidato pulou)
+**Interview format and tone:** (liste apenas os campos que o candidato respondeu; remova por completo os itens sem resposta, sem placeholders e sem valores deduzidos)
+- Format: [recruiter screen / 1:1 / panel / group / take-home review]
+- People on the call: [número]
+- Tone: [relaxed-conversational / structured-formal / rapid-fire / adversarial]
+- Candidate comfort: [1-5, ou uma frase curta, nas palavras do próprio candidato]
 ```
 
-**Se um valor de remuneração foi declarado verbalmente nesta rodada** (o candidato forneceu um número, não apenas "o assunto remuneração surgiu"), acrescente uma linha `stated` a `data/salary-observations.tsv` (crie o arquivo se estiver ausente; formate conforme `docs/SCRIPTS.md` → salary-gap) com o tracker#, a data desta rodada, o valor/moeda, fonte `user`, uma nota curta, o rótulo da rodada e o nome do entrevistador. É isso que permite que o `interview/plan` lembre o candidato disso antes da próxima rodada — veja o Input #9 lá.
+**Se um valor de remuneração foi declarado verbalmente nesta rodada** (o candidato forneceu um número, não apenas "o assunto remuneração surgiu"), acrescente uma linha `stated` a `data/salary-observations.tsv` (crie o arquivo se estiver ausente; formate conforme `docs/SCRIPTS.md` → salary-gap) com o tracker#, a data desta rodada, o valor/moeda, fonte `user`, uma nota curta, o rótulo da rodada e o nome do entrevistador. É isso que permite que o `interview/plan` lembre o candidato disso antes da próxima rodada — veja o Input #9 lá. Ao refazer, pule a linha se o arquivo já tiver uma linha `stated` com o mesmo tracker#, rodada, data, valor e moeda.
 
 ---
 
 ## Step 9 — Write Session Transcript
 
-Após o debrief, escreva também uma transcrição da sessão legível por máquina em `interview-prep/sessions/{company-slug}-{role-slug}-{round}-{YYYY-MM-DD}.md`. Este é um registro estruturado da rodada para modos de análise posteriores; os turnos com identificação de quem fala permitem que um consumidor leia qualquer um dos lados sem reinferir quem falou. O contrato completo reside em `interview-prep/sessions/README.md`.
+Após o debrief, escreva também uma transcrição da sessão legível por máquina em `interview-prep/sessions/{company-slug}-{role-slug}-{round}-{YYYY-MM-DD}.md`. Use a resposta do Step 1d, nunca uma sobrescrita silenciosa: sem arquivo anterior, escreva o nome base; para uma rodada separada, escreva o próximo contador livre (`-2`, `-3`, ...) antes de `.md`; ao refazer, atualize no lugar o arquivo que o candidato escolheu. Veja a seção "File names" do README. Este é um registro estruturado da rodada para modos de análise posteriores; os turnos com identificação de quem fala permitem que um consumidor leia qualquer um dos lados sem reinferir quem falou. O contrato completo reside em `interview-prep/sessions/README.md`.
 
-**Verifique o marcador `input_source` definido no Step 1.** Se `input_source: transcript`, pule a reconstrução: não regenere a transcrição a partir da saída do Step 1/Step 2 — isso seria uma cópia com mais perdas da fonte real de onde veio. Em vez disso, salve a transcrição original diretamente, levemente normalizada para corresponder ao esquema abaixo (rótulos de quem fala, front-matter, tags de competência da avaliação do Step 2). Se `input_source: recall`, reconstrua a transcrição a partir da saída do Step 1/Step 2 como antes — a lembrança nunca tem um original literal para preservar.
+**Verifique o marcador `input_source` definido no Step 1.** Se `input_source: transcript`, pule a reconstrução: não regenere a transcrição a partir da saída do Step 1/Step 2 — isso seria uma cópia com mais perdas da fonte real de onde veio. Em vez disso, salve a transcrição original diretamente, levemente normalizada para corresponder ao esquema abaixo (rótulos de quem fala, front-matter, tags de competência da avaliação do Step 2). Se `input_source: recall`, reconstrua a transcrição a partir da saída do Step 1/Step 2 como antes — um arquivo novo de lembrança não tem um original literal para preservar.
+
+**Regra de refazer (o Step 1d confirmou um refazer).** O arquivo escolhido pode conter turnos literais de um debrief anterior feito com transcrição, e nada nele indica isso. Com `input_source: transcript`, a transcrição substitui os turnos e o `stated_priorities` do arquivo. Com `input_source: recall`, mantenha os turnos e o `stated_priorities` existentes do arquivo exatamente como estão, e acrescente só o que a execução de lembrança trouxe: perguntas que faltam no arquivo (como novos turnos `## Q` na ordem da entrevista), tags de competência em respostas que não têm nenhuma, e as chaves de formato e tom que o candidato deu nesta execução. Nunca reescreva um turno existente a partir da lembrança.
 
 Formato:
 
@@ -225,9 +247,13 @@ round: [screen | hiring-manager | technical | system-design | behavioral | onsit
 date: YYYY-MM-DD
 interviewer_role: [cargo, se souber]
 source: debrief
-stated_priorities:        # apenas entrada de transcrição; omita se nenhuma foi declarada ou para entrada de memória (Step 1c)
-  - speaker: [nome ou cargo, ou "unknown"]
+stated_priorities:        # escrito apenas a partir de entrada de transcrição; omita se nenhuma foi declarada (Step 1c); um refazer de memória mantém a lista existente
+  - speaker: "[nome ou cargo, ou unknown]"
     quote: "[citação literal curta, entre aspas duplas]"
+format: [recruiter screen | 1:1 | panel | group | take-home review]   # opcional (Step 1)
+people_on_call: [número]                                              # opcional
+tone: [relaxed-conversational | structured-formal | rapid-fire | adversarial]   # opcional
+candidate_comfort: "[1-5, ou uma frase curta nas palavras do próprio candidato]"      # opcional
 ---
 
 ## Q1
@@ -245,24 +271,32 @@ Regras para a transcrição:
 - **Marque cada resposta com tags.** Na linha imediatamente acima de cada linha `**Candidate:**`, emita `<!-- competency: tag[, tag...] -->` — em minúsculas com hífen (lowercase-kebab-case), separadas por vírgula para respostas com múltiplas competências (ex.: `system-design`, `people-leadership`, `incident-response`). Você já avaliou cada resposta no Step 2, portanto marque a partir dessa avaliação em vez de reler. As tags são livres; escolha a competência que a pergunta realmente testou.
 - **Reconstrua o turno do candidato fielmente.** Use o que o candidato relatou ter dito no Step 1, não uma resposta idealizada. A "resposta correta/completa" do Step 2 pertence ao arquivo de debrief, nunca à transcrição — a transcrição registra o que aconteceu.
 - **`source: debrief`.**
-- **`stated_priorities` vai no front matter** (Step 1c), como uma lista YAML de itens `speaker` + `quote`, para que scripts e `interview/plan` possam ler sem fazer o parsing do corpo. Coloque entre aspas duplas cada `quote` e escape aspas duplas internas para que o front matter permaneça como YAML válido. A rodada e a data do item são as do próprio arquivo (`round` e `date`). Omita o campo quando nada foi informado e sempre que `input_source: recall`. Nunca coloque prioridades em um arquivo de sessão prática, pois essas não têm um entrevistador real.
+- **`stated_priorities` vai no front matter** (Step 1c), como uma lista YAML de itens `speaker` + `quote`, para que scripts e `interview/plan` possam ler sem fazer o parsing do corpo. Coloque entre aspas duplas cada `quote` para que o front matter permaneça como YAML válido e o valor interpretado seja exatamente o que foi dito: ao escapar manualmente, escape as barras invertidas antes das aspas duplas internas, para que um `\n` literal na citação permaneça dois caracteres em vez de virar uma quebra de linha. A rodada e a data do item são as do próprio arquivo (`round` e `date`). Coloque também cada `speaker` entre aspas duplas e escape-o como `quote` (primeiro as barras invertidas, depois as aspas duplas internas): um valor como `Hiring Manager: Jane` contém dois-pontos e é YAML inválido sem aspas. Omita o campo quando nada foi informado, e nunca o escreva a partir de `input_source: recall`: um arquivo novo de lembrança não o recebe, e um refazer de lembrança mantém inalterada a lista existente do arquivo escolhido. Nunca coloque prioridades em um arquivo de sessão prática, pois essas não têm um entrevistador real.
+- **`format`, `people_on_call`, `tone` e `candidate_comfort` são chaves opcionais do front matter** que carregam os valores do Step 1 / Step 8, para que modos posteriores possam lê-los sem fazer o parsing do texto. Escreva apenas as chaves que o candidato respondeu; omita as demais e nunca escreva `candidate_comfort` a menos que o candidato o tenha informado. Coloque `candidate_comfort` entre aspas duplas (pode ser texto livre); ao escapar manualmente, escape as barras invertidas antes das aspas duplas internas, como para `quote`. Arquivos de sessão prática não as incluem.
 - O arquivo da sessão fica em um diretório ignorado pelo git (nomes/empresas reais nunca entram no controle de versão); escreva-o sem ocultar nomes.
 
 ---
 
 ## Step 10 — Record the call on the tracker
 
-Após salvar o debrief, registre os fatos confirmados na candidatura. Compare um novo fato a um dealbreaker que o usuário já escreveu em `modes/_profile.md` ou `config/profile.yml`. Mostre o fato e a frase do perfil. Pergunte `Registrar este dealbreaker no relatório e no tracker? [y/N]`. Se sim, passe essa frase como `--dealbreaker`. Se não, omita.
+Após salvar o debrief, registre os fatos confirmados na candidatura. Compare cada novo fato a um dealbreaker que o usuário já escreveu em `modes/_profile.md` ou `config/profile.yml`. Pergunte sobre cada correspondência separadamente e mostre o fato e a frase do perfil. O `debrief-sync.mjs` rejeita um valor de `--dealbreaker` com ponto e vírgula (`;`), tabulação ou quebra de linha, e isso interrompe a chamada inteira. Se a frase tiver um desses caracteres, diga ao usuário qual é e peça uma versão em uma única linha, sem ele, que mantenha o sentido. Não remova o caractere nem reescreva a frase por conta própria. Verifique a versão do usuário quanto aos três caracteres e peça de novo até que ela não tenha nenhum. Depois pergunte `Registrar este dealbreaker no relatório e no tracker? [y/N]`. Mantenha cada frase que o usuário confirmar, ou a versão em uma linha dele. Descarte cada frase que o usuário recusar.
 
-Para cada pessoa nomeada, pergunte `Salvar este contato em data/contacts.tsv? [y/N]`. Se sim, passe o nome, o e-mail se foi fornecido e o tipo se o usuário nomeou um.
+Para cada pessoa nomeada, pergunte `Salvar este contato em data/contacts.tsv? [y/N]`. Se sim, passe o nome, o e-mail se foi fornecido e o tipo se o usuário nomeou um. `--contact-type` aceita apenas `recruiter`, `hiring-manager`, `peer`, `interviewer`, `internal-referral` ou `other`, em minúsculas. Associe a palavra do usuário ao valor que ela significa, em qualquer idioma (um "talent partner" é `recruiter`, "meu futuro chefe" é `hiring-manager`). Se a palavra não corresponder claramente a um valor, omita `--contact-type` e salve o contato mesmo assim. O `debrief-sync.mjs` rejeita qualquer outro valor, e isso interrompe a chamada inteira, incluindo o dealbreaker e `--next`.
 
 Se o próximo passo nomear um dia claro no calendário, passe `--next YYYY-MM-DD` sem uma segunda pergunta. Resolva o dia da semana a partir do dia do calendário local, e hoje conta. Se a frase não tiver dia, omita `--next`. Se for ambígua (`próxima semana`, dois dias), peça uma data e então passe-a.
 
-Execute `node debrief-sync.mjs` com essas flags. Em seguida, quando um contato for salvo, execute `node contacts.mjs --summary`. Quando um dia for definido, execute `node followup-cadence.mjs --summary`.
+Execute `node debrief-sync.mjs --app <tracker#>` com essas flags, onde `<tracker#>` é o `#` da candidatura no tracker (não o número do relatório). `--dealbreaker` recebe uma única frase e só pode aparecer uma vez por chamada, então execute um comando por frase confirmada. Nunca junte duas frases em um só valor: o script rejeita ponto e vírgula. Coloque as flags de contato e `--next` apenas no primeiro comando. Cada comando seguinte passa `--app <tracker#>` e um único `--dealbreaker`, nada mais. Coloque cada valor entre aspas simples para que o shell passe `$` e crases sem alteração. Escreva uma aspa simples dentro de um valor como `'\''` no Git Bash ou em outro shell POSIX. No PowerShell, escreva-a como `''`, e duplique do mesmo jeito uma aspa curva (`‘`, `’`, `‚` ou `‛`), porque o PowerShell também a lê como aspa:
 
-Não altere o status a menos que o usuário nomeie um novo status. Essa é uma chamada separada de `set-status.mjs`, antes deste comando.
+```bash
+node debrief-sync.mjs --app <tracker#> --dealbreaker '<sentence 1>' --contact-name '<name>' --next YYYY-MM-DD
+node debrief-sync.mjs --app <tracker#> --dealbreaker '<sentence 2>'
+```
 
-Uma segunda execução do mesmo comando é segura.
+Execute os comandos um de cada vez e verifique o código de saída de cada um. Se um comando falhar, pare, corrija-o e execute a lista de novo a partir do primeiro comando. Se não houver dealbreaker, contato nem dia `--next` para passar, pule o comando: o script recusa uma chamada sem nada para registrar. Depois do último comando, quando um contato for salvo, execute `node contacts.mjs --summary`. Quando um dia for definido, execute `node followup-cadence.mjs --summary`.
+
+Não altere o status a menos que o usuário nomeie um novo status. Essa é uma chamada separada de `set-status.mjs`, antes destes comandos.
+
+Uma segunda execução dos mesmos comandos é segura: uma frase, um contato ou uma data já registrados não são gravados de novo.
 
 ---
 

@@ -31,7 +31,9 @@ import { localToday } from '../lib/local-today.mjs';
 export const TAB_STATUSES = {
   new: [],                       // pipeline.md rows with no tracker entry
   evaluated: ['Evaluated'],
-  submitted: ['Applied'],
+  // Speculative (upstream's create-a-role pitch, no posting) is sent and
+  // awaiting a response, so it shows with the submitted applications.
+  submitted: ['Applied', 'Speculative'],
   // Assessment (online test / async screening) sits between Responded and
   // Interview in states.yml; it is an in-process stage, so it shows with them.
   pending: ['Responded', 'Assessment', 'Interview'],

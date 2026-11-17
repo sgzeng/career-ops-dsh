@@ -423,6 +423,10 @@ test('the scanner resolves every call the four known writers contain', () => {
   // appendUnrecordedToScanHistory, whose body is one more call, took over the
   // sibling scanners' skip buckets. scan-interamt.mjs stayed at 5: its four
   // skip writes moved onto that helper, which this counts as the same writer.
+  // scan-ats-full.mjs went 1 → 2 when a timed-out --json sweep started writing
+  // the roles it had already kept. Both calls pass the same localToday() date.
+  // Fork: scan-ats-full.mjs is back at 1 — the normal end of the run and a stop
+  // signal both write through one persistOffers() helper (at most once per run).
   for (const [file, expected] of [['scan.mjs', 10], ['scan-ats-full.mjs', 1], ['scan-hn.mjs', 1], ['scan-interamt.mjs', 5]]) {
     const src = readFileSync(join(ROOT, file), 'utf-8');
     const naive = [...src.matchAll(SCAN_HISTORY_WRITER)].length;

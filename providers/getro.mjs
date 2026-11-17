@@ -36,7 +36,8 @@
 // BOUND for efficiency (don't page through thousands of stale jobs); each job
 // still carries `postedAt` (epoch ms) for any downstream freshness handling.
 // The bound default (90d) is deliberately wide. `getro_max_pages` (default
-// 40, hard-capped at 1500) is a safety ceiling independent of the age cutoff.
+// 40, hard-capped at 1500) is a safety ceiling independent of the age cutoff;
+// a walk that reaches it with postings left warns, naming the entry.
 // Jobs with no created_at are kept ("missing data = pass", same rule as the
 // location filter).
 //
@@ -50,6 +51,7 @@
 
 import { BROWSER_LIKE_USER_AGENT, fetchJsonWithRetry, fetchTextWithRetry, sleep } from './_http.mjs';
 import { cachedLookup } from './_cached-lookup.mjs';
+import { markTruncated } from '../lib/board-truncation.mjs';
 
 // Getro returns `created_at` as Unix seconds, but older boards have been seen
 // emitting ISO strings, so both shapes are handled. Non-positive values return
@@ -239,7 +241,16 @@ export default {
 
     const out = [];
     let total = Infinity;
-    for (let page = 0; page < maxPages && page * HITS_PER_PAGE < total; page++) {
+    // Declared outside the loop so the cap check below can tell a walk that
+    // used every page it was allowed from one that ended on its own: every
+    // `break` leaves `page` below `maxPages`.
+    let page = 0;
+    // Rows the API returned on the last page read, before any is dropped: a
+    // short last page means the board ended there, whatever the cap.
+    let lastPageRows = 0;
+    // Why part of the board went unread, first cause first; null while it is whole.
+    let partialReason = null;
+    for (; page < maxPages && page * HITS_PER_PAGE < total; page++) {
       if (page > 0) await sleep(INTER_PAGE_DELAY_MS, ctx);
 
       let json;
@@ -288,12 +299,14 @@ export default {
           : `${attempts} attempt${attempts === 1 ? '' : 's'}`;
         const pagesToFetch = Math.min(maxPages, Math.ceil(total / HITS_PER_PAGE));
         console.error(`⚠️  getro: ${entry.name || collectionId} truncated at page ${page + 1} of ${pagesToFetch} after ${attemptsText} (${out.length} jobs): ${cause}`);
+        partialReason ??= 'fetch-error';
         break;
       }
 
       const results = json?.results || {};
       const jobs = Array.isArray(results.jobs) ? results.jobs : [];
       if (typeof results.count === 'number') total = results.count;
+      lastPageRows = jobs.length;
       if (jobs.length === 0) break;
 
       let reachedOld = false;
@@ -328,6 +341,26 @@ export default {
       // Once we've crossed the age cutoff, all later pages are older still.
       if (reachedOld) break;
     }
+    // The page cap ended the walk while the board still had postings left, so
+    // the list is partial: every allowed page was read, the last one was full,
+    // and the board's count (when it gives one) says more remain. Only the
+    // entry's own cap warns: when a ctx.maxPages cut (a health probe) is at or
+    // below it, the probe is what stopped the walk, and that is not something
+    // to raise on the entry.
+    if (page >= maxPages && lastPageRows >= HITS_PER_PAGE && page * HITS_PER_PAGE < total
+        && requestedMaxPages < ctxCap) {
+      const of = Number.isFinite(total) ? ` of ${total}` : '';
+      // At the hard ceiling a higher getro_max_pages is clamped back to it, so
+      // raising the entry's value would read nothing more: say so instead.
+      const advice = requestedMaxPages >= HARD_MAX_PAGES
+        ? `the ${HARD_MAX_PAGES}-page hard cap, so raising getro_max_pages reads no more`
+        : 'raise getro_max_pages on this entry for more';
+      console.error(`⚠️  getro: ${entry.name || collectionId} truncated at getro_max_pages=${maxPages} (${out.length}${of} jobs) — ${advice}`);
+      partialReason ??= 'page-cap';
+    }
+    // A partly read board says so in the return value, so scan.mjs logs it
+    // `partial` instead of `reachable` (lib/board-truncation.mjs).
+    if (partialReason) markTruncated(out, partialReason, { fetched: out.length });
     return out;
   },
 };

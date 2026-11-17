@@ -31,6 +31,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMainModule } from '../lib/is-main-module.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -175,7 +176,7 @@ async function main() {
   console.log(`stage1-liveness${dryRun ? ' (dry run)' : ''}: ${todo.length} checked · ${result.active.length} active · ${result.expired.length} expired → Processed · ${todo.length - result.active.length - result.expired.length} left as they were`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error(`stage1-liveness: ${err.message}`);
     process.exitCode = 1;

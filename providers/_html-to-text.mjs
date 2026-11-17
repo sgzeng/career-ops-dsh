@@ -34,7 +34,7 @@ export const FULL_DESCRIPTION_CAP = 20000;
 // contains one, and allowing it made the regex quadratic on text with many
 // `<` and no `>` (`<script ` repeated 10k times took seconds, long enough to
 // stall a scan now that full JD bodies are stripped here).
-const HTML_TAG_RE = /<(?=[a-z/!?])(?:[^<>"']|"[^"]*"|'[^']*')+>/gi;
+export const HTML_TAG_RE = /<(?=[a-z/!?])(?:[^<>"']|"[^"]*"|'[^']*')+>/gi;
 const HTML_MEDIA_RE = /<(script|style)\b(?:[^<>"']|"[^"]*"|'[^']*')*>[\s\S]*?<\/\1\s*>/gi;
 
 /** @param {string} content */

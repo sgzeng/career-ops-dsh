@@ -440,10 +440,22 @@ export default {
     if (more && !stoppedOnError && !probing && page >= maxPages) {
       console.error(`⚠️  dover: ${entry.name} truncated at max_pages=${maxPages} (${byId.size} postings) — raise max_pages on this entry for more`);
     }
+    // Canonical partial-read signal (lib/board-truncation.mjs): scan.mjs logs
+    // the board `partial`, not `reachable`. A probe is never flagged (it throws
+    // on a failure and its page budget is not a cap).
+    const truncated = probing ? null
+      : stoppedOnError ? { reason: 'fetch-error', fetched: byId.size }
+        : more && page >= maxPages ? { reason: 'page-cap', fetched: byId.size }
+          : null;
+    /** @param {any[]} jobs */
+    const flagged = (jobs) => {
+      if (truncated) /** @type {any} */ (jobs).truncated = truncated;
+      return jobs;
+    };
 
     // 3. Enrichment answers "what does this job say", not "is this board
     //    alive" — skipped entirely while probing.
-    if (probing || byId.size === 0) return [...byId.values()];
+    if (probing || byId.size === 0) return flagged([...byId.values()]);
 
     /** @type {Map<string, Record<string, any>>} */
     const details = new Map();
@@ -483,7 +495,6 @@ export default {
         firstFailure ||= String(/** @type {any} */ (err)?.message || err).slice(0, 80);
       }
     }
-
     const total = byId.size;
     if (details.size < total) {
       const parts = [];
@@ -493,9 +504,9 @@ export default {
       console.error(`ℹ️  dover: ${entry.name} enriched ${details.size} of ${total} posting(s)${parts.length ? `, ${parts.join(', ')}` : ''}`);
     }
 
-    return [...byId.entries()].map(([id, job]) => {
+    return flagged([...byId.entries()].map(([id, job]) => {
       const detail = details.get(id);
       return detail ? mergeDoverDetail(job, detail) : job;
-    });
+    }));
   },
 };
