@@ -4,6 +4,8 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { tryAcquireDirLockSync } from './lib/dir-lock.mjs';
+import { lockDirFor } from './pipeline-lock.mjs';
 
 export const DEAD_BOARD_HEADER = 'ats\tboard\tmisses\tlast_checked';
 export const DEAD_BOARD_MISSES = 3;
@@ -51,6 +53,9 @@ export function shouldSkipDeadBoard(rows, ats, board, now = Date.now(), { minMis
 }
 
 export function recordBoardResult(rows, ats, board, status, now = Date.now()) {
+  // Remember which ATS this run has changed: saveDeadBoards replaces only those
+  // and takes every other ATS's rows from the file (see there).
+  (rows.touchedAts ??= new Set()).add(ats);
   const rowKey = key(ats, board);
   if (status === 200) {
     rows.delete(rowKey);
@@ -92,12 +97,48 @@ export function recordBoardFailure(rows, ats, board, err, now = Date.now()) {
   recordBoardResult(rows, ats, board, err?.firstPage === false ? 200 : err?.status, now);
 }
 
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// save is synchronous (its callers run from a sweep's `finally` and signal
+// handlers), so it takes the same directory lock pipeline.md uses through the
+// non-waiting variant and polls it.
+function withFileLockSync(file, fn, timeoutMs = 10_000) {
+  const lockDir = lockDirFor(file);
+  const deadline = Date.now() + timeoutMs;
+  let lock = null;
+  while (!(lock = tryAcquireDirLockSync(lockDir, { staleMs: 30_000, createParent: true, owner: { file } }))) {
+    if (Date.now() >= deadline) throw new Error(`dead-boards lock timeout: ${lockDir} held > ${timeoutMs}ms`);
+    sleepSync(50);
+  }
+  try { return fn(); } finally { lock.release(); }
+}
+
+/**
+ * Persist `rows`. Safe against concurrent sweeps of different ATS directories
+ * (daily-scan.sh runs greenhouse / ashby / lever side by side): each run holds
+ * a snapshot loaded at start, so a plain rewrite would erase whatever the
+ * others saved since. Under the lock the file is re-read and this run replaces
+ * only the `ats` values it changed (rows.touchedAts, set by recordBoardResult);
+ * every other ats's rows are taken from the file as it is now, not from this
+ * run's stale snapshot. A Map built by hand, with no touchedAts, is treated as
+ * owning every ats it holds.
+ */
 export function saveDeadBoards(file, rows) {
   mkdirSync(dirname(file), { recursive: true });
-  const body = [...rows.values()]
-    .sort((a, b) => a.ats.localeCompare(b.ats) || a.board.localeCompare(b.board))
-    .map((row) => `${row.ats}\t${row.board}\t${row.misses}\t${new Date(row.lastChecked).toISOString()}`);
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, `${DEAD_BOARD_HEADER}\n${body.length ? `${body.join('\n')}\n` : ''}`, 'utf8');
-  renameSync(tmp, file);
+  const owned = rows.touchedAts ?? new Set([...rows.values()].map((row) => row.ats));
+  withFileLockSync(file, () => {
+    const merged = new Map();
+    for (const [k, row] of rows) {
+      if (owned.has(row.ats)) merged.set(k, row);
+    }
+    for (const [k, row] of loadDeadBoards(file)) {
+      if (!owned.has(row.ats)) merged.set(k, row);
+    }
+    const body = [...merged.values()]
+      .sort((a, b) => a.ats.localeCompare(b.ats) || a.board.localeCompare(b.board))
+      .map((row) => `${row.ats}\t${row.board}\t${row.misses}\t${new Date(row.lastChecked).toISOString()}`);
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${DEAD_BOARD_HEADER}\n${body.length ? `${body.join('\n')}\n` : ''}`, 'utf8');
+    renameSync(tmp, file);
+  });
 }

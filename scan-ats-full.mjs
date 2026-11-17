@@ -277,7 +277,12 @@ export async function runGuarded(gate, key, fn) {
 // Anchored too (#3510): a sweep resumed from a different directory found no
 // checkpoint and silently restarted a multi-hour run from zero — the one failure
 // mode --resume exists to prevent.
-const CHECKPOINT_PATH = path.join(DATA_ROOT, 'data/cache/ats-full-checkpoint.json');
+// CAREER_OPS_ATS_FULL_CHECKPOINT gives each concurrent sweep its own file (ops/
+// daily-scan.sh runs one per ATS directory at once): one shared path would have
+// the runs overwrite each other's checkpoint and delete it when the first ends.
+const CHECKPOINT_PATH = process.env.CAREER_OPS_ATS_FULL_CHECKPOINT
+  ? path.resolve(process.env.CAREER_OPS_ATS_FULL_CHECKPOINT)
+  : path.join(DATA_ROOT, 'data/cache/ats-full-checkpoint.json');
 const CHECKPOINT_EVERY = 500;
 const DEAD_BOARDS_PATH = path.join(DATA_ROOT, 'data/dead-boards.tsv');
 // The seed scan's own memory, kept apart from the mass sweep's: it keys on
