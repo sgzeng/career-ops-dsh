@@ -111,21 +111,28 @@ console.log('stub ran: ' + spec);
   };
 
   try {
-    // 1. Default run: order, flags, one header and one exit= line per step.
+    // 1. Default run: wave order and flags. Steps inside one concurrent wave
+    // (wave 0's two checks, wave 2's directory sweeps) may start in any order,
+    // so those are compared as sets; the waves themselves are strictly ordered.
     const ok = run();
-    const expected = [
-      'validate-portals.mjs ',
-      'check-config-regression.mjs ',
-      'scan.mjs --since 14 --quiet',
-      'verify-portals.mjs ',
-      'discover-ats.mjs --in data/seeds/s1.yml --write --summary',
-      'scan-ats-full.mjs --ats greenhouse --since 14',
-      'scan-ats-full.mjs --ats ashby --since 14',
-      'scan-ats-full.mjs --ats lever --since 14',
-      'scan-ats-full.mjs --seeds yc,a16z --since 10',
+    const sweeps = ['greenhouse', 'ashby', 'lever', 'workable'].map((a) => `scan-ats-full.mjs --ats ${a} --since 14`);
+    const waves = [
+      ['validate-portals.mjs ', 'check-config-regression.mjs '],
+      ['scan.mjs --since 14 --quiet'],
+      ['verify-portals.mjs '],
+      ['discover-ats.mjs --in data/seeds/s1.yml --write --summary'],
+      sweeps,
+      ['scan-ats-full.mjs --seeds yc,a16z --since 10'],
     ];
-    JSON.stringify(ok.calls) === JSON.stringify(expected)
-      ? pass('default run: watchlist, health checks and seed resolution first, then greenhouse/ashby/lever sweeps, then the YC/a16z seeds')
+    const sameSet = (a, b) => a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n');
+    let cursor = 0;
+    const wavesOk = waves.every((wave) => {
+      const got = ok.calls.slice(cursor, cursor + wave.length);
+      cursor += wave.length;
+      return sameSet(got, wave);
+    }) && cursor === ok.calls.length;
+    wavesOk
+      ? pass('default run: preflight, then watchlist / health checks / seed resolution one by one, then the greenhouse/ashby/lever/workable sweeps together, then the YC/a16z seeds')
       : fail(`default run called ${JSON.stringify(ok.calls)}`);
     const exitLines = [
       /^scan\.mjs exit=0$/m,
@@ -134,6 +141,7 @@ console.log('stub ran: ' + spec);
       /^scan-ats-full\.mjs --ats greenhouse exit=0 \(\d+s\)$/m,
       /^scan-ats-full\.mjs --ats ashby exit=0 \(\d+s\)$/m,
       /^scan-ats-full\.mjs --ats lever exit=0 \(\d+s\)$/m,
+      /^scan-ats-full\.mjs --ats workable exit=0 \(\d+s\)$/m,
       /^scan-ats-full\.mjs exit=0$/m,
     ];
     exitLines.every((re) => re.test(ok.log))
@@ -173,14 +181,13 @@ console.log('stub ran: ' + spec);
         : fail(`time limit impl=${impl}: rc=${rc} elapsed=${hung.elapsed}\n${hung.log}`);
     }
 
-    // 5. The total budget: a sweep that eats it makes the rest skip.
+    // 5. The budget caps each directory's limit. The sweeps run side by side,
+    // so one slow directory no longer eats the others' time: all of them run.
     const slow = run({ STUB_SLOW: '--ats greenhouse', CAREER_OPS_FULL_SWEEP_BUDGET_SECS: '31' });
-    (/limit 31s\) ---/.test(slow.log)
-      && /full ATS sweep: ashby skipped \(the 31s budget is used up\)/.test(slow.log)
-      && /full ATS sweep: lever skipped/.test(slow.log)
-      && !slow.calls.some((c) => c.includes('--ats ashby') || c.includes('--ats lever'))
+    (['greenhouse', 'ashby', 'lever', 'workable'].every((a) => new RegExp(`--ats ${a} --since 14 \\(full public ${a} directory, limit 31s\\) ---`).test(slow.log))
+      && sweeps.every((c) => slow.calls.includes(c))
       && slow.calls.includes('scan-ats-full.mjs --seeds yc,a16z --since 10'))
-      ? pass('the budget caps the first sweep and skips the directories it leaves no room for')
+      ? pass('the budget caps every directory\'s limit, and a slow directory does not stop the others')
       : fail(`budget: ${JSON.stringify(slow.calls)}\n${slow.log}`);
 
     // 6. Env hygiene: junk numbers fall back, the ATS list and window are honoured.

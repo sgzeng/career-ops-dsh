@@ -16,10 +16,11 @@
 #           → discover-ats.mjs   — resolves data/seeds/*.yml (conference sponsors, a
 #                                  VC portfolio) to ATS boards, promotes hits into
 #                                  portals.yml → tracked_companies
-#   wave 2  scan-ats-full.mjs --ats greenhouse ‖ ashby ‖ lever — reverse discovery
-#           over the FULL public ATS directory (Feashliaa/job-board-aggregator),
+#   wave 2  scan-ats-full.mjs --ats greenhouse ‖ ashby ‖ lever ‖ workable — reverse
+#           discovery over the FULL public ATS directory (Feashliaa/job-board-aggregator;
+#           Workable: its one public XML feed of every tenant, www.workable.com),
 #           matched against the SAME title/location/level filters in portals.yml.
-#           One process per directory, three different API hosts, so they do not
+#           One process per directory, four different hosts, so they do not
 #           compete for one host's rate limit. This is the only wave where
 #           network steps overlap, and only because their hosts differ.
 #   wave 3  scan-ats-full.mjs --seeds yc,a16z — reverse discovery over the YC and
@@ -85,7 +86,7 @@
 #                                         concurrent waves)
 #   CAREER_OPS_FULL_SWEEP=0               skip wave 2 entirely (default: on)
 #   CAREER_OPS_FULL_SWEEP_ATS="a b c"     which directories (default:
-#                                         greenhouse ashby lever); one lane each
+#                                         greenhouse ashby lever workable); one lane each
 #   CAREER_OPS_FULL_SWEEP_SINCE=14        posting window in days (default 14,
 #                                         twice the weekly cadence: a skipped
 #                                         week or a killed sweep is re-covered
@@ -393,7 +394,7 @@ step_reeval() {
     echo "--- full ATS sweep: skipped (CAREER_OPS_FULL_SWEEP=0) ---"
   else
     # Unquoted on purpose: the value is a space-separated list of directories.
-    for ats in ${CAREER_OPS_FULL_SWEEP_ATS:-greenhouse ashby lever}; do
+    for ats in ${CAREER_OPS_FULL_SWEEP_ATS:-greenhouse ashby lever workable}; do
       lane "sweep-$ats" step_sweep "$ats"
     done
     join_wave "wave 2 (full ATS sweeps)"
